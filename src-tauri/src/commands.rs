@@ -53,7 +53,7 @@ pub fn get_displays(app: AppHandle) -> Result<Vec<crate::state::MonitorInfo>, St
             let name = m.name().map(|n| n.to_string()).unwrap_or_else(|| format!("Display {}", idx + 1));
             let pos = m.position();
             let size = m.size();
-            let is_primary = primary_name.map_or(idx == 0, |pn| pn == name);
+            let is_primary = primary_name.map_or(idx == 0, |pn| pn == &name);
 
             monitors.push(crate::state::MonitorInfo {
                 id: format!("display-{}", idx),

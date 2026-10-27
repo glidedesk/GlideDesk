@@ -8,6 +8,7 @@ use arboard::Clipboard;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
+#[allow(unused_imports)]
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 

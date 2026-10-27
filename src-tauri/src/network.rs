@@ -715,8 +715,11 @@ impl NetworkManager {
 
     pub async fn disconnect(&self) {
         self.flush_motion();
-        let mut guard = self.active_client.write();
-        if let Some(session) = guard.take() {
+        let session = {
+            let mut guard = self.active_client.write();
+            guard.take()
+        };
+        if let Some(session) = session {
             let bye = WireMessage {
                 t: "bye".to_string(),
                 v: Some(1),
