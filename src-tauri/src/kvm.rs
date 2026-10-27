@@ -47,12 +47,37 @@ impl KvmQueue {
     }
 }
 
-/// Native platform input injection implementation.
+/// Native platform input injection implementation with pre-login and lock screen desktop synchronization.
 pub struct NativeInputInjector;
 
 impl NativeInputInjector {
     #[cfg(windows)]
+    pub fn sync_input_desktop() {
+        use windows::Win32::Foundation::GetCurrentThreadId;
+        use windows::Win32::System::StationsAndDesktops::{
+            CloseDesktop, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_CONTROL_FLAGS,
+        };
+
+        unsafe {
+            // DESKTOP_READOBJECTS (0x0001) | DESKTOP_WRITEOBJECTS (0x0080) | DESKTOP_SWITCHDESKTOP (0x0100)
+            let access = 0x0001 | 0x0080 | 0x0100;
+            if let Ok(input_desktop) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, access) {
+                let cur_thread = GetCurrentThreadId();
+                let current_desktop = GetThreadDesktop(cur_thread);
+                if current_desktop != input_desktop {
+                    let _ = SetThreadDesktop(input_desktop);
+                }
+                let _ = CloseDesktop(input_desktop);
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn sync_input_desktop() {}
+
+    #[cfg(windows)]
     pub fn move_cursor_relative(dx: i32, dy: i32) {
+        Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
         };
@@ -83,6 +108,7 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn mouse_button(button: MouseButton, is_down: bool) {
+        Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
             MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
@@ -122,6 +148,7 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn mouse_wheel(dx: i32, dy: i32) {
+        Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL,
             MOUSEINPUT,
@@ -171,6 +198,7 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn key_event(vk: u16, is_down: bool, extended: bool) {
+        Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
             KEYEVENTF_KEYUP, VIRTUAL_KEY,
@@ -295,7 +323,8 @@ pub mod hook_engine {
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
         SetCursorPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK,
-        KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN, WH_KEYBOARD_LL,
+        KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WH_KEYBOARD_LL,
         WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
         WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
         WM_SYSKEYDOWN, WM_SYSKEYUP,
@@ -306,6 +335,20 @@ pub mod hook_engine {
     static mut APP_HANDLE: Option<AppHandle> = None;
     static mut APP_STATE: Option<AppState> = None;
     static mut NETWORK_MGR: Option<NetworkManager> = None;
+
+    pub fn get_virtual_desktop_bounds() -> (i32, i32, i32, i32) {
+        unsafe {
+            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if vw <= 0 || vh <= 0 {
+                (0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+            } else {
+                (vx, vy, vw, vh)
+            }
+        }
+    }
 
     pub fn start_hooks(app: AppHandle, state: AppState, network: NetworkManager) {
         unsafe {
@@ -362,16 +405,17 @@ pub mod hook_engine {
                 let has_peer = snap.client.is_some();
                 let is_driving = snap.input.where_input == "driving";
 
-                let screen_w = GetSystemMetrics(SM_CXSCREEN);
-                let screen_h = GetSystemMetrics(SM_CYSCREEN);
+                let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
+                let max_x = vx + vw;
+                let max_y = vy + vh;
 
                 if !is_driving && has_peer {
-                    // Edge check to switch into driving mode
+                    // Edge check across the entire virtual multi-monitor desktop
                     let crossed = match snap.layout.side.as_str() {
-                        "right" => m.pt.x >= screen_w - 2,
-                        "left" => m.pt.x <= 1,
-                        "top" => m.pt.y <= 1,
-                        "bottom" => m.pt.y >= screen_h - 2,
+                        "right" => m.pt.x >= max_x - 2,
+                        "left" => m.pt.x <= vx + 1,
+                        "top" => m.pt.y <= vy + 1,
+                        "bottom" => m.pt.y >= max_y - 2,
                         _ => false,
                     };
 
@@ -387,10 +431,7 @@ pub mod hook_engine {
                             dx: None, dy: None, b: None, k: None, code: None,
                             vk: None, mods: None, text: None, ts: None,
                         };
-                        let net_clone = net.clone();
-                        tokio::spawn(async move {
-                            net_clone.send_packet(take).await;
-                        });
+                        net.send_packet_sync(take);
                         return LRESULT(1);
                     }
                 } else if is_driving {
@@ -403,27 +444,21 @@ pub mod hook_engine {
                             LAST_PT = m.pt;
 
                             if dx.abs() > 0.0 || dy.abs() > 0.0 {
-                                let move_msg = WireMessage {
-                                    t: "k.mm".to_string(),
-                                    v: Some(1),
-                                    id: None, name: None, os: None, port: None, role: None,
-                                    dx: Some(dx), dy: Some(dy),
-                                    b: None, k: None, code: None,
-                                    vk: None, mods: None, text: None, ts: None,
-                                };
-                                let net_clone = net.clone();
-                                tokio::spawn(async move {
-                                    net_clone.send_packet(move_msg).await;
-                                });
+                                net.send_motion(dx, dy);
                             }
 
-                            // Keep cursor parked near edge
+                            // Keep cursor parked near edge of the virtual desktop
                             let park_x = match snap.layout.side.as_str() {
-                                "right" => screen_w - 5,
-                                "left" => 5,
+                                "right" => max_x - 5,
+                                "left" => vx + 5,
                                 _ => m.pt.x,
                             };
-                            let _ = SetCursorPos(park_x, m.pt.y);
+                            let park_y = match snap.layout.side.as_str() {
+                                "top" => vy + 5,
+                                "bottom" => max_y - 5,
+                                _ => m.pt.y,
+                            };
+                            let _ = SetCursorPos(park_x, park_y);
                             return LRESULT(1);
                         }
                         WM_LBUTTONDOWN | WM_LBUTTONUP => {
@@ -435,10 +470,7 @@ pub mod hook_engine {
                                 dx: None, dy: None, b: Some(0), k: None, code: None,
                                 vk: None, mods: None, text: None, ts: None,
                             };
-                            let net_clone = net.clone();
-                            tokio::spawn(async move {
-                                net_clone.send_packet(btn_msg).await;
-                            });
+                            net.send_packet_sync(btn_msg);
                             return LRESULT(1);
                         }
                         WM_RBUTTONDOWN | WM_RBUTTONUP => {
@@ -450,10 +482,7 @@ pub mod hook_engine {
                                 dx: None, dy: None, b: Some(1), k: None, code: None,
                                 vk: None, mods: None, text: None, ts: None,
                             };
-                            let net_clone = net.clone();
-                            tokio::spawn(async move {
-                                net_clone.send_packet(btn_msg).await;
-                            });
+                            net.send_packet_sync(btn_msg);
                             return LRESULT(1);
                         }
                         WM_MBUTTONDOWN | WM_MBUTTONUP => {
@@ -465,10 +494,7 @@ pub mod hook_engine {
                                 dx: None, dy: None, b: Some(2), k: None, code: None,
                                 vk: None, mods: None, text: None, ts: None,
                             };
-                            let net_clone = net.clone();
-                            tokio::spawn(async move {
-                                net_clone.send_packet(btn_msg).await;
-                            });
+                            net.send_packet_sync(btn_msg);
                             return LRESULT(1);
                         }
                         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
@@ -486,10 +512,7 @@ pub mod hook_engine {
                                 b: None, k: None, code: None,
                                 vk: None, mods: None, text: None, ts: None,
                             };
-                            let net_clone = net.clone();
-                            tokio::spawn(async move {
-                                net_clone.send_packet(wh_msg).await;
-                            });
+                            net.send_packet_sync(wh_msg);
                             return LRESULT(1);
                         }
                         _ => {}
@@ -524,15 +547,11 @@ pub mod hook_engine {
                             dx: None, dy: None, b: None, k: None, code: None,
                             vk: None, mods: None, text: None, ts: None,
                         };
-                        let net_clone = net.clone();
-                        tokio::spawn(async move {
-                            net_clone.send_packet(home_msg).await;
-                        });
+                        net.send_packet_sync(home_msg);
 
-                        // Center cursor on local screen
-                        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-                        let screen_h = GetSystemMetrics(SM_CYSCREEN);
-                        let _ = SetCursorPos(screen_w / 2, screen_h / 2);
+                        // Center cursor on local virtual desktop
+                        let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
+                        let _ = SetCursorPos(vx + vw / 2, vy + vh / 2);
                         return LRESULT(1);
                     }
                 }
@@ -547,10 +566,7 @@ pub mod hook_engine {
                         vk: Some(k.vkCode),
                         mods: None, text: None, ts: None,
                     };
-                    let net_clone = net.clone();
-                    tokio::spawn(async move {
-                        net_clone.send_packet(key_msg).await;
-                    });
+                    net.send_packet_sync(key_msg);
                     return LRESULT(1);
                 }
             }

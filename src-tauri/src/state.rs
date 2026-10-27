@@ -60,6 +60,8 @@ pub struct KvmState {
     pub speed: f32,
     #[serde(rename = "reverseScroll")]
     pub reverse_scroll: bool,
+    #[serde(rename = "lockScreen")]
+    pub lock_screen: bool,
 }
 
 impl Default for KvmState {
@@ -74,6 +76,7 @@ impl Default for KvmState {
             ble: true,
             speed: 1.0,
             reverse_scroll: false,
+            lock_screen: true,
         }
     }
 }
@@ -143,6 +146,30 @@ pub struct AboutState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorInfo {
+    pub id: String,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(rename = "scaleFactor")]
+    pub scale_factor: f64,
+    #[serde(rename = "isPrimary")]
+    pub is_primary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopBounds {
+    pub min_x: i32,
+    pub min_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FullState {
     pub paired: Vec<PeerInfo>,
     pub found: Vec<PeerInfo>,
@@ -152,6 +179,7 @@ pub struct FullState {
     pub keys: KeysState,
     pub updates: UpdatesView,
     pub about: AboutState,
+    pub displays: Vec<MonitorInfo>,
     #[serde(rename = "macName")]
     pub mac_name: String,
     #[serde(rename = "activeTab")]
@@ -187,7 +215,7 @@ impl AppState {
             updates: UpdatesView::default(),
             about: AboutState {
                 app: AppInfo {
-                    version: "1.0.0".to_string(),
+                    version: "1.1.0".to_string(),
                     name: "GlideDesk".to_string(),
                     arch: arch.clone(),
                     runtime: "GlideDesk (Tauri v2 + Rust Native Webview)".to_string(),
@@ -198,9 +226,10 @@ impl AppState {
                     arch,
                 },
             },
+            displays: Vec::new(),
             mac_name: host,
             active_tab: "overview".to_string(),
-            version: "1.0.0".to_string(),
+            version: "1.1.0".to_string(),
         };
 
         Self {

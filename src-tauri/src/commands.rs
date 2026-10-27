@@ -34,9 +34,40 @@ pub fn set_kvm(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Re
         if let Some(rev) = partial.get("reverseScroll").and_then(|v| v.as_bool()) {
             s.input.reverse_scroll = rev;
         }
+        if let Some(lock_screen) = partial.get("lockScreen").and_then(|v| v.as_bool()) {
+            s.input.lock_screen = lock_screen;
+        }
     }
     push_state(&app, &state);
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_displays(app: AppHandle) -> Result<Vec<crate::state::MonitorInfo>, String> {
+    let mut monitors = Vec::new();
+    if let Ok(available) = app.available_monitors() {
+        let primary = app.primary_monitor().ok().flatten();
+        let primary_name = primary.as_ref().and_then(|p| p.name().as_deref());
+
+        for (idx, m) in available.iter().enumerate() {
+            let name = m.name().map(|n| n.to_string()).unwrap_or_else(|| format!("Display {}", idx + 1));
+            let pos = m.position();
+            let size = m.size();
+            let is_primary = primary_name.map_or(idx == 0, |pn| pn == name);
+
+            monitors.push(crate::state::MonitorInfo {
+                id: format!("display-{}", idx),
+                name,
+                x: pos.x,
+                y: pos.y,
+                width: size.width,
+                height: size.height,
+                scale_factor: m.scale_factor(),
+                is_primary,
+            });
+        }
+    }
+    Ok(monitors)
 }
 
 #[tauri::command]

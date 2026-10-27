@@ -5,12 +5,13 @@
 use crate::state::{AppState, PeerInfo};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{accept_async, connect_async};
@@ -419,6 +420,41 @@ impl MeshServer {
     }
 }
 
+/// Motion coalescer accumulating sub-millisecond mouse deltas during high frequency moves
+/// or backpressure on the network channel.
+#[derive(Debug, Default)]
+pub struct MotionCoalescer {
+    pub accum_dx: f64,
+    pub accum_dy: f64,
+}
+
+impl MotionCoalescer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add(&mut self, dx: f64, dy: f64) {
+        self.accum_dx += dx;
+        self.accum_dy += dy;
+    }
+
+    pub fn reset(&mut self) {
+        self.accum_dx = 0.0;
+        self.accum_dy = 0.0;
+    }
+
+    pub fn pending(&self) -> bool {
+        self.accum_dx.abs() > 0.001 || self.accum_dy.abs() > 0.001
+    }
+
+    pub fn take(&mut self) -> (f64, f64) {
+        let res = (self.accum_dx, self.accum_dy);
+        self.accum_dx = 0.0;
+        self.accum_dy = 0.0;
+        res
+    }
+}
+
 /// Active client connection to a remote host.
 pub struct ActiveClientSession {
     pub tx: mpsc::Sender<WireMessage>,
@@ -428,7 +464,8 @@ pub struct ActiveClientSession {
 pub struct NetworkManager {
     app: AppHandle,
     state: AppState,
-    active_client: Arc<Mutex<Option<ActiveClientSession>>>,
+    active_client: Arc<RwLock<Option<ActiveClientSession>>>,
+    motion: Arc<Mutex<MotionCoalescer>>,
     local_id: String,
     local_name: String,
 }
@@ -441,7 +478,8 @@ impl NetworkManager {
         Self {
             app,
             state,
-            active_client: Arc::new(Mutex::new(None)),
+            active_client: Arc::new(RwLock::new(None)),
+            motion: Arc::new(Mutex::new(MotionCoalescer::new())),
             local_id,
             local_name,
         }
@@ -485,9 +523,10 @@ impl NetworkManager {
         let (ws, _) = connect_async(&url).await.map_err(|e| format!("Failed to connect: {}", e))?;
         let (mut write, mut read) = ws.split();
 
-        let (out_tx, mut out_rx) = mpsc::channel::<WireMessage>(256);
+        // High-throughput 2048 bounded mpsc channel with backpressure coalescing
+        let (out_tx, mut out_rx) = mpsc::channel::<WireMessage>(2048);
         {
-            let mut guard = self.active_client.lock().await;
+            let mut guard = self.active_client.write();
             *guard = Some(ActiveClientSession { tx: out_tx.clone() });
         }
 
@@ -518,7 +557,7 @@ impl NetworkManager {
                 tokio::select! {
                     _ = heartbeat.tick() => {
                         if tracker.is_stale() {
-                            log::warn!("[MeshClient] Remote peer heartbeat timeout");
+                            log::warn!("[MeshClient] Remote peer heartbeat timeout (12s silence)");
                             break;
                         }
                         let ping = WireMessage {
@@ -561,8 +600,10 @@ impl NetworkManager {
                 }
             }
 
-            let mut guard = client_lock.lock().await;
-            *guard = None;
+            {
+                let mut guard = client_lock.write();
+                *guard = None;
+            }
             state.set_client(None);
             state.set_where_input("home");
             let snap = state.snapshot();
@@ -572,15 +613,109 @@ impl NetworkManager {
         Ok(())
     }
 
+    /// Fast non-blocking relative motion dispatch with delta coalescing under backpressure.
+    /// Can be safely invoked directly inside OS mouse hook procedures without async runtime overhead.
+    pub fn send_motion(&self, dx: f64, dy: f64) {
+        let mut motion = self.motion.lock();
+        motion.add(dx, dy);
+
+        // Coalesce tiny micro-jitters; dispatch when accumulated delta reaches threshold
+        if motion.accum_dx.abs() >= 0.5 || motion.accum_dy.abs() >= 0.5 {
+            let tx_opt = {
+                let guard = self.active_client.read();
+                guard.as_ref().map(|s| s.tx.clone())
+            };
+
+            if let Some(tx) = tx_opt {
+                let (cdx, cdy) = motion.take();
+                let msg = WireMessage {
+                    t: "k.mm".to_string(),
+                    v: Some(1),
+                    id: None, name: None, os: None, port: None, role: None,
+                    dx: Some(cdx), dy: Some(cdy),
+                    b: None, k: None, code: None,
+                    vk: None, mods: None, text: None, ts: None,
+                };
+                match tx.try_send(msg) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(dropped)) => {
+                        // Channel backpressure: coalesce dropped motion deltas back into accumulator
+                        if let (Some(rx), Some(ry)) = (dropped.dx, dropped.dy) {
+                            motion.add(rx, ry);
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        motion.reset();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Flushes any pending accumulated motion prior to sending mouse clicks, wheel, or keystrokes.
+    pub fn flush_motion(&self) {
+        let mut motion = self.motion.lock();
+        if !motion.pending() {
+            return;
+        }
+
+        let tx_opt = {
+            let guard = self.active_client.read();
+            guard.as_ref().map(|s| s.tx.clone())
+        };
+
+        if let Some(tx) = tx_opt {
+            let (cdx, cdy) = motion.take();
+            let msg = WireMessage {
+                t: "k.mm".to_string(),
+                v: Some(1),
+                id: None, name: None, os: None, port: None, role: None,
+                dx: Some(cdx), dy: Some(cdy),
+                b: None, k: None, code: None,
+                vk: None, mods: None, text: None, ts: None,
+            };
+            let _ = tx.try_send(msg);
+        } else {
+            motion.reset();
+        }
+    }
+
+    /// Fast non-blocking event send with motion flush. If channel buffer is full,
+    /// falls back to background async task to guarantee delivery of critical inputs (clicks, keys).
+    pub fn send_packet_sync(&self, pkt: WireMessage) {
+        self.flush_motion();
+        let tx_opt = {
+            let guard = self.active_client.read();
+            guard.as_ref().map(|s| s.tx.clone())
+        };
+
+        if let Some(tx) = tx_opt {
+            match tx.try_send(pkt) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(p)) => {
+                    tokio::spawn(async move {
+                        let _ = tx.send(p).await;
+                    });
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+            }
+        }
+    }
+
     pub async fn send_packet(&self, pkt: WireMessage) {
-        let guard = self.active_client.lock().await;
-        if let Some(ref session) = *guard {
-            let _ = session.tx.send(pkt).await;
+        self.flush_motion();
+        let tx_opt = {
+            let guard = self.active_client.read();
+            guard.as_ref().map(|s| s.tx.clone())
+        };
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(pkt).await;
         }
     }
 
     pub async fn disconnect(&self) {
-        let mut guard = self.active_client.lock().await;
+        self.flush_motion();
+        let mut guard = self.active_client.write();
         if let Some(session) = guard.take() {
             let bye = WireMessage {
                 t: "bye".to_string(),

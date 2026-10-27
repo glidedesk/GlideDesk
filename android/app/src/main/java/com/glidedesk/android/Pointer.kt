@@ -33,7 +33,7 @@ class Pointer(core: Core) : Feature(core) {
 
     override fun onMessage(t: String, m: JSONObject): Boolean {
         if (t != Proto.T.PHONE_POINTER) return false
-        if (!m.optBoolean("on", true)) hide() else show(m.optInt("x"), m.optInt("y"))
+        if (!m.optBoolean("on", true)) hide() else main.post { show(m.optInt("x"), m.optInt("y")) }
         return true
     }
 

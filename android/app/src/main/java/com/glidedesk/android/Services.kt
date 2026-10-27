@@ -28,9 +28,18 @@ class GlideService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (isExiting || intent?.action == ActionReceiver.EXIT) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        return START_STICKY
+    }
 
     companion object {
+        @Volatile var isExiting = false
+
         fun start(ctx: Context) {
             runCatching { ctx.startForegroundService(Intent(ctx, GlideService::class.java)) }
                 .onFailure { Log.w("GlideDesk", "start service: ${it.message}") }
@@ -83,10 +92,15 @@ class ActionReceiver : BroadcastReceiver() {
     // the process, so nothing reconnects or comes back until GlideDesk is opened again (or the phone
     // restarts: BootReceiver).
     private fun exit(ctx: Context, core: Core) {
+        GlideService.isExiting = true
         core.disconnect()
-        ctx.stopService(Intent(ctx, GlideService::class.java))
+        runCatching {
+            val intent = Intent(ctx, GlideService::class.java).apply { action = EXIT }
+            ctx.startService(intent)
+            ctx.stopService(Intent(ctx, GlideService::class.java))
+        }
         ctx.getSystemService(NotificationManager::class.java).cancelAll()
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ android.os.Process.killProcess(android.os.Process.myPid()) }, 600)
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ android.os.Process.killProcess(android.os.Process.myPid()) }, 500)
     }
 
     companion object {

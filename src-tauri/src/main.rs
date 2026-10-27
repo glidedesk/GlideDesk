@@ -81,6 +81,7 @@ fn main() {
             commands::cancel_pair,
             commands::forget,
             commands::wake_peer,
+            commands::get_displays,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GlideDesk application");

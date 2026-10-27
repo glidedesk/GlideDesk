@@ -46,6 +46,37 @@ Traditional software KVMs bundle full Chromium and Node.js runtimes, leading to 
 
 ---
 
+## 📥 Installation
+
+### 🍎 macOS (Apple Silicon & Intel)
+
+```sh
+# Option 1: 1-line Terminal installer (bypasses Gatekeeper quarantine, headless-safe)
+curl -fsSL https://raw.githubusercontent.com/benzntech/TwinFlow/main/mac/scripts/install.sh | bash
+
+# Option 2: Homebrew Cask
+brew install --cask benzntech/twinflow/glidedesk
+```
+*Manual download:* [`GlideDesk_1.0.0_aarch64.dmg`](https://github.com/benzntech/TwinFlow/releases/download/v1.0.0/GlideDesk_1.0.0_aarch64.dmg)
+
+### 🪟 Windows (10 / 11)
+
+- **Installer:** [`GlideDesk_1.0.0_x64-setup.exe`](https://github.com/benzntech/TwinFlow/releases/download/v1.0.0/GlideDesk_1.0.0_x64-setup.exe)
+- **MSI Package:** [`GlideDesk_1.0.0_x64_en-US.msi`](https://github.com/benzntech/TwinFlow/releases/download/v1.0.0/GlideDesk_1.0.0_x64_en-US.msi)
+- **Portable:** [`GlideDesk-portable-x64.exe`](https://github.com/benzntech/TwinFlow/releases/download/v1.0.0/GlideDesk-portable-x64.exe)
+
+### 🐧 Linux (Ubuntu, Debian, Fedora, Arch)
+
+- **AppImage (Universal):** [`GlideDesk_1.0.0_amd64.AppImage`](https://github.com/benzntech/TwinFlow/releases/download/v1.0.0/GlideDesk_1.0.0_amd64.AppImage)
+- **Debian / Ubuntu:** [`GlideDesk_1.0.0_amd64.deb`](https://github.com/benzntech/TwinFlow/releases/download/v1.0.0/GlideDesk_1.0.0_amd64.deb)
+
+### 📱 Android Companion
+
+- **Standard APK:** [`GlideDesk-1.0.0.apk`](https://github.com/benzntech/TwinFlow/releases/download/v1.0.0/GlideDesk-1.0.0.apk)
+- **Full APK (Notifications + Accessibility KVM):** [`GlideDesk-1.0.0-full.apk`](https://github.com/benzntech/TwinFlow/releases/download/v1.0.0/GlideDesk-1.0.0-full.apk)
+
+---
+
 ## ✨ Features
 
 - **Seamless Monitor Edge-Crossing**: Glide your cursor naturally across physical screens (Left, Right, Top, Bottom).
