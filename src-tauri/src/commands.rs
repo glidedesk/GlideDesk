@@ -47,13 +47,13 @@ pub fn get_displays(app: AppHandle) -> Result<Vec<crate::state::MonitorInfo>, St
     let mut monitors = Vec::new();
     if let Ok(available) = app.available_monitors() {
         let primary = app.primary_monitor().ok().flatten();
-        let primary_name = primary.as_ref().and_then(|p| p.name().as_deref());
+        let primary_name = primary.as_ref().and_then(|p| p.name().map(|n| n.to_string()));
 
         for (idx, m) in available.iter().enumerate() {
             let name = m.name().map(|n| n.to_string()).unwrap_or_else(|| format!("Display {}", idx + 1));
             let pos = m.position();
             let size = m.size();
-            let is_primary = primary_name.map_or(idx == 0, |pn| pn == &name);
+            let is_primary = primary_name.as_deref().map_or(idx == 0, |pn| pn == name);
 
             monitors.push(crate::state::MonitorInfo {
                 id: format!("display-{}", idx),
