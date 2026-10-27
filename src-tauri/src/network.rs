@@ -433,6 +433,7 @@ impl MotionCoalescer {
         Self::default()
     }
 
+    #[allow(dead_code)]
     pub fn add(&mut self, dx: f64, dy: f64) {
         self.accum_dx += dx;
         self.accum_dy += dy;
@@ -615,6 +616,7 @@ impl NetworkManager {
 
     /// Fast non-blocking relative motion dispatch with delta coalescing under backpressure.
     /// Can be safely invoked directly inside OS mouse hook procedures without async runtime overhead.
+    #[allow(dead_code)]
     pub fn send_motion(&self, dx: f64, dy: f64) {
         let mut motion = self.motion.lock();
         motion.add(dx, dy);
@@ -682,6 +684,7 @@ impl NetworkManager {
 
     /// Fast non-blocking event send with motion flush. If channel buffer is full,
     /// falls back to background async task to guarantee delivery of critical inputs (clicks, keys).
+    #[allow(dead_code)]
     pub fn send_packet_sync(&self, pkt: WireMessage) {
         self.flush_motion();
         let tx_opt = {

@@ -19,6 +19,7 @@ pub enum MouseButton {
     Middle,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum KvmEvent {
     MouseMove { dx: i32, dy: i32 },
@@ -30,10 +31,12 @@ pub enum KvmEvent {
 }
 
 /// Bounded queue for KVM events with motion coalescing.
+#[allow(dead_code)]
 pub struct KvmQueue {
     sender: mpsc::Sender<KvmEvent>,
 }
 
+#[allow(dead_code)]
 impl KvmQueue {
     pub fn new(capacity: usize) -> (Self, mpsc::Receiver<KvmEvent>) {
         let (tx, rx) = mpsc::channel(capacity);
@@ -73,6 +76,7 @@ impl NativeInputInjector {
         }
     }
 
+    #[allow(dead_code)]
     #[cfg(not(windows))]
     pub fn sync_input_desktop() {}
 

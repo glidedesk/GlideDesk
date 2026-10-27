@@ -159,6 +159,7 @@ pub struct MonitorInfo {
     pub is_primary: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopBounds {
     pub min_x: i32,
