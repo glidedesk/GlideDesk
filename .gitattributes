@@ -1,0 +1,10 @@
+# Default: normalize text to LF
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+
+# GitHub Linguist Language Stats:
+# Highlight Rust (src-tauri) as the primary language by vendoring frontend UI assets & mobile companion.
+ui/** linguist-vendored
+android/** linguist-vendored

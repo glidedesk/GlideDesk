@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sc_adb_short">Wireless debugging</string>
+    <string name="sc_adb_long">Turn on wireless debugging</string>
+    <string name="sc_screen_short">Computer screen</string>
+    <string name="sc_screen_long">Show the computer’s screen</string>
+    <string name="input_service">GlideDesk: your computer’s mouse and keyboard</string>
+    <string name="input_service_desc">Lets the computer you paired in GlideDesk tap, scroll and type on this phone with its mouse and keyboard when wireless debugging isn’t available (for example over Bluetooth). GlideDesk only acts on what that computer sends while you share its cursor; it doesn’t read your screen.</string>
+</resources>
