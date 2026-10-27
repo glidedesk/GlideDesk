@@ -174,10 +174,10 @@ pub fn open_update(state: State<'_, AppState>, app: AppHandle) -> Result<(), Str
 pub fn open_link(key: String, app: AppHandle) -> Result<(), String> {
     let url = match key.as_str() {
         "portfolio" => "https://github.com/benzntech",
-        "github" => "https://github.com/glidedesk/glidedesk",
-        "releases" => "https://github.com/glidedesk/glidedesk/releases",
-        "licence" => "https://github.com/glidedesk/glidedesk/blob/main/LICENSE",
-        _ => "https://github.com/glidedesk/glidedesk",
+        "github" => "https://github.com/benzntech/TwinFlow",
+        "releases" => "https://github.com/benzntech/TwinFlow/releases",
+        "licence" => "https://github.com/benzntech/TwinFlow/blob/main/LICENSE",
+        _ => "https://github.com/benzntech/TwinFlow",
     };
     app.shell().open(url, None).map_err(|e| e.to_string())
 }

@@ -7,7 +7,7 @@
         android:icon="@mipmap/ic_launcher"
         android:shortcutShortLabel="@string/sc_adb_short"
         android:shortcutLongLabel="@string/sc_adb_long">
-        <intent android:action="android.intent.action.VIEW" android:targetPackage="com.twindesk.android" android:targetClass="com.twindesk.android.AdbActivity" />
+        <intent android:action="android.intent.action.VIEW" android:targetPackage="com.glidedesk.android" android:targetClass="com.glidedesk.android.AdbActivity" />
     </shortcut>
     <shortcut
         android:shortcutId="screen"
@@ -15,10 +15,10 @@
         android:icon="@mipmap/ic_launcher"
         android:shortcutShortLabel="@string/sc_screen_short"
         android:shortcutLongLabel="@string/sc_screen_long">
-        <intent android:action="android.intent.action.VIEW" android:targetPackage="com.twindesk.android" android:targetClass="com.twindesk.android.ViewerActivity" />
+        <intent android:action="android.intent.action.VIEW" android:targetPackage="com.glidedesk.android" android:targetClass="com.glidedesk.android.ViewerActivity" />
     </shortcut>
-    <share-target android:targetClass="com.twindesk.android.ShareActivity">
+    <share-target android:targetClass="com.glidedesk.android.ShareActivity">
         <data android:mimeType="*/*" />
-        <category android:name="com.twindesk.android.SHARE_TARGET" />
+        <category android:name="com.glidedesk.android.SHARE_TARGET" />
     </share-target>
 </shortcuts>

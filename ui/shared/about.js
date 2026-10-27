@@ -10,9 +10,9 @@ const fs = require('fs');
 
 const LINKS = {
   portfolio: 'https://github.com/benzntech',
-  github: 'https://github.com/glidedesk/glidedesk',
-  releases: 'https://github.com/glidedesk/glidedesk/releases',
-  licence: 'https://github.com/glidedesk/glidedesk/blob/main/LICENSE',
+  github: 'https://github.com/benzntech/TwinFlow',
+  releases: 'https://github.com/benzntech/TwinFlow/releases',
+  licence: 'https://github.com/benzntech/TwinFlow/blob/main/LICENSE',
 };
 
 const NAME = { darwin: 'GlideDesk for macOS', win32: 'GlideDesk for Windows', linux: 'GlideDesk for Linux' };

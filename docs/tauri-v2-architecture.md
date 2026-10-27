@@ -1,22 +1,22 @@
-﻿# Tauri v2 + Rust Architecture Specification
+# Tauri v2 + Rust Architecture Specification
 
-> **Context:** This architecture directly addresses [Issue #58: "Proposal: Evaluate Tauri v2 + Rust architecture to replace Electron"](https://github.com/glidedesk/glidedesk/issues/58).
+> **Context:** Lightweight, high-performance Tauri v2 + Rust architecture replacing legacy runtimes.
 > **Implementation Status:** **Phases 1, 2, and 3 are 100% complete.**
 
 ---
 
 ## 1. Executive Summary
 
-TwinDesk delivers an exceptional multi-device desktop experience across macOS, Windows, and Linux. However, bundling full Chromium and Node.js runtimes imposes structural trade-offs:
-- **Memory Footprint**: Multi-process Electron typically occupies 400 MB–1 GB+ RAM across 5–6 sub-processes.
-- **V8 Garbage Collection (GC) Jitter**: Stop-The-World GC passes under system memory pressure can delay 125–1000 Hz cursor streaming, occasionally causing heartbeat timeout drops (`TIMEOUT_MS`).
-- **Distribution Size**: ~150 MB installers due to bundled Chromium.
+GlideDesk delivers an exceptional multi-device desktop experience across macOS, Windows, and Linux.
+- **Memory Footprint**: Native Webview container typically occupies ~28–45 MB RAM in a single process.
+- **Zero Garbage Collection (GC) Jitter**: Deterministic Rust memory management eliminates GC pauses for microsecond cursor streaming.
+- **Distribution Size**: ~10–16 MB installers compared to 150 MB+ monolithic packages.
 
-This Tauri v2 + Rust architecture completely resolves these constraints while preserving 100% of existing frontend code:
+This Tauri v2 + Rust architecture completely achieves optimal performance while preserving clean modular frontend code:
 
 | Roadmap Phase | Core Capabilities | Status |
 | :--- | :--- | :--- |
-| **Phase 1: Proof of Concept & UI Shell** | Native OS Webview container, zero-change HTML/JS reuse, `shared/tauri-bridge.js` polyfill, multi-platform CI | **100% Complete** |
+| **Phase 1: UI Shell & Webview Container** | Native OS Webview container, zero-change HTML/JS reuse, `shared/tauri-bridge.js` polyfill, multi-platform CI | **100% Complete** |
 | **Phase 2: Async Networking Engine in Rust** | UDP LAN peer discovery beacon (port `47801`), probe responder, async Tokio + Tungstenite WebSocket server (port `47800`), resilient heartbeat tracker (12s timeout), wire protocol serialization | **100% Complete** |
 | **Phase 3: Native KVM & Helper Consolidation** | Win32 `SendInput` relative/button/wheel/key injector, low-level `SetWindowsHookExW` hooks, edge-crossing detection, cursor parking & swallow, hotkey switch, `arboard` real-time clipboard daemon | **100% Complete** |
 
@@ -24,7 +24,7 @@ This Tauri v2 + Rust architecture completely resolves these constraints while pr
 
 ## 2. Benchmark Comparison
 
-| Metric / Attribute | TwinDesk (Electron) | TwinDesk (Tauri v2 + Rust) | Improvement |
+| Metric / Attribute | Legacy (Electron) | GlideDesk (Tauri v2 + Rust) | Improvement |
 | :--- | :--- | :--- | :--- |
 | **Idle Memory Footprint** | ~500 MB – 1.0 GB (5+ processes) | **~28 MB – 45 MB** (1 process) | **~15–20x lower RAM** |
 | **Garbage Collection (GC)** | V8 Stop-The-World GC passes | **Zero GC** (Deterministic deallocation) | **Eliminates input stutter** |
@@ -38,7 +38,7 @@ This Tauri v2 + Rust architecture completely resolves these constraints while pr
 ## 3. Architecture & File Layout
 
 ```
-TwinDesk/
+GlideDesk/
 ├── src-tauri/                       # Native Tauri v2 backend
 │   ├── Cargo.toml                   # Rust package manifest & dependencies
 │   ├── build.rs                     # Tauri build script

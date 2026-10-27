@@ -2,7 +2,7 @@
   <img src="src-tauri/icons/128x128@2x.png" width="100" alt="GlideDesk icon">
 </p>
 
-<h1 align="center"><a href="https://github.com/glidedesk/glidedesk">GlideDesk</a></h1>
+<h1 align="center"><a href="https://github.com/benzntech/TwinFlow">GlideDesk</a></h1>
 
 <p align="center">
   <b>Lightweight, Zero-Latency Software KVM (Tauri v2 + Rust)</b><br>
@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Release" src="https://img.shields.io/github/v/release/glidedesk/glidedesk?color=00c853">
+  <img alt="Release" src="https://img.shields.io/github/v/release/benzntech/TwinFlow?color=00c853">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.78%2B-dea584">
   <img alt="Tauri v2" src="https://img.shields.io/badge/Tauri-v2.0-24c8db">
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-black">
@@ -79,8 +79,8 @@ GlideDesk includes a companion Android app (`android/`) for multi-device continu
 ### Quick Start
 ```bash
 # Clone the repository
-git clone https://github.com/glidedesk/glidedesk.git
-cd glidedesk
+git clone https://github.com/benzntech/TwinFlow.git
+cd TwinFlow
 
 # Install dependencies
 npm install

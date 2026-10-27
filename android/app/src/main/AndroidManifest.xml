@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!-- GlideDesk — Copyright (C) 2026 Benson K B. GPL-3.0, see LICENSE. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
@@ -142,7 +142,7 @@
             android:taskAffinity="" />
 
         <service
-            android:name=".TwinService"
+            android:name=".GlideService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 

@@ -1,4 +1,4 @@
-﻿// GlideDesk — Copyright (C) 2026 Benson K B. GPL-3.0, see LICENSE.
+// GlideDesk — Copyright (C) 2026 Benson K B. GPL-3.0, see LICENSE.
 // The Remote page (RemoteActivity): this device as the computer's touchpad and keyboard, or a
 // gamepad whose sticks and buttons press the computer's keys. Everything goes out as remote.*
 // (relative, like the computers' own mouse and keyboard sharing); the computer answers
@@ -54,7 +54,7 @@
     $('name').textContent = game && opts.bt ? `Bluetooth gamepad · ${opts.btName || 'connected'}`
       : `${game ? (real ? 'Gamepad (real)' : 'Gamepad') : 'Touchpad'} · ${opts.name}`;
     const note = game && opts.bt ? ''
-      : !opts.connected ? `Not connected to ${opts.name}. Connect from TwinDesk’s Overview.`
+      : !opts.connected ? `Not connected to ${opts.name}. Connect from GlideDesk’s Overview.`
       : allowed === false ? (why || `${opts.name} doesn’t take input from ${opts.me}. On ${opts.name}, turn on Remote in GlideDesk.`)
         : allowed === null && (opts.os === 'mac' || opts.os === 'linux') ? `${opts.name} doesn’t answer the remote: update GlideDesk there.`
           : '';
