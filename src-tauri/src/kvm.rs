@@ -57,19 +57,21 @@ pub struct NativeInputInjector;
 impl NativeInputInjector {
     #[cfg(windows)]
     pub fn sync_input_desktop() {
-        use windows::Win32::Foundation::GetCurrentThreadId;
+        use windows::Win32::System::Threading::GetCurrentThreadId;
         use windows::Win32::System::StationsAndDesktops::{
-            CloseDesktop, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_CONTROL_FLAGS,
+            CloseDesktop, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop,
+            DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
         };
 
         unsafe {
             // DESKTOP_READOBJECTS (0x0001) | DESKTOP_WRITEOBJECTS (0x0080) | DESKTOP_SWITCHDESKTOP (0x0100)
-            let access = 0x0001 | 0x0080 | 0x0100;
+            let access = DESKTOP_ACCESS_FLAGS(0x0001 | 0x0080 | 0x0100);
             if let Ok(input_desktop) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, access) {
                 let cur_thread = GetCurrentThreadId();
-                let current_desktop = GetThreadDesktop(cur_thread);
-                if current_desktop != input_desktop {
-                    let _ = SetThreadDesktop(input_desktop);
+                if let Ok(current_desktop) = GetThreadDesktop(cur_thread) {
+                    if current_desktop != input_desktop {
+                        let _ = SetThreadDesktop(input_desktop);
+                    }
                 }
                 let _ = CloseDesktop(input_desktop);
             }
@@ -326,13 +328,13 @@ pub mod hook_engine {
     use super::*;
     use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
+        CallNextHookEx, DispatchMessageW, GetMessageW, GetSystemMetrics,
         SetCursorPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK,
         KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN, SM_CXVIRTUALSCREEN,
         SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WH_KEYBOARD_LL,
-        WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+        WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
         WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-        WM_SYSKEYDOWN, WM_SYSKEYUP,
+        WM_SYSKEYDOWN,
     };
 
     static mut MOUSE_HOOK: Option<HHOOK> = None;
