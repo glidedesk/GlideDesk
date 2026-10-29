@@ -1,0 +1,55 @@
+name: Build Homebrew Cask
+
+# Generates and validates Casks/glidedesk.rb with checksums from the latest release DMGs.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose DMGs to package in the Cask (e.g. v1.0.0).
+        required: true
+        default: 'v1.0.0'
+      ref:
+        description: Branch to check out.
+        required: false
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  cask:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'main' }}
+
+      - name: Update Cask with Release Checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          VER="${TAG#v}"
+          echo "Updating Casks/glidedesk.rb for version $VER ($TAG)..."
+          
+          # Download DMG
+          gh release download "$TAG" -R "${{ github.repository }}" -p "GlideDesk_${VER}_aarch64.dmg"
+
+          ARM_SUM=$(shasum -a 256 "GlideDesk_${VER}_aarch64.dmg" | cut -d' ' -f1)
+
+          echo "ARM64 SHA256: $ARM_SUM"
+
+          sed -i '' -e "s/version \".*\"/version \"$VER\"/" Casks/glidedesk.rb
+          sed -i '' -e "s/sha256 arm:   \".*\"/sha256 arm:   \"$ARM_SUM\"/" Casks/glidedesk.rb
+
+          cat Casks/glidedesk.rb
+
+      - name: Validate Cask with Homebrew
+        run: |
+          brew audit --cask Casks/glidedesk.rb || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glidedesk-homebrew-cask
+          path: Casks/glidedesk.rb

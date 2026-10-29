@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Files copied on the computer, waiting on the clipboard (FileClip). -->
+    <cache-path name="clip" path="clip/" />
+    <!-- In-app update APK downloads (Updates.kt) -->
+    <cache-path name="updates" path="updates/" />
+</paths>

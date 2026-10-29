@@ -1,0 +1,140 @@
+// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
+// The phone's media controls (Mac, PC and Linux), on the right of the Phone page's card:
+// what plays there (its art, title, artist and app), Previous, Play/Pause, Next and where it is,
+// only while something plays (and a few minutes after a pause). Audio › Media controls on the Phone page
+// turns it off. UI.nowPlaying() → {el, update(state)}; state.phoneMedia from shared/nowplaying.js.
+// UI.phoneAudioCard() → {el, update(state)}: the Audio tab's phone rows, that switch and Play phone
+// sound here (Bluetooth) (state.btAudio from shared/btaudio.js; null where it can't be: the Mac).
+'use strict';
+
+// General › Media controls on the Phone page: the same setting as the Audio tab's, there with or without a
+// phone connected. UI.mediaControlsRow() → {el, update(state)}.
+UI.mediaControlsRow = () => {
+  const sw = UI.switch((v) => UI.api.setAudio({ phoneMedia: v }), { label: 'Media controls on the Phone page' });
+  const row = UI.row('Media controls on the Phone page', '', [sw]);
+  return {
+    el: row,
+    update(s) {
+      const on = (s.audio || {}).phoneMedia !== false;
+      sw.set(on);
+      const m = s.phoneMedia;
+      row.setHint(on && m && m.why === 'listener'
+        ? 'Needs the full GlideDesk app on the phone, with its notification access on'
+        : 'What plays on a connected phone, with Play, Pause, Next and Previous, on the Phone page while it plays');
+    },
+  };
+};
+
+UI.phoneAudioCard = () => {
+  const { el, api } = UI;
+  const bt = UI.switch((v) => api.setAudio({ phoneBt: v }), { label: 'Play phone sound here (Bluetooth)' });
+  const btRow = UI.row('Play phone sound here (Bluetooth)', '', [bt]);
+  const pick = UI.select([], (id) => api.phoneBtPick(id));
+  const pickRow = UI.row('The phone', 'Paired with this computer over Bluetooth', [pick]);
+  const media = UI.switch((v) => api.setAudio({ phoneMedia: v }), { label: 'Media controls on the Phone page' });
+  const mediaRow = UI.row('Media controls on the Phone page', '', [media]);
+  const card = UI.card('{name}', [btRow, pickRow, mediaRow]);
+  return {
+    el: card,
+    update(s) {
+      card.hidden = !UI.isPhone(s) || s.btAudio === undefined; // Multi-device has neither yet
+      if (card.hidden) return;
+      const a = s.audio || {};
+      const b = s.btAudio;
+      bt.set(!!(b ? b.on : false));
+      bt.disable(!b);
+      btRow.setHint(!b ? 'This computer can’t take a phone’s sound over Bluetooth (macOS has no Bluetooth speaker mode)'
+        : b.on && b.text ? b.text
+          : 'This computer as {name}’s Bluetooth speaker: its music, videos and every other sound play here. Pair them in Bluetooth settings first');
+      const choose = !!(b && b.on && b.devices && b.devices.length && (b.state === 'choose' || b.state === 'playing'));
+      pickRow.hidden = !choose;
+      if (choose) {
+        pick.options([{ value: '', label: 'Choose…' }, ...b.devices.map((d) => ({ value: d.id, label: d.name }))]);
+        pick.set(b.state === 'choose' ? '' : b.device);
+      }
+      media.set(a.phoneMedia !== false);
+      const m = s.phoneMedia;
+      mediaRow.setHint(m && m.why === 'listener' && a.phoneMedia !== false
+        ? 'Needs the full GlideDesk app on {name}, with its notification access on'
+        : 'What plays on {name}, with Play, Pause, Next and Previous, on the Phone page while it plays');
+    },
+  };
+};
+
+UI.nowPlaying = () => {
+  const { el, api } = UI;
+  const svg = (d) => {
+    const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    s.setAttribute('viewBox', '0 0 20 20');
+    s.innerHTML = d;
+    return s;
+  };
+  const PLAY = '<path d="M6.5 4.5v11l9-5.5z"/>';
+  const PAUSE = '<path d="M6 4.5h2.5v11H6z M11.5 4.5H14v11h-2.5z"/>';
+  const ctl = (a, d, label) => {
+    const b = el('button', { class: 'np-btn', title: label, attrs: { 'aria-label': label } }, [svg(d)]);
+    b.onclick = () => api.phoneMedia({ a });
+    return b;
+  };
+  const art = el('div', { class: 'np-art' });
+  const title = el('div', { class: 'np-title' });
+  const sub = el('div', { class: 'np-sub' });
+  const prev = ctl('prev', '<path d="M5 4.5v11 M15.5 4.5v11L7 10z"/>', 'Previous');
+  const play = ctl('toggle', PLAY, 'Play');
+  const next = ctl('next', '<path d="M15 4.5v11 M4.5 4.5v11L13 10z"/>', 'Next');
+  const bar = el('div', { class: 'np-bar' }, [el('div', { class: 'np-fill' })]);
+  const time = el('div', { class: 'np-time' });
+  const box = el('div', { class: 'np', hidden: true }, [
+    art,
+    el('div', { class: 'np-main' }, [title, sub, el('div', { class: 'np-pos' }, [bar, time])]),
+    el('div', { class: 'np-ctl' }, [prev, play, next]),
+  ]);
+
+  let now = null;
+  let lastArt = null;
+  const clock = (ms) => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  };
+  const pos = () => (now.playing ? now.position + (Date.now() - now.at) * (now.speed || 1) : now.position);
+  // Where it is, moved on between messages while it plays.
+  const tick = () => {
+    if (!now || box.hidden) return;
+    const d = now.duration;
+    const p = Math.min(d || Infinity, Math.max(0, pos()));
+    bar.hidden = time.hidden = !(d > 0 && now.position >= 0);
+    bar.firstChild.style.width = d > 0 ? (100 * p / d).toFixed(1) + '%' : '0';
+    time.textContent = clock(p) + ' / ' + clock(d);
+  };
+  setInterval(tick, 1000);
+  // Click the bar: there (when the app can seek).
+  bar.onclick = (e) => {
+    if (!now || !now.seek || !(now.duration > 0)) return;
+    const r = bar.getBoundingClientRect();
+    api.phoneMedia({ a: 'seek', pos: Math.round(now.duration * Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))) });
+  };
+
+  return {
+    el: box,
+    update(s) {
+      const m = s.phoneMedia;
+      now = UI.isPhone(s) && m && m.now ? m.now : null;
+      box.hidden = !now;
+      if (!now) return;
+      if (now.art !== lastArt) {
+        lastArt = now.art;
+        art.style.backgroundImage = now.art ? `url("${now.art}")` : '';
+        art.classList.toggle('none', !now.art);
+      }
+      title.textContent = now.title;
+      sub.textContent = [now.artist, now.appName].filter(Boolean).join(' · ');
+      play.replaceChildren(svg(now.playing ? PAUSE : PLAY));
+      play.title = now.playing ? 'Pause' : 'Play';
+      play.setAttribute('aria-label', play.title);
+      prev.disabled = !now.prev;
+      next.disabled = !now.next;
+      bar.classList.toggle('seek', !!now.seek);
+      tick();
+    },
+  };
+};

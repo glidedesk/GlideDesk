@@ -1,0 +1,22 @@
+# GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
+# Systemd service unit for Pre-Login Display Manager KVM control (GDM, LightDM, SDDM)
+
+[Unit]
+Description=GlideDesk Pre-Login KVM Service
+Documentation=https://github.com/glidedesk/glidedesk
+After=network.target display-manager.service
+Before=graphical.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/glidedesk --daemon
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=journal
+StandardError=journal
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

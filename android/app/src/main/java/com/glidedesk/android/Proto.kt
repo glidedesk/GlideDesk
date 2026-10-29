@@ -1,0 +1,193 @@
+﻿// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
+// The wire protocol from the phone's side: the same constants and pairing math as
+// shared/protocol.js (keep the two in step).
+package com.glidedesk.android
+
+import org.json.JSONArray
+import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.security.MessageDigest
+import java.security.SecureRandom
+
+object Proto {
+    const val VERSION = 1
+    const val PORT = 47800
+    const val DISCOVERY_PORT = 47801
+    const val BEACON_MS = 2000L
+    const val DEVICE_STALE_MS = 10000L
+    const val PING_MS = 1000L
+    const val TIMEOUT_MS = 4000L
+    const val BLE_TIMEOUT_MS = 20000L // through Bluetooth, where one big message takes seconds
+    const val PHONE_GRACE_MS = 30000L
+    const val CLIP_MAX_BYTES = 256 * 1024
+    const val CLIP_IMAGE_MAX_BYTES = 10 * 1024 * 1024 // clipboard picture limit (PNG bytes, before base64)
+    const val CLIP_IMAGE_PART_BYTES = 256 * 1024 // raw bytes per clip.image.part
+    const val FILE_CHUNK_BYTES = 64 * 1024
+    const val MAX_PAYLOAD = 16 * 1024 * 1024
+    const val OS = "android"
+    private const val SAS_LABEL = "macshare-sas-v1"
+
+    // Message types (field `t`) the phone uses.
+    object T {
+        const val BEACON = "beacon"
+        const val PROBE = "probe"
+        const val INVITE = "invite"
+        const val PAIR_START = "pair.start"
+        const val PAIR_NONCE = "pair.nonce"
+        const val PAIR_REVEAL = "pair.reveal"
+        const val PAIR_CONFIRM = "pair.confirm"
+        const val PAIR_OK = "pair.ok"
+        const val PAIR_CANCEL = "pair.cancel"
+        const val HELLO = "hello"
+        const val WELCOME = "welcome"
+        const val ERROR = "error"
+        const val PING = "ping"
+        const val PONG = "pong"
+        const val BYE = "bye" // Disconnect on purpose: the computer doesn't wait for us to come back
+        const val CLIP = "clip"
+        const val CLIP_POLICY = "clip.policy"
+        const val CLIP_IMAGE = "clip.image" // either way {id, w, h, bytes, parts, shot?}: a picture on the clipboard, in parts (Clip.kt)
+        const val CLIP_IMAGE_PART = "clip.image.part" // either way {id, i, data (base64)}
+        const val NOTIF = "notif"
+        const val NOTIF_POLICY = "notif.policy"
+        const val FILE_OFFER = "file.offer"
+        const val FILE_ACCEPT = "file.accept"
+        const val FILE_REFUSE = "file.refuse"
+        const val FILE_CHUNK = "file.chunk"
+        const val FILE_END = "file.end"
+        const val FILE_DONE = "file.done"
+        const val FILE_CANCEL = "file.cancel"
+        const val FILES_DONE = "files.done"
+        const val DRAG_POLICY = "drag.policy"
+        const val FCLIP_OFFER = "fclip.offer"
+        const val FCLIP_PASTE = "fclip.paste"
+        const val FCLIP_GONE = "fclip.gone"
+        const val FCLIP_KEY = "fclip.key"
+        const val PAIR_SYNC = "pair.sync"
+        const val SMB_OFFER = "smb.offer"
+        const val SMB_REVOKE = "smb.revoke"
+        const val SMB_STATE = "smb.state"
+        const val PHONE_INFO = "phone.info"
+        const val PHONE_APPS_LIST = "phone.apps.list"
+        const val PHONE_APPS = "phone.apps"
+        const val PHONE_POINTER = "phone.pointer"
+        const val PHONE_IN = "phone.in"
+        const val PHONE_INPUT = "phone.input"
+        const val PHONE_INPUT_ASK = "phone.input.ask"
+        const val PHONE_INPUT_VIA = "phone.input.via"
+        const val PHONE_WAKE = "phone.wake"
+        const val PHONE_AWAKE = "phone.awake"
+        const val PHONE_MIRROR = "phone.mirror"
+        const val PHONE_CAMERA = "phone.camera"
+        const val PHONE_SOUND_WANT = "phone.sound.want"
+        const val PHONE_SOUND = "phone.sound"
+        const val PHONE_SOUND_STATE = "phone.sound.state"
+        const val PHONE_MEDIA = "phone.media"
+        const val PHONE_MEDIA_WANT = "phone.media.want"
+        const val PHONE_MEDIA_CTL = "phone.media.ctl"
+        const val REMOTE_HELLO = "remote.hello"
+        const val REMOTE_STATE = "remote.state"
+        const val REMOTE_RELEASE = "remote.release"
+        const val PHONE_SEND = "phone.send"
+        const val PHONE_ACTIVE_APP = "phone.activeApp"
+        const val ADB_STATE = "adb.state"
+        const val ADB_ENABLE = "adb.enable"
+        const val ADB_PAIR = "adb.pair"
+        const val ADB_BRIDGE = "adb.bridge"
+        const val WOL_INFO = "wol.info"
+        // Wi-Fi for a session through Bluetooth (Netlink.kt, shared/netlink.js)
+        const val NET_CAPS = "net.caps"
+        const val NET_NEED = "net.need"
+        const val NET_JOIN = "net.join"
+        const val NET_JOINED = "net.joined"
+        const val NET_RELEASE = "net.release"
+        const val NET_HOTSPOT = "net.hotspot"
+        const val DRAG_START = "drag.start"
+        // Calls, Messages and Media on the computer (Hub.kt, shared/phonehub.js)
+        const val HUB_POLICY = "hub.policy"
+        const val HUB_STATE = "hub.state"
+        const val HUB_ASK = "hub.ask"
+        const val HUB_SET = "hub.set"
+        const val HUB_BT = "hub.bt"
+        const val CALL_STATE = "call.state"
+        const val CALL_DO = "call.do"
+        const val CALL_DONE = "call.done"
+        const val CALL_LOG = "call.log"
+        const val CONTACTS = "contacts"
+        const val SMS_THREADS = "sms.threads"
+        const val SMS_THREAD = "sms.thread"
+        const val SMS_PART = "sms.part"
+        const val SMS_SEND = "sms.send"
+        const val SMS_SENT = "sms.sent"
+        const val SMS_NEW = "sms.new"
+        const val MEDIA_LIST = "media.list"
+        const val MEDIA_THUMB = "media.thumb"
+        const val MEDIA_VIEW = "media.view"
+        const val MEDIA_SAVE = "media.save"
+        const val FS_LIST = "fs.list"
+        const val FS_DO = "fs.do"
+        const val FS_DONE = "fs.done"
+        const val FS_SAVE = "fs.save"
+        const val FS_EXPECT = "fs.expect"
+        const val SHARE_OFFER = "share.offer" // phone->computer {on, port, secret, name}: our shared folder over WebDAV (FolderShare.kt)
+        const val SHARE_HOST = "share.host" // computer->phone {on, port, token, name}: its shared folder, in the Files app (PcShareProvider.kt)
+        const val SHARE_SET = "share.set" // phone->computer {serve}: the computer's folder for this phone on or off (its setting)
+    }
+
+    object E {
+        const val VERSION_MISMATCH = "version_mismatch"
+        const val BAD_TOKEN = "bad_token"
+        const val PAIR_REFUSED = "pair_refused"
+        const val PAIR_TIMEOUT = "pair_timeout"
+        const val BUSY = "busy"
+        const val REPLACED = "replaced"
+        const val RELEASED = "released"
+        const val ASLEEP = "asleep" // the computer went to sleep: not again on our own (it invites us when it wakes)
+    }
+
+    private val random = SecureRandom()
+
+    fun randomHex(bytes: Int): String {
+        val b = ByteArray(bytes)
+        random.nextBytes(b)
+        return b.hex()
+    }
+
+    fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)
+
+    // Pairing commit for our nonce: sha256(nonce bytes), hex.
+    fun commitOf(nonceHex: String): String = sha256(nonceHex.unhex()).hex()
+
+    // The 6-digit code both sides show:
+    // sha256(SAS_LABEL || fp bytes || nw bytes || nm bytes), first 4 bytes as uint32 BE, mod 1e6.
+    fun sasCode(fp: String, nwHex: String, nmHex: String): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        md.update(SAS_LABEL.toByteArray(Charsets.UTF_8))
+        md.update(normFingerprint(fp).unhex())
+        md.update(nwHex.unhex())
+        md.update(nmHex.unhex())
+        val h = md.digest()
+        val n = ByteBuffer.wrap(h, 0, 4).int.toLong() and 0xffffffffL
+        return (n % 1000000).toString().padStart(6, '0')
+    }
+
+    fun normFingerprint(fp: String?): String = (fp ?: "").replace(":", "").lowercase()
+}
+
+fun ByteArray.hex(): String = joinToString("") { "%02x".format(it) }
+
+fun String.unhex(): ByteArray {
+    val s = if (length % 2 == 0) this else "0$this"
+    return ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+}
+
+// Small JSON helpers: msg("t", "k" to v, …)
+fun msg(t: String, vararg fields: Pair<String, Any?>): JSONObject {
+    val o = JSONObject().put("t", t)
+    for ((k, v) in fields) o.put(k, v ?: JSONObject.NULL)
+    return o
+}
+
+fun JSONObject.str(key: String, max: Int = 500): String = optString(key, "").let { if (isNull(key)) "" else it.take(max) }
+
+fun jsonArray(items: Iterable<Any?>): JSONArray = JSONArray().also { a -> items.forEach { a.put(it) } }
