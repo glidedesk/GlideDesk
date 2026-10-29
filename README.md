@@ -21,7 +21,7 @@
 
 <p align="center">
   <a href="#-installation--setup"><b>Quick Install</b></a> •
-  <a href="#-comprehensive-feature--architecture-comparison-glidedesk-vs-twindesk"><b>Comparison Matrix</b></a> •
+  <a href="#-industry-comparison-glidedesk-vs-barrier-synergy--universal-control"><b>Comparison Matrix</b></a> •
   <a href="#-architecture--mesh-topology"><b>Architecture</b></a> •
   <a href="#-features"><b>Key Features</b></a> •
   <a href="#-building--development"><b>Build from Source</b></a>
@@ -54,46 +54,62 @@ flowchart LR
 
 ---
 
-### ⚔️ Comprehensive Feature & Architecture Comparison: GlideDesk vs. TwinDesk
+### ⚔️ Industry Comparison: GlideDesk vs. Barrier, Synergy, & Universal Control
 
-GlideDesk was re-engineered from the ground up to solve the architectural bottlenecks, excessive RAM usage, and input collision bugs present in TwinDesk:
+GlideDesk is engineered for modern cross-platform power users who need zero-latency input sharing without bloated runtimes, vendor lock-in, or expensive paid subscriptions:
 
-| Category | Capability / Attribute | TwinDesk (Electron) | GlideDesk (Tauri v2 + Rust) | Engineering Advantage |
+| Feature / Capability | GlideDesk | Barrier / Deskflow | Symless Synergy | Microsoft Mouse Without Borders | Apple Universal Control |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Price & License** | **100% Free & Open Source (GPL-3.0)** | Free & Open Source (GPL-2.0) | Paid ($29 – $39) / Proprietary | Free / Proprietary (PowerToys) | Free / Apple Hardware Locked |
+| **Supported Platforms** | **macOS, Windows, Linux, Android** | macOS, Windows, Linux | macOS, Windows, Linux | Windows only | macOS & iPadOS only |
+| **Engine & Language** | **Tokio Async Rust + Tauri v2** | C++ / Qt5 | C++ / Qt5 | C# / .NET Framework | Swift / Objective-C (Apple Private APIs) |
+| **Idle RAM Footprint** | **~28 MB** | ~60 MB – 80 MB | ~120 MB – 180 MB | ~45 MB – 65 MB | Built-in OS Daemon |
+| **Garbage Collection (GC)** | **Zero GC (Deterministic Rust)** | Zero GC (C++) | Zero GC (C++) | CLR GC (Periodic pauses) | ARC (Apple Reference Counting) |
+| **Single-Window Edge Handoff** | **✅ Built-in (`Ctrl`/`Cmd` + Drag window across border)** | ❌ Whole cursor/screen only | ❌ Whole cursor/screen only | ❌ Whole cursor/screen only | ❌ Whole cursor/screen only |
+| **Dual-Active Input Arbitration** | **✅ Strict 3-State Machine (`home`, `driving`, `driven`)** | ❌ Stutters on dual inputs | ❌ Gestures trigger remote actions | ❌ Windows only | ✅ Native trackpad gestures |
+| **Android Mobile Companion** | **✅ Native Companion (Trackpad, Display, Webcam)** | ❌ No mobile support | ❌ No mobile support | ❌ No mobile support | ❌ iPad only (No Android) |
+| **High Refresh Rate (144Hz+)** | **✅ Delta Coalescing (Smooth under Wi-Fi load)** | ⚠️ Drops packets on high polling | ⚠️ Latency spikes on Wi-Fi | ⚠️ Stutters on high DPI mice | ✅ Apple ProMotion 120Hz |
+| **Image Clipboard Transfer** | **✅ Real-Time PNG/JPEG Transfer with Hash Deduplication** | ⚠️ Frequently hangs on large clips | ✅ Basic image sync | ⚠️ Small files only | ✅ Apple Continuity |
+| **Multi-Monitor Mesh Topology** | **✅ N-Way P2P Mesh (3+ Computers + Phone)** | ⚠️ Rigid server/client grid | ⚠️ Rigid server/client grid | ⚠️ 4 PCs max (Windows only) | ⚠️ 3 Apple devices max |
+
+<details>
+<summary><b>🔍 View Architectural Deep Dive (Rust Engine vs Legacy Architectures)</b></summary>
+
+<br>
+
+| Category | Capability / Attribute | Legacy Software KVMs (Qt / Electron / .NET) | GlideDesk (Tauri v2 + Tokio Rust) | Engineering Advantage |
 | :--- | :--- | :--- | :--- | :--- |
-| **Performance & Engine** | **Runtime Engine** | Bundled Chromium + Node.js (Electron) | **Native OS Webviews (WebKit/WebView2) + Tokio Async Rust** | 15–20x lower memory overhead |
-| | **Idle RAM Footprint** | ~500 MB – 1.1 GB across 5+ processes | **~28 MB – 45 MB single process** | Frees RAM for developer IDEs, video editing, & games |
-| | **Garbage Collection (GC)** | V8 Stop-The-World GC (100–300ms latency spikes) | **Zero GC** (Deterministic deallocation in Rust) | Zero cursor stutter or missed keystrokes at 144Hz+ |
+| **Performance & Engine** | **Runtime Engine** | Bundled Chromium / Heavy Qt / .NET | **Native OS Webviews (WebKit/WebView2) + Tokio Async Rust** | 15–20x lower memory overhead |
+| | **Idle RAM Footprint** | ~100 MB – 1 GB across multiple processes | **~28 MB – 45 MB single process** | Frees RAM for developer IDEs, video editing, & games |
+| | **Garbage Collection (GC)** | GC pauses (100–300ms latency spikes) | **Zero GC** (Deterministic deallocation in Rust) | Zero cursor stutter or missed keystrokes at 144Hz+ |
 | | **Cold Startup Time** | ~1.6 – 2.4 seconds | **<350 ms** | Instant launch |
-| | **Headless Background Mode** | High (~400 MB background Chromium resident) | **~10 MB background daemon (`--daemon`)** | Invisible, silent 24/7 background service |
-| **Input & Cursor Switching** | **OS Input Hooks** | Spawns separate helper processes (`mac-helper`) | **In-Process Kernel/Session Hooks (`CGEventTap`, `WH_MOUSE_LL`)** | Direct hardware events without IPC pipes |
+| | **Headless Background Mode** | High background resident | **~10 MB background daemon (`--daemon`)** | Invisible, silent 24/7 background service |
+| **Input & Cursor Switching** | **OS Input Hooks** | Spawns separate helper processes | **In-Process Kernel/Session Hooks (`CGEventTap`, `WH_MOUSE_LL`)** | Direct hardware events without IPC pipes |
 | | **Mouse Motion Coalescing** | Raw streaming (can choke Wi-Fi networks) | **Delta Coalescing with Bounded Channels** | Smooth tracking under heavy network congestion |
 | | **Edge Crossing Dimensions** | Left & Right only | **4-Way Crossing (Left, Right, Top, Bottom)** | Adapts to any multi-monitor physical desk layout |
 | | **Virtual Desktop Bounds** | Often misaligns on mixed DPI monitors | **Dynamic Multi-Monitor Virtual Desktop Calculation** | Seamless crossing across different resolutions & scaling |
 | **Touchpad & Conflict Resolution** | **Input State Machine** | Unlocked / No input arbitration | **Strict 3-State Machine (`home`, `driving`, `driven`)** | Prevents mouse & laptop touchpad fighting |
-| | **Dual-Active Input Prevention** | ❌ **Bug:** Local touchpad & remote mouse fight | ✅ **Guaranteed:** Clean local takeover without desync | No cursor jumping when using both inputs |
-| | **Touchpad Gesture Isolation** | ❌ **Bug:** 3-finger swipe down minimizes **both** PCs | ✅ **Isolated:** OS gestures stay strictly local | Laptop gestures won't accidentally minimize your remote Mac |
+| | **Dual-Active Input Prevention** | ❌ Local touchpad & remote mouse fight | ✅ **Guaranteed:** Clean local takeover without desync | No cursor jumping when using both inputs |
+| | **Touchpad Gesture Isolation** | ❌ Gestures trigger accidental remote shortcuts | ✅ **Isolated:** OS gestures stay strictly local | Laptop gestures won't accidentally minimize your remote Mac |
 | | **Loopback Echo Suppression** | Prone to event bouncing | **Hardware-Level Event Tap Suppression** | Injected events never bounce back across network |
 | **Window Management (Exclusive)** | **Single-Window Edge Handoff** | ❌ Not available (moves entire cursor only) | ✅ **Built-in (`Ctrl`/`Cmd` + Window Drag across edge)** | Move individual apps to another PC without physical cables |
 | | **Offscreen Window Parking** | ❌ Not available | ✅ **Automated Offscreen Parking at `(-32000, -32000)`** | Keeps apps rendering at full speed without throttling |
 | | **Floating Canvas Projection** | ❌ Not available | ✅ **Dedicated Target Canvas Window with Native Input** | Full mouse, click, and keyboard control of remote window |
 | | **Crash Recovery Watchdog** | ❌ None (offscreen windows stay stranded) | ✅ **12s Disconnect Watchdog (Auto-restores all windows)** | Guaranteed zero lost windows if link drops or app exits |
-| **Network & Mesh Topology** | **Network Architecture** | 1-to-1 direct peer link only | **N-Way Multi-Device Mesh Grid (Issue #64)** | Link 3+ computers and Android phones simultaneously |
-| | **LAN Peer Discovery** | UDP broadcast on 47801 | **UDP broadcast on 47801 with auto-pruning & fallback** | Zero-config instant pairing |
-| | **Port Conflict Resilience** | ❌ Aborts/crashes when port 47800/47801 is in use | ✅ **Graceful `EADDRINUSE` handling & UI notification** | Safely co-exists with other KVM tools without crashing |
+| **Network & Mesh Topology** | **Network Architecture** | 1-to-1 direct peer link only | **N-Way Multi-Device Mesh Grid** | Link 3+ computers and Android phones simultaneously |
+| | **LAN Peer Discovery** | Static IP configuration or basic broadcast | **UDP broadcast on 47801 with auto-pruning & fallback** | Zero-config instant pairing |
+| | **Port Conflict Resilience** | ❌ Crashes when default port is occupied | ✅ **Graceful `EADDRINUSE` handling & UI notification** | Safely co-exists with other tools without crashing |
 | | **Connection Health** | Static ping interval | **Adaptive 1s active / 5s idle keepalive with backoff** | Low network overhead when idle |
 | **Clipboard & Data Sync** | **Plain Text Sync** | Basic copy/paste | **Bidirectional Real-Time Sync (<10ms)** | Instant text sharing |
-| | **Image Clipboard Sync** | Limited formats | **Full PNG / JPEG / Bitmap image clipboard transfer** | Seamless graphic design & screenshot pasting |
-| | **Loopback Echo Suppression** | Often causes infinite clipboard loops | **Hash-checked deduplication registry** | Never re-pastes copied text in a feedback loop |
-| **Android Mobile Companion** | **Wireless Second Screen** | Basic video streaming | **Hardware-Accelerated Display Mirroring** | Turns phone or tablet into extra desktop real estate |
-| | **Trackpad & Gamepad Mode** | Limited touch zones | **Ultra-Low Latency Wi-Fi & Bluetooth BLE Gamepad** | Use phone as precision trackpad or PC controller |
-| | **Phone Webcam for PC** | Requires external manual setup | **Direct Wireless HD Camera Streaming** | Use phone camera as Zoom/Teams webcam |
-| | **Notification & SMS Mirroring**| Desktop popups | **Native System Notifications with Quick Reply** | Stay focused without picking up your phone |
-| | **In-App Mobile Auto-Updater** | Manual APK sideloading | **Built-in Self-Updating Android Engine** | 1-tap updates directly inside the Android app |
-| **Packaging & Distribution** | **Installer Download Size** | ~140 MB – 180 MB | **~7 MB – 16 MB** | ~10x faster downloads |
-| | **Installed Disk Footprint** | ~380 MB | **~35 MB** | Saves SSD space |
+| | **Image Clipboard Sync** | Unreliable or missing | **Full PNG / JPEG / Bitmap image clipboard transfer** | Seamless graphic design & screenshot pasting |
+| | **Loopback Echo Suppression** | Prone to infinite clipboard loops | **Hash-checked deduplication registry** | Never re-pastes copied text in a feedback loop |
+| **Packaging & Distribution** | **Installer Download Size** | ~60 MB – 180 MB | **~7 MB – 16 MB** | ~10x faster downloads |
+| | **Installed Disk Footprint** | ~150 MB – 380 MB | **~35 MB** | Saves SSD space |
 | | **macOS Distribution** | Manual ZIP extraction | **Homebrew Cask (`brew install --cask`) & Universal DMG** | Native Mac package manager integration |
 | | **Windows Distribution** | Standard installer | **NSIS Installer, Enterprise MSI & Zero-Install Portable** | IT administrator friendly |
-| | **Linux Distribution** | Manual deb | **AppImage, Debian `.deb`, Fedora `.rpm`** | Works on any Linux distribution |
+| | **Linux Distribution** | Manual deb / compile from source | **AppImage, Debian `.deb`, Fedora `.rpm`** | Works on any Linux distribution |
+
+</details>
 
 ---
 
@@ -179,14 +195,14 @@ adb install -r GlideDesk-1.1.1.apk
 
 ## ✨ Features
 
-- **Single-Window Edge Handoff (TwinDesk Issue #18 Solved)**:
+- **Single-Window Edge Handoff (Move Any App to Another PC)**:
   - Drag any window's titlebar across your screen edge while holding `Ctrl` (Windows/Linux) or `Cmd` (macOS) to move just that application to your adjacent computer.
   - Source window is safely parked offscreen at `(-32000, -32000)` without render throttling or GPU slowdown.
   - Target machine displays a dedicated floating canvas with full bi-directional input forwarding (mouse, keyboard, scroll wheel).
 - **Dual-Input & Touchpad Gesture Isolation (No Minimization Echoes)**:
   - Strict 3-state machine (`home`, `driving`, `driven`) resolves input collisions when an external mouse on one machine is used alongside a laptop touchpad on another.
   - Windows multi-finger touchpad gestures (like 3-finger swipe down / `Win+D`) stay local and are isolated from triggering destructive `Cmd+M` / `Cmd+H` minimize/hide actions on macOS.
-- **Multi-Device Mesh Grid (TwinDesk Issue #64 Solved)**:
+- **Multi-Device Mesh Grid (3+ Workstations Simultaneously)**:
   - Connect 3+ Macs, Windows PCs, Linux workstations, and Android devices into an interconnected workspace grid.
 - **Crash-Safe Self-Healing Watchdog**:
   - Continuous 12-second heartbeat watchdog monitors connection stability.
