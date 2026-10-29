@@ -1,0 +1,16 @@
+{
+  "name": "glidedesk",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "test": "node scripts/test-all.js",
+    "test:fast": "node scripts/test-all.js --fast",
+    "test:rust": "node scripts/test-all.js --rust",
+    "test:js": "node scripts/test-all.js --js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

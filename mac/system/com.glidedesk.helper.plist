@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE. -->
+<!-- LaunchDaemon running at system boot to provide pre-login and FileVault / loginwindow KVM control -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.glidedesk.helper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/GlideDesk.app/Contents/MacOS/glidedesk</string>
+        <string>--daemon</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/Library/Logs/GlideDesk-daemon.log</string>
+    <key>StandardOutPath</key>
+    <string>/Library/Logs/GlideDesk-daemon.log</string>
+</dict>
+</plist>

@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:">
+  <title>GlideDesk — Remote Window Projection</title>
+  <link rel="stylesheet" href="window-projection.css">
+</head>
+<body class="projection-body">
+  <header class="projection-header" data-tauri-drag-region>
+    <div class="projection-title-area" data-tauri-drag-region>
+      <span class="projection-icon">🪟</span>
+      <span id="projection-title" class="projection-title">Remote Window</span>
+      <span class="projection-badge">Projected</span>
+    </div>
+    <div class="projection-actions">
+      <button id="btn-return" class="action-btn primary-action" title="Return window back to source computer">
+        <span class="btn-icon">↩</span> Return to Source
+      </button>
+      <button id="btn-close" class="action-btn close-action" title="Close Projection">✕</button>
+    </div>
+  </header>
+
+  <main class="projection-content">
+    <div id="viewport-container" class="viewport-container">
+      <canvas id="projection-canvas" width="1280" height="720"></canvas>
+      <div id="projection-overlay" class="projection-overlay">
+        <div class="spinner"></div>
+        <div id="overlay-text" class="overlay-text">Connecting to remote window...</div>
+        <div class="overlay-hint">Interact directly with mouse & keyboard. Click "Return to Source" to restore to original computer.</div>
+      </div>
+    </div>
+  </main>
+
+  <script src="shared/protocol.js"></script>
+  <script src="shared/tauri-bridge.js"></script>
+  <script src="window-projection.js"></script>
+</body>
+</html>
