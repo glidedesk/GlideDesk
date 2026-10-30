@@ -2,7 +2,7 @@
   <img src="src-tauri/icons/128x128@2x.png" width="100" alt="GlideDesk icon">
 </p>
 
-<h1 align="center"><a href="https://github.com/glidedesk/glidedesk">GlideDesk</a></h1>
+<h1 align="center"><a href="https://github.com/glidedesk/GlideDesk">GlideDesk</a></h1>
 
 <p align="center">
   <b>Lightweight, Zero-Latency Software KVM & Multi-Device Workspace Bridge</b><br>
@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/glidedesk/glidedesk/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/glidedesk/glidedesk?color=00c853&label=Release"></a>
-  <a href="https://github.com/glidedesk/glidedesk/actions"><img alt="Build Status" src="https://img.shields.io/github/actions/workflow/status/glidedesk/glidedesk/build-tauri.yml?branch=main&label=CI%20Build"></a>
+  <a href="https://github.com/glidedesk/GlideDesk/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/glidedesk/GlideDesk?color=00c853&label=Release"></a>
+  <a href="https://github.com/glidedesk/GlideDesk/actions"><img alt="Build Status" src="https://img.shields.io/github/actions/workflow/status/glidedesk/GlideDesk/build-tauri.yml?branch=main&label=CI%20Build"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.78%2B-dea584?logo=rust">
   <img alt="Tauri v2" src="https://img.shields.io/badge/Tauri-v2.0-24c8db?logo=tauri">
   <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Android-Supported-blue">
@@ -120,17 +120,17 @@ GlideDesk is engineered for modern cross-platform power users who need zero-late
 #### Option 1: 1-Line Terminal Installer (Recommended)
 Automatically detects your Mac's CPU architecture (Apple Silicon vs. Intel), downloads the latest DMG, bypasses Gatekeeper quarantine, and cleanly updates running instances:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/glidedesk/glidedesk/main/mac/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/glidedesk/GlideDesk/main/mac/scripts/install.sh | bash
 ```
 
 #### Option 2: Homebrew Cask
 ```bash
-brew install --cask https://raw.githubusercontent.com/glidedesk/glidedesk/main/Casks/glidedesk.rb
+brew install --cask https://raw.githubusercontent.com/glidedesk/GlideDesk/main/Casks/glidedesk.rb
 ```
 
 #### Option 3: Manual Direct Download
-- **Universal Build (Recommended for Apple Silicon & Intel Macs):** [`GlideDesk_1.1.1_universal.dmg`](https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk_1.1.1_universal.dmg) (15 MB)
-- **Apple Silicon Only (M1 / M2 / M3 / M4 Compact):** [`GlideDesk_1.1.1_aarch64.dmg`](https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk_1.1.1_aarch64.dmg) (8 MB)
+- **Universal Build (Recommended for Apple Silicon & Intel Macs):** [`GlideDesk_1.1.1_universal.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_universal.dmg) (15 MB)
+- **Apple Silicon Only (M1 / M2 / M3 / M4 Compact):** [`GlideDesk_1.1.1_aarch64.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_aarch64.dmg) (8 MB)
 
 ---
 
@@ -141,18 +141,18 @@ Automatically downloads, verifies, and silently installs or updates GlideDesk wi
 
 In **PowerShell**:
 ```powershell
-irm https://raw.githubusercontent.com/glidedesk/glidedesk/main/windows/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/glidedesk/GlideDesk/main/windows/scripts/install.ps1 | iex
 ```
 
 Or from **Command Prompt (`cmd.exe`)** / **Win + R Run Dialog**:
 ```cmd
-powershell -ExecutionPolicy Bypass -Command "iex (irm https://raw.githubusercontent.com/glidedesk/glidedesk/main/windows/scripts/install.ps1)"
+powershell -ExecutionPolicy Bypass -Command "iex (irm https://raw.githubusercontent.com/glidedesk/GlideDesk/main/windows/scripts/install.ps1)"
 ```
 
 #### Option 2: Manual Direct Download
-- **Standard Installer (`.exe`):** [`GlideDesk_1.1.1_x64-setup.exe`](https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk_1.1.1_x64-setup.exe)
-- **Enterprise MSI (`.msi`):** [`GlideDesk_1.1.1_x64_en-US.msi`](https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk_1.1.1_x64_en-US.msi)
-- **Portable Standalone (`.exe`, Zero-Install):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk-portable-x64.exe)
+- **Standard Installer (`.exe`):** [`GlideDesk_1.1.1_x64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_x64-setup.exe)
+- **Enterprise MSI (`.msi`):** [`GlideDesk_1.1.1_x64_en-US.msi`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_x64_en-US.msi)
+- **Portable Standalone (`.exe`, Zero-Install):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk-portable-x64.exe)
 
 ---
 
@@ -161,19 +161,19 @@ powershell -ExecutionPolicy Bypass -Command "iex (irm https://raw.githubusercont
 #### Option 1: Universal 1-Line Installer (Recommended)
 Auto-detects your distribution's native package manager (`apt` for `.deb`, or installs standalone `.AppImage` with desktop entry):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/glidedesk/glidedesk/main/linux/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/glidedesk/GlideDesk/main/linux/scripts/install.sh | bash
 ```
 
 #### Option 2: Manual Package Download & Terminal Commands
 - **Universal AppImage (Recommended for all Linux distros — Fedora, Arch, openSUSE, Ubuntu, Debian):**
   ```bash
-  curl -fSL -O https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk_1.1.1_amd64.AppImage
+  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_amd64.AppImage
   chmod +x GlideDesk_1.1.1_amd64.AppImage
   ./GlideDesk_1.1.1_amd64.AppImage
   ```
 - **Debian / Ubuntu / Pop!_OS / Linux Mint (`.deb` Package):**
   ```bash
-  curl -fSL -O https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk_1.1.1_amd64.deb
+  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_amd64.deb
   sudo dpkg -i GlideDesk_1.1.1_amd64.deb || sudo apt-get install -f -y
   ```
 
@@ -182,12 +182,12 @@ curl -fsSL https://raw.githubusercontent.com/glidedesk/glidedesk/main/linux/scri
 ### 📱 Android Companion (Android 10+)
 
 #### Option 1: Direct Download & In-App Auto-Update
-- **Standard APK (Compact KVM & Clipboard):** [`GlideDesk-1.1.1.apk`](https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk-1.1.1.apk)
-- **Full APK (Adds Phone Webcam & Notification Sync):** [`GlideDesk-1.1.1-full.apk`](https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk-1.1.1-full.apk)
+- **Standard APK (Compact KVM & Clipboard):** [`GlideDesk-1.1.1.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk-1.1.1.apk)
+- **Full APK (Adds Phone Webcam & Notification Sync):** [`GlideDesk-1.1.1-full.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk-1.1.1-full.apk)
 
 #### Option 2: Install via ADB (USB or Wi-Fi)
 ```bash
-curl -fSL -O https://github.com/glidedesk/glidedesk/releases/download/v1.1.1/GlideDesk-1.1.1.apk
+curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk-1.1.1.apk
 adb install -r GlideDesk-1.1.1.apk
 ```
 
@@ -242,7 +242,7 @@ GlideDesk includes a companion Android app (`android/`) for multi-device continu
 ### Quick Start
 ```bash
 # Clone the repository
-git clone https://github.com/glidedesk/glidedesk.git
+git clone https://github.com/glidedesk/GlideDesk.git
 cd glidedesk
 
 # Install dependencies

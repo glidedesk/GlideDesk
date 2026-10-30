@@ -8,7 +8,7 @@
 //   notify(title, body, onClick) once per new version; open() shows the download in the browser.
 'use strict';
 
-const REPO = 'glidedesk/glidedesk';
+const REPO = 'glidedesk/GlideDesk';
 const API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const RELEASES = `https://github.com/${REPO}/releases`;
 const FIRST_DELAY = 15 * 1000;

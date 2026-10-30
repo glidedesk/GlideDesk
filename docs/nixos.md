@@ -9,7 +9,7 @@ GlideDesk provides first-class support for NixOS and Nix via `flake.nix`.
 You can run GlideDesk directly without installing it system-wide:
 
 ```sh
-nix run github:glidedesk/glidedesk
+nix run github:glidedesk/GlideDesk
 # Or from a local clone:
 nix run .
 ```
@@ -31,7 +31,7 @@ Add GlideDesk to your system flake inputs and enable the NixOS module:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    glidedesk.url = "github:glidedesk/glidedesk"; # or local checkout
+    glidedesk.url = "github:glidedesk/GlideDesk"; # or local checkout
   };
 
   outputs = { self, nixpkgs, glidedesk, ... }: {

@@ -113,7 +113,7 @@ impl Default for UpdatesView {
             checking: false,
             error: String::new(),
             checked_at: 0,
-            release_url: "https://github.com/glidedesk/glidedesk/releases".to_string(),
+            release_url: "https://github.com/glidedesk/GlideDesk/releases".to_string(),
             release_notes: String::new(),
             published_at: String::new(),
             skipped: false,

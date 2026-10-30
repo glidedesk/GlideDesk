@@ -1,10 +1,10 @@
 # GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 # Headless-safe Windows installer & updater.
 # Run via PowerShell:
-#   iex (irm https://raw.githubusercontent.com/glidedesk/glidedesk/main/windows/scripts/install.ps1)
+#   iex (irm https://raw.githubusercontent.com/glidedesk/GlideDesk/main/windows/scripts/install.ps1)
 
 $ErrorActionPreference = "Stop"
-$Repo = "glidedesk/glidedesk"
+$Repo = "glidedesk/GlideDesk"
 
 Write-Host "==> Fetching latest GlideDesk release from GitHub..." -ForegroundColor Cyan
 try {

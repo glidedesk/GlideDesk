@@ -213,7 +213,7 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
         #[cfg(target_os = "macos")]
         {
             let script = r#"
-                REPO="glidedesk/glidedesk"
+                REPO="glidedesk/GlideDesk"
                 ARCH="$(uname -m)"
                 if [ "${ARCH}" = "arm64" ]; then
                     ASSET_MATCH="GlideDesk_.*_aarch64\.dmg"
@@ -249,7 +249,7 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
         #[cfg(target_os = "windows")]
         {
             let script = r#"
-                $repo = "glidedesk/glidedesk"
+                $repo = "glidedesk/GlideDesk"
                 $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest"
                 $asset = $release.assets | Where-Object { $_.name -like "*x64-setup.exe" } | Select-Object -First 1
                 if ($asset) {
@@ -264,7 +264,7 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
         #[cfg(target_os = "linux")]
         {
             let script = r#"
-                REPO="glidedesk/glidedesk"
+                REPO="glidedesk/GlideDesk"
                 RELEASE_JSON="$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest")"
                 DOWNLOAD_URL="$(echo "${RELEASE_JSON}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*\.AppImage" | head -n 1 || true)"
                 if [ -n "${DOWNLOAD_URL}" ]; then
@@ -286,10 +286,10 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
 pub fn open_link(key: String, app: AppHandle) -> Result<(), String> {
     let url = match key.as_str() {
         "portfolio" => "https://github.com/glidedesk",
-        "github" => "https://github.com/glidedesk/glidedesk",
-        "releases" => "https://github.com/glidedesk/glidedesk/releases",
-        "licence" => "https://github.com/glidedesk/glidedesk/blob/main/LICENSE",
-        _ => "https://github.com/glidedesk/glidedesk",
+        "github" => "https://github.com/glidedesk/GlideDesk",
+        "releases" => "https://github.com/glidedesk/GlideDesk/releases",
+        "licence" => "https://github.com/glidedesk/GlideDesk/blob/main/LICENSE",
+        _ => "https://github.com/glidedesk/GlideDesk",
     };
     app.shell().open(url, None).map_err(|e| e.to_string())
 }

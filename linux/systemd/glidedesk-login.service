@@ -3,7 +3,7 @@
 
 [Unit]
 Description=GlideDesk Pre-Login KVM Service
-Documentation=https://github.com/glidedesk/glidedesk
+Documentation=https://github.com/glidedesk/GlideDesk
 After=network.target display-manager.service
 Before=graphical.target
 

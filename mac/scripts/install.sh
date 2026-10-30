@@ -2,10 +2,10 @@
 # GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 # Headless-safe macOS installer & updater.
 # Can be run over SSH, Terminal, or via curl:
-#   curl -fsSL https://raw.githubusercontent.com/glidedesk/glidedesk/main/mac/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/glidedesk/GlideDesk/main/mac/scripts/install.sh | bash
 set -euo pipefail
 
-REPO="glidedesk/glidedesk"
+REPO="glidedesk/GlideDesk"
 ARCH="$(uname -m)"
 
 echo "==> Detecting architecture: ${ARCH}"

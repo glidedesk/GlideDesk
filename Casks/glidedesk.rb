@@ -5,10 +5,10 @@ cask "glidedesk" do
   sha256 arm:   "bbd1103b6456a2db937c569ebebc8b6bfd30e38ed601b42e537cc7efa5a3d006",
          intel: "d2202340aa47351a52f1faf594daa30bb68c2f514a4e51e383cf813e86d6fbf4"
 
-  url "https://github.com/glidedesk/glidedesk/releases/download/v#{version}/GlideDesk_#{version}_#{arch}.dmg"
+  url "https://github.com/glidedesk/GlideDesk/releases/download/v#{version}/GlideDesk_#{version}_#{arch}.dmg"
   name "GlideDesk"
   desc "Lightweight, zero-latency multi-device KVM & seamless workspace bridge"
-  homepage "https://github.com/glidedesk/glidedesk"
+  homepage "https://github.com/glidedesk/GlideDesk"
 
   auto_updates true
   depends_on macos: ">= :ventura"

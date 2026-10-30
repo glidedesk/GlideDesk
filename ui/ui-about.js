@@ -59,7 +59,7 @@ UI.tab({
       build,
       UI.card('Made by', [
         UI.row('GlideDesk Contributors', 'github.com/glidedesk', [link('Profile', 'portfolio')]),
-        UI.row('Source code', 'github.com/glidedesk/glidedesk', [link('GitHub', 'github')]),
+        UI.row('Source code', 'github.com/glidedesk/GlideDesk', [link('GitHub', 'github')]),
         UI.row('All releases', 'Downloads for macOS, Windows and Linux', [link('Releases', 'releases')]),
       ], { cls: 'keep-on' }),
       UI.card('Licence', [

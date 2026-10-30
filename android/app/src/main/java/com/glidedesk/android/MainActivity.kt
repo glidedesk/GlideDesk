@@ -1462,12 +1462,12 @@ private fun AboutPage(core: Core, v: Int) {
     }
     MacCard("Made by") {
         MacRow("GlideDesk Contributors", "github.com/glidedesk", first = true) { Secondary("Profile") { open("https://github.com/glidedesk") } }
-        MacRow("Source code", "github.com/glidedesk/glidedesk") { Secondary("GitHub") { open("https://github.com/glidedesk/glidedesk") } }
-        MacRow("Releases", "New versions for every platform") { Secondary("Open") { open("https://github.com/glidedesk/glidedesk/releases") } }
+        MacRow("Source code", "github.com/glidedesk/GlideDesk") { Secondary("GitHub") { open("https://github.com/glidedesk/GlideDesk") } }
+        MacRow("Releases", "New versions for every platform") { Secondary("Open") { open("https://github.com/glidedesk/GlideDesk/releases") } }
     }
     MacCard("License") {
         MacRow("GNU General Public License v3", "Free and open source. Copyright © 2026 GlideDesk Contributors", first = true) {
-            Secondary("Read") { open("https://github.com/glidedesk/glidedesk/blob/main/LICENSE") }
+            Secondary("Read") { open("https://github.com/glidedesk/GlideDesk/blob/main/LICENSE") }
         }
         MacRow("Screen, input and sound over wireless debugging", "scrcpy-server (Apache-2.0)")
         MacRow("Network", "OkHttp (Apache-2.0)")
