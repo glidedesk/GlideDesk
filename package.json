@@ -5,7 +5,7 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "build:mac": "tauri build && codesign --force --deep --sign - --identifier 'com.glidedesk.desktop' src-tauri/target/release/bundle/macos/GlideDesk.app",
+    "build:mac": "tauri build && echo 'designated => identifier \"com.glidedesk.desktop\"' | csreq -r- -b /tmp/req.bin && codesign --force --deep --sign - --identifier 'com.glidedesk.desktop' -r /tmp/req.bin src-tauri/target/release/bundle/macos/GlideDesk.app",
     "test": "node scripts/test-all.js",
     "test:fast": "node scripts/test-all.js --fast",
     "test:rust": "node scripts/test-all.js --rust",

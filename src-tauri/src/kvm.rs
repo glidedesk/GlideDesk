@@ -1061,6 +1061,11 @@ pub mod hook_engine {
 
     pub fn ensure_accessibility_permission() -> bool {
         unsafe {
+            // First check if already trusted WITHOUT prompting
+            if AXIsProcessTrustedWithOptions(std::ptr::null_mut()) != 0 {
+                return true;
+            }
+
             let keys = [kAXTrustedCheckOptionPrompt];
             let values = [kCFBooleanTrue];
             let dict = CFDictionaryCreate(
@@ -1153,6 +1158,12 @@ pub mod hook_engine {
 
             loop {
                 unsafe {
+                    // Fast, silent check: wait until process is trusted before attempting to create event tap
+                    if AXIsProcessTrustedWithOptions(std::ptr::null_mut()) == 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    }
+
                     let tap = CGEventTapCreate(
                         kCGSessionEventTap,
                         kCGHeadInsertEventTap,
