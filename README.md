@@ -125,7 +125,12 @@ curl -fsSL https://raw.githubusercontent.com/glidedesk/GlideDesk/main/mac/script
 
 #### Option 2: Homebrew Cask
 ```bash
-brew install --cask https://raw.githubusercontent.com/glidedesk/GlideDesk/main/Casks/glidedesk.rb
+brew install --cask glidedesk/tap/glidedesk
+```
+Or add the tap first:
+```bash
+brew tap glidedesk/tap
+brew install --cask glidedesk
 ```
 
 #### Option 3: Manual Direct Download
@@ -136,7 +141,12 @@ brew install --cask https://raw.githubusercontent.com/glidedesk/GlideDesk/main/C
 
 ### 🪟 Windows (10 / 11 64-bit)
 
-#### Option 1: 1-Line PowerShell Silent Installer (Recommended)
+#### Option 1: WinGet (Windows Package Manager)
+```powershell
+winget install GlideDesk.GlideDesk
+```
+
+#### Option 2: 1-Line PowerShell Silent Installer (Recommended)
 Automatically downloads, verifies, and silently installs or updates GlideDesk without reboot prompts.
 
 In **PowerShell**:
