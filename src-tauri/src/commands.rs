@@ -641,7 +641,7 @@ pub fn cancel_pair() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn forget(id: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+pub fn forget(_id: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     {
         let mut s = state.inner.write();
         s.paired = None;

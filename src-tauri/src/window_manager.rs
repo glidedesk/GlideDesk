@@ -129,6 +129,7 @@ impl ParkedWindowRegistry {
 
 #[cfg(windows)]
 pub fn find_window_at_point(x: f64, y: f64) -> Option<(String, String, i32, i32, u32, u32)> {
+    #[allow(unused_imports)]
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
         WindowFromPoint, GetAncestor, GA_ROOT, GetWindowTextW, GetWindowRect
