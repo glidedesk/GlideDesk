@@ -281,6 +281,13 @@ impl Default for FirewallState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateDownload {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatesView {
     pub current: String,
     pub latest: Option<String>,
@@ -301,12 +308,16 @@ pub struct UpdatesView {
     #[serde(rename = "promptUpdate")]
     pub prompt_update: bool,
     pub auto: bool,
+    #[serde(default)]
+    pub download: Option<UpdateDownload>,
+    #[serde(rename = "noReleases", default)]
+    pub no_releases: bool,
 }
 
 impl Default for UpdatesView {
     fn default() -> Self {
         Self {
-            current: "1.1.2".to_string(),
+            current: "1.1.2-beta.1".to_string(),
             latest: None,
             available: false,
             checking: false,
@@ -319,6 +330,8 @@ impl Default for UpdatesView {
             skipped_version: String::new(),
             prompt_update: false,
             auto: true,
+            download: None,
+            no_releases: false,
         }
     }
 }
@@ -476,7 +489,7 @@ impl AppState {
             updates: UpdatesView::default(),
             about: AboutState {
                 app: AppInfo {
-                    version: "1.1.2".to_string(),
+                    version: "1.1.2-beta.1".to_string(),
                     name: "GlideDesk".to_string(),
                     arch: arch.clone(),
                     runtime: "GlideDesk (Tauri v2 + Rust Native Webview)".to_string(),

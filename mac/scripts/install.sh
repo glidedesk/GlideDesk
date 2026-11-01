@@ -10,22 +10,16 @@ ARCH="$(uname -m)"
 
 echo "==> Detecting architecture: ${ARCH}"
 if [ "${ARCH}" = "arm64" ]; then
-  ASSET_MATCH="GlideDesk_.*_aarch64\.dmg"
+  ASSET_MATCH="GlideDesk_.*_(universal|aarch64|arm64)\.dmg"
 else
-  ASSET_MATCH="GlideDesk_.*_universal\.dmg"
+  ASSET_MATCH="GlideDesk_.*_(universal|x64|x86_64)\.dmg"
 fi
 
 echo "==> Fetching latest GlideDesk release from GitHub..."
-RELEASE_JSON="$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)"
+RELEASE_JSON="$(curl -sSL -H "User-Agent: GlideDesk" "https://api.github.com/repos/${REPO}/releases?per_page=5" 2>/dev/null || true)"
 DOWNLOAD_URL="$(echo "${RELEASE_JSON}" | grep -o 'https://[^"]*' | grep -E "${ASSET_MATCH}" | head -n 1 || true)"
-
 if [ -z "${DOWNLOAD_URL}" ]; then
-  echo "Resolving download redirect for latest release..."
-  if [ "${ARCH}" = "arm64" ]; then
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/GlideDesk_1.1.1_aarch64.dmg"
-  else
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/GlideDesk_1.1.1_universal.dmg"
-  fi
+  DOWNLOAD_URL="$(echo "${RELEASE_JSON}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*\.dmg" | head -n 1 || true)"
 fi
 
 echo "==> Downloading: ${DOWNLOAD_URL}"

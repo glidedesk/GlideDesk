@@ -2,7 +2,8 @@
 // Tauri v2 + Rust Proof-of-Concept: IPC commands matching window.macshare contract.
 
 use crate::network::NetworkManager;
-use crate::state::{AppState, FullState};
+use crate::state::{AppState, FullState, UpdateDownload};
+use serde::Deserialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_shell::ShellExt;
@@ -183,6 +184,142 @@ pub fn unskip_update(state: State<'_, AppState>, app: AppHandle) -> Result<(), S
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    #[allow(dead_code)]
+    name: Option<String>,
+    html_url: String,
+    body: Option<String>,
+    published_at: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    prerelease: bool,
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
+}
+
+fn pick_asset(assets: &[GithubAsset]) -> Option<UpdateDownload> {
+    #[cfg(target_os = "macos")]
+    {
+        let arch = std::env::consts::ARCH;
+        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".dmg") && a.name.to_lowercase().contains("universal")) {
+            return Some(UpdateDownload {
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size.unwrap_or(0),
+            });
+        }
+        let arch_match = if arch == "aarch64" { "aarch64" } else { "x64" };
+        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".dmg") && a.name.to_lowercase().contains(arch_match)) {
+            return Some(UpdateDownload {
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size.unwrap_or(0),
+            });
+        }
+        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".dmg")) {
+            return Some(UpdateDownload {
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size.unwrap_or(0),
+            });
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(a) = assets.iter().find(|a| a.name.ends_with("-setup.exe") || a.name.ends_with(".exe")) {
+            return Some(UpdateDownload {
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size.unwrap_or(0),
+            });
+        }
+        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".msi")) {
+            return Some(UpdateDownload {
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size.unwrap_or(0),
+            });
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".AppImage")) {
+            return Some(UpdateDownload {
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size.unwrap_or(0),
+            });
+        }
+        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".deb")) {
+            return Some(UpdateDownload {
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size.unwrap_or(0),
+            });
+        }
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+fn parse_version(v: &str) -> Option<(Vec<u64>, String)> {
+    let clean = v.trim().trim_start_matches('v');
+    let mut parts = clean.splitn(2, '-');
+    let num_part = parts.next()?;
+    let pre = parts.next().unwrap_or("").to_string();
+    let nums: Vec<u64> = num_part.split('.').filter_map(|s| s.parse().ok()).collect();
+    if nums.is_empty() {
+        return None;
+    }
+    Some((nums, pre))
+}
+
+fn is_version_newer(candidate: &str, current: &str) -> bool {
+    let (cand_nums, cand_pre) = match parse_version(candidate) {
+        Some(v) => v,
+        None => return false,
+    };
+    let (curr_nums, curr_pre) = match parse_version(current) {
+        Some(v) => v,
+        None => return false,
+    };
+    let max_len = cand_nums.len().max(curr_nums.len());
+    for i in 0..max_len {
+        let c = *cand_nums.get(i).unwrap_or(&0);
+        let cur = *curr_nums.get(i).unwrap_or(&0);
+        if c > cur {
+            return true;
+        } else if c < cur {
+            return false;
+        }
+    }
+    if cand_pre == curr_pre {
+        return false;
+    }
+    if cand_pre.is_empty() && !curr_pre.is_empty() {
+        return true;
+    }
+    if !cand_pre.is_empty() && curr_pre.is_empty() {
+        return false;
+    }
+    cand_pre > curr_pre
+}
+
 #[tauri::command]
 pub async fn check_updates(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     {
@@ -192,14 +329,89 @@ pub async fn check_updates(state: State<'_, AppState>, app: AppHandle) -> Result
     }
     push_state(&app, &state);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+    let client = reqwest::Client::builder()
+        .user_agent("GlideDesk")
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+
+    let client = match client {
+        Ok(c) => c,
+        Err(e) => {
+            let mut s = state.inner.write();
+            s.updates.checking = false;
+            s.updates.error = format!("HTTP client error: {}", e);
+            push_state(&app, &state);
+            return Err(e.to_string());
+        }
+    };
+
+    let url = "https://api.github.com/repos/glidedesk/GlideDesk/releases?per_page=5";
+    let resp = client
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await;
+
+    let res = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            let mut s = state.inner.write();
+            s.updates.checking = false;
+            s.updates.error = format!("Network error: {}", e);
+            s.updates.checked_at = chrono::Utc::now().timestamp_millis() as u64;
+            push_state(&app, &state);
+            return Err(e.to_string());
+        }
+    };
+
+    if !res.status().is_success() {
+        let err_msg = format!("GitHub answered {}", res.status());
+        let mut s = state.inner.write();
+        s.updates.checking = false;
+        s.updates.error = err_msg.clone();
+        s.updates.checked_at = chrono::Utc::now().timestamp_millis() as u64;
+        push_state(&app, &state);
+        return Err(err_msg);
+    }
+
+    let releases: Vec<GithubRelease> = match res.json().await {
+        Ok(r) => r,
+        Err(e) => {
+            let mut s = state.inner.write();
+            s.updates.checking = false;
+            s.updates.error = format!("JSON parse error: {}", e);
+            s.updates.checked_at = chrono::Utc::now().timestamp_millis() as u64;
+            push_state(&app, &state);
+            return Err(e.to_string());
+        }
+    };
+
+    let candidate = releases.into_iter().find(|r| !r.draft);
 
     {
         let mut s = state.inner.write();
         s.updates.checking = false;
         s.updates.checked_at = chrono::Utc::now().timestamp_millis() as u64;
+
+        if let Some(rel) = candidate {
+            let latest_tag = rel.tag_name.clone();
+            let clean_latest = latest_tag.trim_start_matches('v');
+            let is_newer = is_version_newer(clean_latest, &s.updates.current);
+
+            s.updates.latest = Some(latest_tag);
+            s.updates.release_url = rel.html_url.clone();
+            s.updates.release_notes = rel.body.unwrap_or_default();
+            s.updates.published_at = rel.published_at.unwrap_or_default();
+            s.updates.download = pick_asset(&rel.assets);
+            s.updates.available = is_newer;
+            s.updates.no_releases = false;
+        } else {
+            s.updates.no_releases = true;
+            s.updates.available = false;
+        }
     }
     push_state(&app, &state);
+
     Ok(())
 }
 
@@ -213,77 +425,95 @@ pub fn open_update(state: State<'_, AppState>, app: AppHandle) -> Result<(), Str
 #[tauri::command]
 pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     log::info!("[Updater] Direct in-app update initiated (no browser required)");
-    {
+    let download_url = {
         let mut s = state.inner.write();
         s.updates.checking = true;
-    }
+        s.updates.download.as_ref().map(|d| d.url.clone())
+    };
     push_state(&app, &state);
 
     tauri::async_runtime::spawn(async move {
         #[cfg(target_os = "macos")]
         {
-            let script = r#"
+            let explicit_url = download_url.unwrap_or_default();
+            let script = format!(r#"
                 REPO="glidedesk/GlideDesk"
                 ARCH="$(uname -m)"
-                if [ "${ARCH}" = "arm64" ]; then
-                    ASSET_MATCH="GlideDesk_.*_aarch64\.dmg"
-                else
-                    ASSET_MATCH="GlideDesk_.*_x64\.dmg"
+                DOWNLOAD_URL="{}"
+                if [ -z "${{DOWNLOAD_URL}}" ]; then
+                    RELEASES_JSON="$(curl -sSL -H "User-Agent: GlideDesk" "https://api.github.com/repos/${{REPO}}/releases?per_page=5" 2>/dev/null || true)"
+                    DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*_universal\.dmg" | head -n 1 || true)"
+                    if [ -z "${{DOWNLOAD_URL}}" ]; then
+                        if [ "${{ARCH}}" = "arm64" ]; then
+                            DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*_(arm64|aarch64)\.dmg" | head -n 1 || true)"
+                        else
+                            DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*_x64\.dmg" | head -n 1 || true)"
+                        fi
+                    fi
+                    if [ -z "${{DOWNLOAD_URL}}" ]; then
+                        DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*\.dmg" | head -n 1 || true)"
+                    fi
                 fi
-                RELEASE_JSON="$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest")"
-                DOWNLOAD_URL="$(echo "${RELEASE_JSON}" | grep -o 'https://[^"]*' | grep -E "${ASSET_MATCH}" | head -n 1 || true)"
-                if [ -z "${DOWNLOAD_URL}" ]; then
-                    DOWNLOAD_URL="$(echo "${RELEASE_JSON}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*\.dmg" | head -n 1 || true)"
-                fi
-                if [ -n "${DOWNLOAD_URL}" ]; then
+                if [ -n "${{DOWNLOAD_URL}}" ]; then
                     TMP_DIR="$(mktemp -d)"
-                    DMG_PATH="${TMP_DIR}/update.dmg"
-                    MOUNT_POINT="${TMP_DIR}/mount"
-                    curl -fSL "${DOWNLOAD_URL}" -o "${DMG_PATH}"
-                    mkdir -p "${MOUNT_POINT}"
-                    hdiutil attach "${DMG_PATH}" -mountpoint "${MOUNT_POINT}" -nobrowse -quiet
-                    if [ -d "${MOUNT_POINT}/GlideDesk.app" ]; then
+                    DMG_PATH="${{TMP_DIR}}/update.dmg"
+                    MOUNT_POINT="${{TMP_DIR}}/mount"
+                    curl -fSL "${{DOWNLOAD_URL}}" -o "${{DMG_PATH}}"
+                    mkdir -p "${{MOUNT_POINT}}"
+                    hdiutil attach "${{DMG_PATH}}" -mountpoint "${{MOUNT_POINT}}" -nobrowse -quiet
+                    if [ -d "${{MOUNT_POINT}}/GlideDesk.app" ]; then
                         rm -rf "/Applications/GlideDesk.app"
-                        cp -R "${MOUNT_POINT}/GlideDesk.app" "/Applications/GlideDesk.app"
+                        cp -R "${{MOUNT_POINT}}/GlideDesk.app" "/Applications/GlideDesk.app"
                         xattr -cr "/Applications/GlideDesk.app"
-                        hdiutil detach "${MOUNT_POINT}" -quiet || true
-                        rm -rf "${TMP_DIR}"
+                        codesign --force --deep --sign - --identifier "com.glidedesk.desktop" "/Applications/GlideDesk.app" 2>/dev/null || true
+                        hdiutil detach "${{MOUNT_POINT}}" -quiet || true
+                        rm -rf "${{TMP_DIR}}"
                         open -a "/Applications/GlideDesk.app"
                         pkill -ix "glidedesk" || true
                     fi
                 fi
-            "#;
+            "#, explicit_url);
             let _ = std::process::Command::new("bash").arg("-c").arg(script).spawn();
         }
 
         #[cfg(target_os = "windows")]
         {
-            let script = r#"
+            let explicit_url = download_url.unwrap_or_default();
+            let script = format!(r#"
                 $repo = "glidedesk/GlideDesk"
-                $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest"
-                $asset = $release.assets | Where-Object { $_.name -like "*x64-setup.exe" } | Select-Object -First 1
-                if ($asset) {
+                $downloadUrl = "{}"
+                if (-not $downloadUrl) {{
+                    $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=5" -Headers @{{ 'User-Agent' = 'GlideDesk' }}
+                    $release = if ($releases -is [array]) {{ $releases[0] }} else {{ $releases }}
+                    $asset = $release.assets | Where-Object {{ $_.name -like "*x64-setup.exe" -or $_.name -like "*.exe" }} | Select-Object -First 1
+                    if ($asset) {{ $downloadUrl = $asset.browser_download_url }}
+                }}
+                if ($downloadUrl) {{
                     $tmpPath = "$env:TEMP\GlideDesk-update.exe"
-                    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmpPath
+                    Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpPath
                     Start-Process -FilePath $tmpPath -ArgumentList "/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS"
-                }
-            "#;
-            let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", script]).spawn();
+                }}
+            "#, explicit_url);
+            let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).spawn();
         }
 
         #[cfg(target_os = "linux")]
         {
-            let script = r#"
+            let explicit_url = download_url.unwrap_or_default();
+            let script = format!(r#"
                 REPO="glidedesk/GlideDesk"
-                RELEASE_JSON="$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest")"
-                DOWNLOAD_URL="$(echo "${RELEASE_JSON}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*\.AppImage" | head -n 1 || true)"
-                if [ -n "${DOWNLOAD_URL}" ]; then
-                    curl -fSL "${DOWNLOAD_URL}" -o "/tmp/GlideDesk.AppImage"
+                DOWNLOAD_URL="{}"
+                if [ -z "${{DOWNLOAD_URL}}" ]; then
+                    RELEASES_JSON="$(curl -sSL -H "User-Agent: GlideDesk" "https://api.github.com/repos/${{REPO}}/releases?per_page=5" 2>/dev/null || true)"
+                    DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*\.AppImage" | head -n 1 || true)"
+                fi
+                if [ -n "${{DOWNLOAD_URL}}" ]; then
+                    curl -fSL "${{DOWNLOAD_URL}}" -o "/tmp/GlideDesk.AppImage"
                     chmod +x "/tmp/GlideDesk.AppImage"
                     /tmp/GlideDesk.AppImage &
                     pkill -ix "glidedesk" || true
                 fi
-            "#;
+            "#, explicit_url);
             let _ = std::process::Command::new("bash").arg("-c").arg(script).spawn();
         }
     });
@@ -567,4 +797,52 @@ pub async fn hide_projection_window(app: AppHandle) -> Result<(), String> {
 pub fn push_state(app: &AppHandle, state: &AppState) {
     let snapshot = state.snapshot();
     let _ = app.emit("state-change", &snapshot);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_comparisons() {
+        assert!(is_version_newer("1.1.2-beta.1", "1.1.1"));
+        assert!(!is_version_newer("1.1.2-beta.1", "1.1.2-beta.1"));
+        assert!(is_version_newer("1.1.2", "1.1.2-beta.1"));
+        assert!(is_version_newer("1.1.2-beta.2", "1.1.2-beta.1"));
+        assert!(!is_version_newer("1.1.2-beta.1", "1.1.2"));
+        assert!(is_version_newer("1.1.3", "1.1.2"));
+        assert!(!is_version_newer("1.1.2", "1.1.3"));
+        assert!(is_version_newer("2.0.0", "1.9.9"));
+    }
+
+    #[test]
+    fn test_pick_asset_resolution() {
+        let assets = vec![
+            GithubAsset {
+                name: "GlideDesk_1.1.2_universal.dmg".to_string(),
+                browser_download_url: "https://example.com/GlideDesk_1.1.2_universal.dmg".to_string(),
+                size: Some(15000000),
+            },
+            GithubAsset {
+                name: "GlideDesk_1.1.2_x64-setup.exe".to_string(),
+                browser_download_url: "https://example.com/GlideDesk_1.1.2_x64-setup.exe".to_string(),
+                size: Some(5000000),
+            },
+            GithubAsset {
+                name: "GlideDesk_1.1.2_amd64.AppImage".to_string(),
+                browser_download_url: "https://example.com/GlideDesk_1.1.2_amd64.AppImage".to_string(),
+                size: Some(80000000),
+            },
+        ];
+
+        let picked = pick_asset(&assets);
+        assert!(picked.is_some());
+        let asset = picked.unwrap();
+        #[cfg(target_os = "macos")]
+        assert_eq!(asset.name, "GlideDesk_1.1.2_universal.dmg");
+        #[cfg(target_os = "windows")]
+        assert_eq!(asset.name, "GlideDesk_1.1.2_x64-setup.exe");
+        #[cfg(target_os = "linux")]
+        assert_eq!(asset.name, "GlideDesk_1.1.2_amd64.AppImage");
+    }
 }

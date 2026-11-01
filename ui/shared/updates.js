@@ -9,7 +9,7 @@
 'use strict';
 
 const REPO = 'glidedesk/GlideDesk';
-const API = `https://api.github.com/repos/${REPO}/releases/latest`;
+const API = `https://api.github.com/repos/${REPO}/releases?per_page=5`;
 const RELEASES = `https://github.com/${REPO}/releases`;
 const FIRST_DELAY = 15 * 1000;
 const EVERY = 6 * 60 * 60 * 1000;
@@ -124,7 +124,12 @@ class Updates {
           releaseUrl: RELEASES, noReleases: true, checkedAt: Date.now() });
       }
       if (!res.ok) throw new Error(res.status === 403 ? 'GitHub is busy, try again later' : `GitHub answered ${res.status}`);
-      const r = await res.json();
+      const data = await res.json();
+      const r = Array.isArray(data) ? (data.find((rel) => !rel.draft) || data[0]) : data;
+      if (!r) {
+        return this._set({ checking: false, latest: null, name: '', available: false, download: null,
+          releaseUrl: RELEASES, noReleases: true, checkedAt: Date.now() });
+      }
       const latest = String(r.tag_name || r.name || '').replace(/^v/i, '');
       if (!parse(latest)) throw new Error('The latest release has no version number');
       const available = compare(latest, this.current) > 0;
