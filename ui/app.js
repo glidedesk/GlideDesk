@@ -35,8 +35,12 @@
       stateEl,
     ]);
     navBtn.onclick = () => show(def.id, true);
-    nav.append(el('li', {}, [navBtn]));
-    views.set(def.id, { def, ...buildPage(def), navBtn, stateEl, navLabel, gap });
+    const li = el('li', {}, [navBtn]);
+    if (def.hidden && def.hidden(UI.state || {})) {
+      li.hidden = true;
+    }
+    nav.append(li);
+    views.set(def.id, { def, ...buildPage(def), navBtn, stateEl, navLabel, gap, li });
   }
 
   function buildPage(def) {
@@ -139,11 +143,15 @@
     else if (l.state === 'connecting' || l.state === 'reconnecting') text = 'Reconnecting…';
     else if (l.state === 'identity_changed') text = 'Identity changed';
     $('peer-text').textContent = text;
-    renderPhones(s);
+    try {
+      renderPhones(s);
+    } catch (e) {
+      console.warn('renderPhones error:', e);
+    }
     // Tabs that don't apply to the peer (a phone has no terminal or screen to share to it…).
     for (const v of views.values()) {
       const hide = !!(v.def.hidden && v.def.hidden(s));
-      if (v.navBtn.parentElement) v.navBtn.parentElement.hidden = hide;
+      if (v.navBtn && v.navBtn.parentElement) v.navBtn.parentElement.hidden = hide;
       if (hide && current === v) show(s.phone && s.phone.connected ? 'phone' : 'overview', false);
     }
     // A group with every tab hidden takes its gap with it.
@@ -161,7 +169,7 @@
   let assetsSeen = -1;
   function renderPhones(s) {
     const ph = s.phone || { nearby: [] };
-    if (ph.assets !== assetsSeen) {
+    if (ph.assets !== assetsSeen && typeof api.phoneAssets === 'function') {
       assetsSeen = ph.assets;
       api.phoneAssets().then((a) => {
         UI.phoneAssets = a;

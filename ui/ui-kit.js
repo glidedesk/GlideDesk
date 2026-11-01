@@ -1,4 +1,4 @@
-﻿// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
+// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 // Main window UI kit (window.UI): same API as the Mac's mac/control.js so the tab scripts match;
 // app.js boots the shell. Controls are built once per tab; render(state) only updates values,
 // so a state push never interrupts a drag, an open menu or keyboard focus.
@@ -321,7 +321,13 @@ const UI = {
     return String(t).replace(/\{(\w+)\}/g, (m, k) => (k in p ? p[k] : m));
   },
 
-  isPhone: (s) => !!(s && s.session && s.session.os === 'android'),
+  isPhone: (s) => !!(s && (
+    (s.session && s.session.os === 'android') ||
+    (s.phone && (s.phone.connected || s.phone.state === 'connected')) ||
+    (s.peer && s.peer.os === 'android' && s.link && s.link.state === 'connected') ||
+    (s.client && s.client.os === 'android') ||
+    (Array.isArray(s.clients) && s.clients.some((c) => c && c.os === 'android'))
+  )),
 
   // Small device glyph by OS: 'mac' | 'win' | 'linux' | 'android'.
   osClass: (os) => (os === 'mac' ? 'mac' : os === 'android' ? 'phone' : 'pc'),

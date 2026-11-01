@@ -97,6 +97,15 @@
     showProjectionWindow: (id, title, width, height) => invoke('show_projection_window', { id, title, width, height }),
     hideProjectionWindow: () => invoke('hide_projection_window'),
 
+    phoneAssets: () => Promise.resolve({ apps: [], wallpaper: '' }),
+    connectPhone: (id) => invoke('connect_phone', { id }).catch(() => {}),
+    disconnectPhone: () => invoke('disconnect_phone').catch(() => {}),
+    phoneScreen: (show) => invoke('phone_screen', { show }).catch(() => {}),
+    phoneRetry: () => invoke('phone_retry').catch(() => {}),
+    phonePair: (opts) => invoke('phone_pair', opts).catch(() => {}),
+    phoneCamera: (on, opts) => invoke('phone_camera', { on, opts }).catch(() => {}),
+    hub: (msg) => invoke('hub_message', { msg }).catch(() => {}),
+
     pathsOf: (files) => [...files].map((f) => f.path || f.name).filter(Boolean),
   };
 
