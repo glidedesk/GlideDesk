@@ -1,0 +1,41 @@
+name: WinGet Package Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release Tag (e.g. v1.1.2)'
+        required: true
+        default: 'v1.1.2'
+
+permissions:
+  contents: read
+
+jobs:
+  winget:
+    name: Publish to Windows Package Manager (winget-pkgs)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout GlideDesk
+        uses: actions/checkout@v4
+
+      - name: Extract Version
+        id: get_version
+        shell: bash
+        run: |
+          RAW_TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          VER="${RAW_TAG#v}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Submit to Microsoft winget-pkgs
+        uses: vedantmgoyal2009/winget-releaser@v2
+        if: ${{ env.WINGET_TOKEN != '' }}
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        with:
+          identifier: GlideDesk.GlideDesk
+          version: ${{ steps.get_version.outputs.version }}
+          installers-regex: '.*_x64-setup\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}

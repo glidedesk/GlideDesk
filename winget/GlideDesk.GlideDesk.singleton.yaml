@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+PackageIdentifier: GlideDesk.GlideDesk
+PackageVersion: 1.1.2
+PackageName: GlideDesk
+Publisher: GlideDesk
+PublisherUrl: https://github.com/glidedesk/GlideDesk
+PublisherSupportUrl: https://github.com/glidedesk/GlideDesk/issues
+Author: GlideDesk Contributors
+License: GPL-3.0
+LicenseUrl: https://raw.githubusercontent.com/glidedesk/GlideDesk/main/LICENSE
+Copyright: Copyright (c) 2026 GlideDesk Contributors
+ShortDescription: Cross-platform seamless mouse and keyboard sharing, clipboard sync, and screen projection.
+Description: GlideDesk is a modern, high-performance open-source software KVM and workspace bridging application. It enables seamless sharing of your mouse and keyboard across multiple computers and mobile devices with zero lag, bidirectional clipboard synchronization, and secure peer-to-peer encryption.
+Moniker: glidedesk
+Tags:
+  - kvm
+  - mouse-sharing
+  - keyboard-sharing
+  - input-sharing
+  - clipboard-sync
+  - screen-projection
+  - synergy
+  - barrier
+InstallerType: nullsoft
+InstallModes:
+  - interactive
+  - silent
+UpgradeBehavior: install
+ReleaseDate: 2026-11-01
+Installers:
+  - Architecture: x64
+    InstallerType: nullsoft
+    InstallerUrl: https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_x64-setup.exe
+    InstallerSha256: A61081F0D644DFFB8F3E0E481E1AB9D39B0624B383DF9FFDB68DFE59C3F083C7
+PackageLocale: en-US
+ManifestType: singleton
+ManifestVersion: 1.6.0
