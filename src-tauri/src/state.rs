@@ -281,6 +281,21 @@ impl Default for FirewallState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupState {
+    pub show: bool,
+    pub missing: Vec<String>,
+}
+
+impl Default for SetupState {
+    fn default() -> Self {
+        Self {
+            show: false,
+            missing: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateDownload {
     pub name: String,
     pub url: String,
@@ -450,6 +465,8 @@ pub struct FullState {
     pub pc_screen: PcScreenState,
     #[serde(rename = "pcApps")]
     pub pc_apps: PcAppsState,
+    #[serde(default)]
+    pub setup: SetupState,
 }
 
 #[derive(Clone)]
@@ -520,6 +537,7 @@ impl AppState {
             apps: AppsState::default(),
             pc_screen: PcScreenState::default(),
             pc_apps: PcAppsState::default(),
+            setup: SetupState::default(),
         };
 
         Self {
@@ -752,5 +770,16 @@ mod tests {
         let current = &app_state.inner.read().found[0];
         assert_eq!(current.address.as_deref(), Some("192.168.4.9"));
         assert_eq!(current.id, "VASANTH");
+    }
+
+    #[test]
+    fn test_full_state_includes_setup() {
+        let app_state = AppState::new();
+        let state = app_state.snapshot();
+        assert!(!state.setup.show);
+        assert!(state.setup.missing.is_empty());
+
+        let json = serde_json::to_string(&state).expect("serialize FullState");
+        assert!(json.contains("\"setup\":{\"show\":false,\"missing\":[]}"));
     }
 }

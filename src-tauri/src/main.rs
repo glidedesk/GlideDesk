@@ -59,11 +59,23 @@ fn main() {
                 log::warn!("Could not initialize system tray: {}", e);
             }
 
-            // 6. If running as a background daemon / login service, keep window hidden
+            // 6. Window presentation & macOS close/dock behavior
             let is_daemon = std::env::args().any(|a| a == "--daemon" || a == "--headless" || a == "--silent");
-            if is_daemon {
-                if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window("main") {
+                let win = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win.hide();
+                    }
+                });
+
+                if is_daemon {
                     let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
                 }
             }
 
@@ -113,13 +125,21 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building GlideDesk application")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::Reopen { .. } => {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
                 let window_reg = app_handle.state::<crate::window_manager::ParkedWindowRegistry>();
                 let restored = window_reg.restore_all();
                 if !restored.is_empty() {
                     log::info!("[WindowHandoff] App exit: restored {} parked window(s)", restored.len());
                 }
             }
+            _ => {}
         });
 }

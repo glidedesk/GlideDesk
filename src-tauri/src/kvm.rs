@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 #[allow(unused_imports)]
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1165,6 +1165,18 @@ pub mod hook_engine {
                     if !tap.is_null() {
                         log::info!("GlideDesk: macOS CGEventTap successfully initialized!");
                         EVENT_TAP = Some(tap);
+
+                        // If running interactively, bring the main window forward now that permissions are active
+                        let is_daemon = std::env::args().any(|a| a == "--daemon" || a == "--headless" || a == "--silent");
+                        if !is_daemon {
+                            if let Some(app) = &APP_HANDLE {
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.unminimize();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                        }
 
                         let dummy = CGEventCreate(std::ptr::null_mut());
                         if !dummy.is_null() {

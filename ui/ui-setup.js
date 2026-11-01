@@ -34,27 +34,33 @@ UI.setup = (() => {
   const shown = new Set();
 
   function render(s) {
+    if (!s || !s.setup) {
+      page.hidden = true;
+      document.body.classList.remove('setup');
+      return;
+    }
     page.hidden = !s.setup.show;
     document.body.classList.toggle('setup', !page.hidden);
     if (page.hidden) return;
-    for (const m of s.setup.missing) shown.add(m);
+    const missing = Array.isArray(s.setup.missing) ? s.setup.missing : [];
+    for (const m of missing) shown.add(m);
 
     const fw = s.firewall || {};
-    const fwBad = s.setup.missing.includes('firewall');
+    const fwBad = missing.includes('firewall');
     fwRow.hidden = !shown.has('firewall');
     fwRow.setHint(fw.checking ? 'Checking…' : fwBad ? (fw.message || '') + ' Fix asks for administrator rights once.' : '');
     fwFix.hidden = !fwBad || fw.checking;
     fwDone.hidden = fwBad || fw.checking;
 
-    const h = s.kvmState.helper;
-    const helperBad = s.setup.missing.includes('helper');
+    const h = (s.kvmState && s.kvmState.helper) || '';
+    const helperBad = missing.includes('helper');
     helperRow.hidden = !shown.has('helper');
     helperRow.setHint(helperBad ? h + '. Restart GlideDesk if it stays like this.' : '');
     helperPill.hidden = !helperBad;
     helperDone.hidden = helperBad;
 
-    const v = s.pcScreen.vdd;
-    const drvBad = s.setup.missing.includes('driver');
+    const v = (s.pcScreen && s.pcScreen.vdd) || {};
+    const drvBad = missing.includes('driver');
     drvRow.hidden = !shown.has('driver');
     drvRow.setHint(v.busy === 'install' ? 'Installing…' : drvBad ? 'Optional. Adds an extra screen for the other computer (Extend). Installs a display driver and asks for administrator rights once.' : '');
     drvBtn.hidden = !drvBad;

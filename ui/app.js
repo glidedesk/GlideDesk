@@ -168,12 +168,13 @@
   let phonesKey = '';
   let assetsSeen = -1;
   function renderPhones(s) {
-    const ph = s.phone || { nearby: [] };
+    const ph = (s && s.phone) || {};
+    const nearby = Array.isArray(ph.nearby) ? ph.nearby : [];
     if (ph.assets !== assetsSeen && typeof api.phoneAssets === 'function') {
       assetsSeen = ph.assets;
       api.phoneAssets().then((a) => {
         UI.phoneAssets = a;
-        UI.phoneWall = a.wallpaper ? 'url("' + a.wallpaper + '")' : '';
+        UI.phoneWall = a && a.wallpaper ? 'url("' + a.wallpaper + '")' : '';
         phonesKey = '';
         if (UI.state) render(UI.state);
       }, () => {});
@@ -183,18 +184,18 @@
     // The connected phone's line (ping, battery) changes often: written in place, the tiles (and
     // their wallpaper) built again only when something else changed, else they flicker.
     const subOf = (d) => (d.connected
-      ? (ph.connected.rttMs != null ? ph.connected.rttMs + ' ms' : 'Connected') + (info.battery != null ? ' · ' + info.battery + '%' + (info.charging ? ' ⚡' : '') : '')
+      ? (ph.connected && ph.connected.rttMs != null ? ph.connected.rttMs + ' ms' : 'Connected') + (info.battery != null ? ' · ' + info.battery + '%' + (info.charging ? ' ⚡' : '') : '')
       : ph.connecting && ph.connecting.id === d.id ? 'Connecting…' : 'Nearby · Click to connect');
-    const key = JSON.stringify([ph.nearby, ph.connecting, ph.held, colors, UI.phoneWall ? UI.phoneWall.length : 0, current && current.def.id]);
+    const key = JSON.stringify([nearby, ph.connecting, ph.held, colors, UI.phoneWall ? UI.phoneWall.length : 0, current && current.def.id]);
     if (key === phonesKey) {
-      ph.nearby.forEach((d, i) => {
+      nearby.forEach((d, i) => {
         const sub = $('phones').children[i] && $('phones').children[i].querySelector('.phone-sub');
         if (sub && sub.textContent !== subOf(d)) sub.textContent = subOf(d);
       });
       return;
     }
     phonesKey = key;
-    $('phones').replaceChildren(...ph.nearby.map((d) => {
+    $('phones').replaceChildren(...nearby.map((d) => {
       const wall = el('span', { class: 'phone-wall' }, [UI.icon('phone')]);
       if (d.connected && UI.phoneWall) wall.style.backgroundImage = UI.phoneWall;
       else if (d.connected && colors) wall.style.backgroundImage = 'linear-gradient(160deg, ' + colors.join(', ') + (colors.length === 1 ? ', ' + colors[0] : '') + ')';
@@ -272,9 +273,14 @@
     UI.state = s;
     document.body.classList.toggle('no-peer', !linked(s)); // switches of what needs a device can't be changed (shared/feature-art.js)
     renderPeer(s);
-    UI.setup.render(s);
-    UI.fillTree(UI.setup.page);
-    pages.hidden = !UI.setup.page.hidden;
+    try {
+      UI.setup.render(s);
+      UI.fillTree(UI.setup.page);
+      pages.hidden = !UI.setup.page.hidden;
+    } catch (e) {
+      console.warn('UI.setup.render error:', e);
+      pages.hidden = false;
+    }
     renderSidebar(s);
     renderBanner(s);
     if (current) renderPage(current, s);
