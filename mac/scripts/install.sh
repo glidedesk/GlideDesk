@@ -71,6 +71,10 @@ hdiutil detach "${MOUNT_POINT}" -quiet || true
 echo "==> Removing macOS quarantine flags (Gatekeeper approval)..."
 xattr -cr "/Applications/GlideDesk.app" 2>/dev/null || true
 
+# Re-sign with fixed bundle identifier so macOS preserves Accessibility & Input Monitoring permissions across updates
+echo "==> Sealing bundle identity for Accessibility permission persistence..."
+codesign --force --deep --sign - --identifier "com.glidedesk.desktop" "/Applications/GlideDesk.app" 2>/dev/null || true
+
 # Reopen immediately if it was running or if user requested
 if [ "${WAS_RUNNING}" -eq 1 ] || [ "${1:-}" = "--launch" ]; then
   echo "==> Relaunching GlideDesk (remote mouse/keyboard control will reconnect)..."
