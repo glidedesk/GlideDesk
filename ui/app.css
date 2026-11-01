@@ -145,6 +145,29 @@ select { padding: 3px 24px 3px 8px; border-radius: 6px; border: 1px solid var(--
 .slider input { width: 180px; accent-color: var(--accent); }
 .slider output { min-width: 52px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 
+/* ---------- port-conflict error bar ---------- */
+.port-conflict-bar {
+  display: flex; align-items: flex-start; gap: 12px;
+  margin: 12px 28px 0; padding: 13px 14px 13px 16px;
+  background: rgba(239, 68, 68, 0.10); border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 12px; animation: drop-in 0.35s var(--spring, ease) both;
+}
+.port-conflict-icon {
+  flex: none; width: 18px; height: 18px; margin-top: 1px;
+  background: var(--bad);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 2.5a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15zM10 6v5M10 13v.5'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 2.5a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15zM10 6v5M10 13v.5'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.port-conflict-body { flex: 1; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.port-conflict-body strong { color: var(--bad); font-weight: 600; }
+.port-conflict-body span { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.port-conflict-dismiss {
+  flex: none; background: none; border: none; cursor: pointer; padding: 2px 4px;
+  color: var(--muted); font-size: 14px; line-height: 1; border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.port-conflict-dismiss:hover { color: var(--text); background: var(--nav-hover); }
+
 /* ---------- banner (pairing) ---------- */
 .banner { position: sticky; top: 12px; margin-top: 12px !important; z-index: 4; margin: 0 28px 4px; padding: 14px 16px; border-radius: 12px; display: flex; align-items: center; gap: 16px; background: var(--card); border: 1px solid var(--warn); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18); }
 .banner-text { flex: 1; font-size: 14px; }

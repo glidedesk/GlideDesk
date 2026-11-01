@@ -17,25 +17,35 @@ pub fn set_kvm(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Re
     {
         let mut s = state.inner.write();
         if let Some(locked) = partial.get("locked").and_then(|v| v.as_bool()) {
-            s.input.locked = locked;
+            s.kvm.locked = locked;
+            s.kvm_state.locked = locked;
         }
         if let Some(mouse) = partial.get("mouse").and_then(|v| v.as_bool()) {
-            s.input.mouse = mouse;
+            s.kvm.mouse = mouse;
         }
         if let Some(keyboard) = partial.get("keyboard").and_then(|v| v.as_bool()) {
-            s.input.keyboard = keyboard;
+            s.kvm.keyboard = keyboard;
         }
         if let Some(gestures) = partial.get("gestures").and_then(|v| v.as_bool()) {
-            s.input.gestures = gestures;
+            s.kvm.gestures = gestures;
         }
         if let Some(speed) = partial.get("speed").and_then(|v| v.as_f64()) {
-            s.input.speed = speed as f32;
+            s.kvm.speed = speed as f32;
         }
         if let Some(rev) = partial.get("reverseScroll").and_then(|v| v.as_bool()) {
-            s.input.reverse_scroll = rev;
+            s.kvm.reverse_scroll = rev;
         }
         if let Some(lock_screen) = partial.get("lockScreen").and_then(|v| v.as_bool()) {
-            s.input.lock_screen = lock_screen;
+            s.kvm.lock_screen = lock_screen;
+        }
+        if let Some(be_driven) = partial.get("beDriven").and_then(|v| v.as_bool()) {
+            s.kvm.be_driven = be_driven;
+        }
+        if let Some(drive_other) = partial.get("driveOther").and_then(|v| v.as_bool()) {
+            s.kvm.drive_other = drive_other;
+        }
+        if let Some(hotkey_switch) = partial.get("hotkeySwitch").and_then(|v| v.as_bool()) {
+            s.kvm.hotkey_switch = hotkey_switch;
         }
     }
     push_state(&app, &state);
@@ -295,8 +305,22 @@ pub fn open_link(key: String, app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn pair(host: String, network: State<'_, NetworkManager>) -> Result<(), String> {
-    network.connect_to(&host).await
+pub async fn pair(host: String, network: State<'_, NetworkManager>, state: State<'_, AppState>) -> Result<(), String> {
+    let target = {
+        let s = state.inner.read();
+        if let Some(peer) = s.found.iter().find(|p| p.id == host) {
+            peer.address.clone().map(|addr| {
+                if let Some(port) = peer.port {
+                    format!("{}:{}", addr, port)
+                } else {
+                    addr
+                }
+            })
+        } else {
+            None
+        }
+    }.unwrap_or(host);
+    network.connect_to(&target).await
 }
 
 #[tauri::command]
@@ -308,7 +332,7 @@ pub async fn connect_address(addr: String, network: State<'_, NetworkManager>) -
 pub async fn connect_again(network: State<'_, NetworkManager>, state: State<'_, AppState>) -> Result<(), String> {
     let target = {
         let s = state.inner.read();
-        s.paired.first().and_then(|p| p.address.clone())
+        s.paired.as_ref().and_then(|p| p.address.clone())
     };
     if let Some(addr) = target {
         network.connect_to(&addr).await?;
@@ -390,7 +414,7 @@ pub fn cancel_pair() -> Result<(), String> {
 pub fn forget(id: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     {
         let mut s = state.inner.write();
-        s.paired.retain(|p| p.id != id);
+        s.paired = None;
     }
     push_state(&app, &state);
     Ok(())

@@ -209,7 +209,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.val }}
           name: "GlideDesk ${{ steps.tag.outputs.val }}"
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(steps.tag.outputs.val, 'beta') || contains(steps.tag.outputs.val, 'alpha') || contains(steps.tag.outputs.val, 'rc') }}
           generate_release_notes: true
           files: release-assets/*
         env:

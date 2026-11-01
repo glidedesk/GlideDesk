@@ -872,7 +872,7 @@ pub mod hook_engine {
             if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
                 let snap = state.snapshot();
                 let has_peer = snap.client.is_some();
-                let is_driving = snap.input.where_input == "driving";
+                let is_driving = snap.input == "driving";
 
                 let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
                 let max_x = vx + vw;
@@ -1005,7 +1005,7 @@ pub mod hook_engine {
 
             if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
                 let snap = state.snapshot();
-                let is_driving = snap.input.where_input == "driving";
+                let is_driving = snap.input == "driving";
 
                 // Hotkey to release: VK_RMENU (Right Alt, 165) or VK_RCONTROL (163)
                 if (k.vkCode == 165 || k.vkCode == 163) && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
@@ -1212,7 +1212,7 @@ pub mod hook_engine {
         if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
             let snap = state.snapshot();
             let has_peer = snap.client.is_some();
-            let is_driving = snap.input.where_input == "driving";
+            let is_driving = snap.input == "driving";
 
             let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
             let max_x = vx + vw;

@@ -13,7 +13,7 @@
 
   // Sidebar groups: no headings, one icon column, a small gap
   // between groups; General sits below a line.
-  const GROUP = { overview: 0, calls: 0.5, messages: 0.5, media: 0.5, 'mac-pc': 1, 'pc-mac': 1, cursor: 2, remote: 2, keyboard: 2, clipboard: 3, notifications: 3, files: 3, terminal: 4, audio: 4, camera: 4, apps: 4 };
+  const GROUP = { overview: 0, calls: 0.5, messages: 0.5, media: 0.5, pfiles: 0.5, 'mac-pc': 1, 'pc-mac': 1, cursor: 2, remote: 2, keyboard: 2, clipboard: 3, notifications: 3, files: 3, mount: 4, terminal: 4, audio: 4, camera: 4, apps: 4, multi: 5 };
   let lastGroup;
   let gap = null; // the gap before the current group (hidden with the group: renderSidebar)
   for (const def of UI.tabs.slice().sort((a, b) => (a.order ?? 50) - (b.order ?? 50))) {
@@ -296,5 +296,23 @@
   api.getState().then((s) => {
     show((s.ui && s.ui.tab) === 'phone' && !(s.phone && s.phone.connected) ? 'overview' : (s.ui && s.ui.tab) || 'overview', false);
     render(s);
+  });
+
+  // Port conflict: Rust emits 'port-conflict' when TCP 47800 is already taken by another instance.
+  // Show a persistent dismissible error bar at the top of the content area so the user knows why
+  // the mesh server isn't running — without silently dying.
+  api.onPortConflict && api.onPortConflict((payload) => {
+    if ($('port-conflict-bar')) return; // already shown
+    const port = (payload && payload.port) || 47800;
+    const bar = el('div', { id: 'port-conflict-bar', class: 'port-conflict-bar' }, [
+      el('div', { class: 'port-conflict-icon' }),
+      el('div', { class: 'port-conflict-body' }, [
+        el('strong', { text: 'GlideDesk is already running' }),
+        el('span', { text: `TCP port ${port} is in use by another instance. Close it first, then restart GlideDesk.` }),
+      ]),
+      el('button', { class: 'port-conflict-dismiss', attrs: { 'aria-label': 'Dismiss' }, text: '✕' }),
+    ]);
+    bar.querySelector('.port-conflict-dismiss').onclick = () => bar.remove();
+    $('content').prepend(bar);
   });
 })();

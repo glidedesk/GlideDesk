@@ -1,6 +1,6 @@
 [package]
 name = "glidedesk"
-version = "1.1.1"
+version = "1.1.2-beta.1"
 description = "GlideDesk — Lightweight, Zero-Latency Multi-Device KVM (Tauri v2 + Rust)"
 authors = ["GlideDesk Contributors"]
 license = "GPL-3.0"

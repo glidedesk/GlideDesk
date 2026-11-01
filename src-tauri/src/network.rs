@@ -300,6 +300,13 @@ impl DiscoveryService {
             interval.tick().await;
             if let Ok(bytes) = serde_json::to_vec(&beacon) {
                 let _ = socket.send_to(&bytes, broadcast_addr).await;
+                for ip_str in crate::state::local_ip_addresses() {
+                    if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                        let octets = ip.octets();
+                        let subnet_bcast = SocketAddr::from(([octets[0], octets[1], octets[2], 255], DISCOVERY_PORT));
+                        let _ = socket.send_to(&bytes, subnet_bcast).await;
+                    }
+                }
             }
         }
     }
@@ -445,12 +452,17 @@ impl MeshServer {
 
     async fn dispatch_incoming(pkt: &WireMessage, peer_addr: &SocketAddr, app: &AppHandle, state: &AppState) {
         match pkt.t.as_str() {
-            "hello" => {
+            "hello" | "welcome" => {
+                let addr_str = if peer_addr.ip().is_unspecified() || peer_addr.ip().is_loopback() {
+                    None
+                } else {
+                    Some(peer_addr.ip().to_string())
+                };
                 let info = PeerInfo {
                     id: pkt.id.clone().unwrap_or_else(|| peer_addr.to_string()),
                     name: pkt.name.clone().unwrap_or_else(|| "Remote Peer".to_string()),
                     os: pkt.os.clone().unwrap_or_else(|| "unknown".to_string()),
-                    address: Some(peer_addr.ip().to_string()),
+                    address: addr_str,
                     port: pkt.port.or(Some(peer_addr.port())),
                     last_seen: Some(chrono::Utc::now().timestamp_millis() as u64),
                     invited: None,
@@ -701,6 +713,16 @@ impl NetworkManager {
         let clients_lock = Arc::clone(&self.active_clients);
         let cur_id = session_id.clone();
 
+        let resolved_addr: SocketAddr = target_addr
+            .trim_start_matches("ws://")
+            .trim_start_matches("wss://")
+            .parse::<SocketAddr>()
+            .or_else(|_| {
+                let host = target_addr.split(':').next().unwrap_or(target_addr);
+                format!("{}:{}", host, DEFAULT_PORT).parse::<SocketAddr>()
+            })
+            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+
         tauri::async_runtime::spawn(async move {
             let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
             let mut tracker = HeartbeatTracker::new();
@@ -737,7 +759,7 @@ impl NetworkManager {
                                 match msg {
                                     Message::Text(txt) => {
                                         if let Ok(pkt) = serde_json::from_str::<WireMessage>(&txt) {
-                                            MeshServer::dispatch_incoming(&pkt, &"127.0.0.1:0".parse().unwrap(), &app, &state).await;
+                                            MeshServer::dispatch_incoming(&pkt, &resolved_addr, &app, &state).await;
                                         }
                                     }
                                     Message::Close(_) => break,
