@@ -223,6 +223,52 @@ impl Default for WakeState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalState {
+    #[serde(rename = "allowMac")]
+    pub allow_mac: bool,
+    pub enabled: bool,
+}
+
+impl Default for TerminalState {
+    fn default() -> Self {
+        Self { allow_mac: true, enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppsState {
+    pub open: u32,
+}
+
+impl Default for AppsState {
+    fn default() -> Self {
+        Self { open: 0 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PcScreenState {
+    pub mode: String,
+}
+
+impl Default for PcScreenState {
+    fn default() -> Self {
+        Self { mode: "off".to_string() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PcAppsState {
+    pub allow: bool,
+}
+
+impl Default for PcAppsState {
+    fn default() -> Self {
+        Self { allow: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallState {
     pub ok: bool,
     pub checking: bool,
@@ -385,6 +431,12 @@ pub struct FullState {
     pub phone: PhoneState,
     pub wake: WakeState,
     pub firewall: FirewallState,
+    pub terminal: TerminalState,
+    pub apps: AppsState,
+    #[serde(rename = "pcScreen")]
+    pub pc_screen: PcScreenState,
+    #[serde(rename = "pcApps")]
+    pub pc_apps: PcAppsState,
 }
 
 #[derive(Clone)]
@@ -451,6 +503,10 @@ impl AppState {
             phone: PhoneState::default(),
             wake: WakeState::default(),
             firewall: FirewallState::default(),
+            terminal: TerminalState::default(),
+            apps: AppsState::default(),
+            pc_screen: PcScreenState::default(),
+            pc_apps: PcAppsState::default(),
         };
 
         Self {

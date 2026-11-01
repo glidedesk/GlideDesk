@@ -75,30 +75,30 @@ UI.tab({
     };
     const notPhone = { phone: false };
     const m2p = [
-      row('Screen', 'mac-pc', (s) => s.stream.state === 'on', null, undefined, notPhone),
-      row('Sound', 'audio', (s) => s.audio.receive, (v) => api.setAudio({ receive: v })),
-      row('Mouse and keyboard', 'cursor', (s) => s.kvm.beDriven, (v) => api.setKvm({ beDriven: v })),
-      row('Clipboard', 'clipboard', (s) => s.clipboard.receive, (v) => api.setClipboard({ receive: v })),
-      row('Notifications', 'notifications', (s) => s.notifs.receive, (v) => api.setNotifs({ receive: v })),
-      row('Shared folder', 'files', (s) => s.files.mountMac, (v) => api.setFiles({ mountMac: v })),
-      row('Terminal', 'terminal', (s) => s.terminal.allowMac, (v) => api.setTerminal({ allowMac: v }), undefined, notPhone),
-      row('Apps', 'apps', (s) => s.apps.open > 0, null, undefined, notPhone),
+      row('Screen', 'mac-pc', (s) => s.stream?.state === 'on', null, undefined, notPhone),
+      row('Sound', 'audio', (s) => !!s.audio?.receive, (v) => api.setAudio({ receive: v })),
+      row('Mouse and keyboard', 'cursor', (s) => !!s.kvm?.beDriven, (v) => api.setKvm({ beDriven: v })),
+      row('Clipboard', 'clipboard', (s) => !!s.clipboard?.receive, (v) => api.setClipboard({ receive: v })),
+      row('Notifications', 'notifications', (s) => !!s.notifs?.receive, (v) => api.setNotifs({ receive: v })),
+      row('Shared folder', 'files', (s) => !!s.files?.mountMac, (v) => api.setFiles({ mountMac: v })),
+      row('Terminal', 'terminal', (s) => !!s.terminal?.allowMac, (v) => api.setTerminal({ allowMac: v }), undefined, notPhone),
+      row('Apps', 'apps', (s) => (s.apps?.open || 0) > 0, null, undefined, notPhone),
     ];
     const p2m = [
-      row('Screen', 'pc-mac', (s) => s.pcScreen.mode !== 'off', (v) => api.setPcScreenMode(v ? 'mirror' : 'off')),
-      row('Sound', 'audio', (s) => s.audio.send, (v) => api.setAudio({ send: v })),
-      row('Mouse and keyboard', 'cursor', (s) => s.kvm.driveOther, (v) => api.setKvm({ driveOther: v })),
-      row('Clipboard', 'clipboard', (s) => s.clipboard.send, (v) => api.setClipboard({ send: v })),
-      row('Notifications', 'notifications', (s) => s.notifs.send, (v) => api.setNotifs({ send: v })),
-      row('Shared folder', 'files', (s) => s.files.shareOn, (v) => api.setShareOn(v)),
-      row('Terminal', 'terminal', (s) => s.terminal.enabled, (v) => api.setTerminal({ enabled: v }), undefined, notPhone),
-      row('Apps', 'apps', (s) => s.pcApps.allow, (v) => api.setPcApps({ allow: v }), undefined, notPhone),
+      row('Screen', 'pc-mac', (s) => s.pcScreen?.mode && s.pcScreen.mode !== 'off', (v) => api.setPcScreenMode(v ? 'mirror' : 'off')),
+      row('Sound', 'audio', (s) => !!s.audio?.send, (v) => api.setAudio({ send: v })),
+      row('Mouse and keyboard', 'cursor', (s) => !!s.kvm?.driveOther, (v) => api.setKvm({ driveOther: v })),
+      row('Clipboard', 'clipboard', (s) => !!s.clipboard?.send, (v) => api.setClipboard({ send: v })),
+      row('Notifications', 'notifications', (s) => !!s.notifs?.send, (v) => api.setNotifs({ send: v })),
+      row('Shared folder', 'files', (s) => !!s.files?.shareOn, (v) => api.setShareOn(v)),
+      row('Terminal', 'terminal', (s) => !!s.terminal?.enabled, (v) => api.setTerminal({ enabled: v }), undefined, notPhone),
+      row('Apps', 'apps', (s) => !!s.pcApps?.allow, (v) => api.setPcApps({ allow: v }), undefined, notPhone),
     ];
     const pair = UI.dirCards({ rows: m2p }, { rows: p2m });
 
     // ---- this PC + connect by address (always visible) ----
     const addrVal = el('span', { class: 'value addr' });
-    const copyBtn = UI.button('Copy', () => UI.state && api.copyText(UI.state.addresses[0] || ''), 'small');
+    const copyBtn = UI.button('Copy', () => UI.state && api.copyText((UI.state.addresses && UI.state.addresses[0]) || ''), 'small');
     const addrRow = UI.row('{me}', '', [addrVal, copyBtn]);
     const ipInput = el('input', { type: 'text', placeholder: '192.168.1.20', autocomplete: 'off', spellcheck: false, attrs: { 'aria-label': 'Address' } });
     let asking = '';
@@ -155,9 +155,9 @@ UI.tab({
       last = s;
       bleSw.set(!s.net || s.net.ble !== false);
       blePcSw.set(!!s.net && s.net.blePc === true);
-      const l = s.link;
+      const l = s.link || { state: 'disconnected' };
       const connected = l.state === 'connected';
-      pcName.textContent = s.device.name;
+      pcName.textContent = (s.device && s.device.name) || 'This PC';
       const p = UI.peer(s);
       macName.textContent = s.peer ? s.peer.name : 'The other computer';
       peerDev.className = 'device ' + UI.osClass(p.os);
@@ -222,8 +222,9 @@ UI.tab({
       }
 
       // this PC
-      addrVal.textContent = s.addresses.length ? s.addresses[0] : 'No network'; // The one the other computer can reach
-      copyBtn.hidden = !s.addresses.length;
+      const myAddrs = s.addresses || [];
+      addrVal.textContent = myAddrs.length ? myAddrs[0] : 'No network'; // The one the other computer can reach
+      copyBtn.hidden = !myAddrs.length;
       const busy = !!s.pairing && s.pairing.phase !== 'failed';
       ipBtn.disabled = busy || !!asking;
       const failed = s.pairing && s.pairing.phase === 'failed';
