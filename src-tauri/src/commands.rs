@@ -538,7 +538,7 @@ pub fn open_link(key: String, app: AppHandle) -> Result<(), String> {
 pub async fn pair(host: String, network: State<'_, NetworkManager>, state: State<'_, AppState>) -> Result<(), String> {
     let target = {
         let s = state.inner.read();
-        if let Some(peer) = s.found.iter().find(|p| p.id == host) {
+        if let Some(peer) = s.found.iter().find(|p| p.id.eq_ignore_ascii_case(&host) || p.address.as_deref() == Some(&host)) {
             peer.address.clone().map(|addr| {
                 if let Some(port) = peer.port {
                     format!("{}:{}", addr, port)

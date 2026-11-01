@@ -240,11 +240,26 @@ UI.tab({
       // Paired both ways: the computer we connect to (s.paired) and the ones that connect to us (s.guests).
       const known = new Set([...(s.paired ? [s.paired.macId] : []), ...s.guests.map((g) => g.id)]);
       const live = s.peer && connected ? s.peer.id : '';
-      const fk = JSON.stringify([s.found, [...known], live, busy, blocked]);
+
+      // Deduplicate found devices by IP address, and by lower-case ID / name+os
+      const seenAddrs = new Set();
+      const seenKeys = new Set();
+      const uniqueFound = [];
+      for (const dev of (s.found || [])) {
+        const addr = (dev.address || '').trim();
+        const key = (dev.id || dev.name || '').toLowerCase().trim();
+        if (addr && seenAddrs.has(addr)) continue;
+        if (key && seenKeys.has(key)) continue;
+        if (addr) seenAddrs.add(addr);
+        if (key) seenKeys.add(key);
+        uniqueFound.push(dev);
+      }
+
+      const fk = JSON.stringify([uniqueFound, [...known], live, busy, blocked]);
       if (fk !== foundKey) {
         foundKey = fk;
         let focus = null;
-        const rows = s.found.map((dev) => {
+        const rows = uniqueFound.map((dev) => {
           const isKnown = known.has(dev.id);
           const online = dev.id === live;
           // A Mac hosts; with a PC or Linux the one who clicks is the guest. A phone is asked to pair.

@@ -539,12 +539,39 @@ impl AppState {
         let mut peer = peer;
         peer.last_seen = Some(now);
 
-        if let Some(existing) = s.found.iter_mut().find(|p| p.id == peer.id) {
-            let changed = existing.address != peer.address || existing.name != peer.name;
-            existing.name = peer.name;
-            existing.address = peer.address;
+        let match_idx = s.found.iter().position(|p| {
+            p.id.eq_ignore_ascii_case(&peer.id)
+                || (peer.address.is_some() && p.address.is_some() && p.address == peer.address)
+                || (p.name.eq_ignore_ascii_case(&peer.name) && p.os.eq_ignore_ascii_case(&peer.os))
+        });
+
+        if let Some(idx) = match_idx {
+            let existing = &mut s.found[idx];
+            let changed = existing.address != peer.address || existing.name != peer.name || existing.id != peer.id;
+            existing.id = peer.id.clone();
+            existing.name = peer.name.clone();
+            existing.address = peer.address.clone();
             existing.port = peer.port;
+            existing.os = peer.os.clone();
             existing.last_seen = Some(now);
+
+            // Clean up any remaining duplicate entries that match this IP or ID
+            let keep_id = peer.id.clone();
+            let keep_addr = peer.address.clone();
+            let mut i = 0;
+            while i < s.found.len() {
+                if i != idx {
+                    let dup = &s.found[i];
+                    let is_dup = dup.id.eq_ignore_ascii_case(&keep_id)
+                        || (keep_addr.is_some() && dup.address.is_some() && dup.address == keep_addr);
+                    if is_dup {
+                        s.found.remove(i);
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+
             changed
         } else {
             s.found.push(peer);
@@ -686,4 +713,44 @@ pub fn whoami_host() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "GlideDesk-PC".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_found_peer_deduplication() {
+        let app_state = AppState::new();
+
+        let peer1 = PeerInfo {
+            id: "Vasanth".to_string(),
+            name: "Vasanth".to_string(),
+            os: "win".to_string(),
+            address: Some("192.168.4.9".to_string()),
+            port: Some(47800),
+            last_seen: None,
+            invited: None,
+        };
+        app_state.update_found_peer(peer1);
+        assert_eq!(app_state.inner.read().found.len(), 1);
+
+        // Case-variant ID from same machine
+        let peer2 = PeerInfo {
+            id: "VASANTH".to_string(),
+            name: "VASANTH".to_string(),
+            os: "win".to_string(),
+            address: Some("192.168.4.9".to_string()),
+            port: Some(47800),
+            last_seen: None,
+            invited: None,
+        };
+        app_state.update_found_peer(peer2);
+
+        // Must NOT create duplicate entry; should update existing
+        assert_eq!(app_state.inner.read().found.len(), 1);
+        let current = &app_state.inner.read().found[0];
+        assert_eq!(current.address.as_deref(), Some("192.168.4.9"));
+        assert_eq!(current.id, "VASANTH");
+    }
 }
