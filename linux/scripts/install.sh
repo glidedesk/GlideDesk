@@ -17,7 +17,7 @@ echo "==> Fetching latest GlideDesk release..."
 RELEASE_JSON="$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)"
 VERSION="$(echo "${RELEASE_JSON}" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4 | sed 's/^v//' || true)"
 if [ -z "${VERSION}" ]; then
-    VERSION="1.1.1"
+    VERSION="1.1.2"
 fi
 echo "==> Latest version: ${VERSION}"
 

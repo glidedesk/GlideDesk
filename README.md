@@ -134,19 +134,14 @@ brew install --cask glidedesk
 ```
 
 #### Option 3: Manual Direct Download
-- **Universal Build (Recommended for Apple Silicon & Intel Macs):** [`GlideDesk_1.1.1_universal.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_universal.dmg) (15 MB)
+- **Universal Build (Recommended for Apple Silicon & Intel Macs):** [`GlideDesk_1.1.2_universal.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_universal.dmg) (16 MB)
 - **Apple Silicon Only (M1 / M2 / M3 / M4 Compact):** [`GlideDesk_1.1.1_aarch64.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_aarch64.dmg) (8 MB)
 
 ---
 
 ### 🪟 Windows (10 / 11 64-bit)
 
-#### Option 1: WinGet (Windows Package Manager)
-```powershell
-winget install GlideDesk.GlideDesk
-```
-
-#### Option 2: 1-Line PowerShell Silent Installer (Recommended)
+#### Option 1: 1-Line PowerShell Silent Installer (Fastest & Recommended)
 Automatically downloads, verifies, and silently installs or updates GlideDesk without reboot prompts.
 
 In **PowerShell**:
@@ -159,10 +154,20 @@ Or from **Command Prompt (`cmd.exe`)** / **Win + R Run Dialog**:
 powershell -ExecutionPolicy Bypass -Command "iex (irm https://raw.githubusercontent.com/glidedesk/GlideDesk/main/windows/scripts/install.ps1)"
 ```
 
-#### Option 2: Manual Direct Download
-- **Standard Installer (`.exe`):** [`GlideDesk_1.1.1_x64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_x64-setup.exe)
-- **Enterprise MSI (`.msi`):** [`GlideDesk_1.1.1_x64_en-US.msi`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_x64_en-US.msi)
-- **Portable Standalone (`.exe`, Zero-Install):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk-portable-x64.exe)
+#### Option 2: WinGet (Windows Package Manager)
+Once indexed in the Microsoft Community Repository:
+```powershell
+winget install GlideDesk.GlideDesk
+```
+Or install immediately via the direct manifest:
+```powershell
+winget install --manifest "https://raw.githubusercontent.com/glidedesk/GlideDesk/main/winget/GlideDesk.GlideDesk.singleton.yaml"
+```
+
+#### Option 3: Manual Direct Download
+- **Standard Installer (`.exe`):** [`GlideDesk_1.1.2_x64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_x64-setup.exe)
+- **Portable Standalone (`.exe`, Zero-Install):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk-portable-x64.exe)
+- **Enterprise MSI (`.msi`):** [`GlideDesk_1.1.1_x64_en-US.msi`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.1_x64_en-US.msi)
 
 ---
 
@@ -177,14 +182,14 @@ curl -fsSL https://raw.githubusercontent.com/glidedesk/GlideDesk/main/linux/scri
 #### Option 2: Manual Package Download & Terminal Commands
 - **Universal AppImage (Recommended for all Linux distros — Fedora, Arch, openSUSE, Ubuntu, Debian):**
   ```bash
-  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_amd64.AppImage
-  chmod +x GlideDesk_1.1.1_amd64.AppImage
-  ./GlideDesk_1.1.1_amd64.AppImage
+  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_amd64.AppImage
+  chmod +x GlideDesk_1.1.2_amd64.AppImage
+  ./GlideDesk_1.1.2_amd64.AppImage
   ```
 - **Debian / Ubuntu / Pop!_OS / Linux Mint (`.deb` Package):**
   ```bash
-  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_amd64.deb
-  sudo dpkg -i GlideDesk_1.1.1_amd64.deb || sudo apt-get install -f -y
+  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_amd64.deb
+  sudo dpkg -i GlideDesk_1.1.2_amd64.deb || sudo apt-get install -f -y
   ```
 
 ---
@@ -192,12 +197,12 @@ curl -fsSL https://raw.githubusercontent.com/glidedesk/GlideDesk/main/linux/scri
 ### 📱 Android Companion (Android 10+)
 
 #### Option 1: Direct Download & In-App Auto-Update
-- **Standard APK (Compact KVM & Clipboard):** [`GlideDesk-1.1.1.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk-1.1.1.apk)
-- **Full APK (Adds Phone Webcam & Notification Sync):** [`GlideDesk-1.1.1-full.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk-1.1.1-full.apk)
+- **Standard APK (Compact KVM & Clipboard):** [`GlideDesk-1.1.1.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk-1.1.1.apk)
+- **Full APK (Adds Phone Webcam & Notification Sync):** [`GlideDesk-1.1.1-full.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk-1.1.1-full.apk)
 
 #### Option 2: Install via ADB (USB or Wi-Fi)
 ```bash
-curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk-1.1.1.apk
+curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk-1.1.1.apk
 adb install -r GlideDesk-1.1.1.apk
 ```
 

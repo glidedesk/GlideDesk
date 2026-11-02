@@ -22,7 +22,7 @@ try {
 }
 
 if (-not $DownloadUrl) {
-    $Version = "1.1.1"
+    $Version = "1.1.2"
     $DownloadUrl = "https://github.com/$Repo/releases/latest/download/GlideDesk_${Version}_x64-setup.exe"
 }
 
