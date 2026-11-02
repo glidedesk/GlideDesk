@@ -576,9 +576,21 @@ impl MeshServer {
                 let _ = window_reg.restore_all();
             }
             "k.mm" | "remote.mm" => {
-                // Inbound relative mouse / phone remote move
+                // Inbound relative mouse / phone remote move with sub-pixel preservation
                 if let (Some(dx), Some(dy)) = (pkt.dx, pkt.dy) {
-                    crate::kvm::NativeInputInjector::move_cursor_relative(dx as i32, dy as i32);
+                    let ix = dx.round() as i32;
+                    let iy = dy.round() as i32;
+                    let final_x = if ix == 0 && dx.abs() > 0.001 {
+                        if dx > 0.0 { 1 } else { -1 }
+                    } else {
+                        ix
+                    };
+                    let final_y = if iy == 0 && dy.abs() > 0.001 {
+                        if dy > 0.0 { 1 } else { -1 }
+                    } else {
+                        iy
+                    };
+                    crate::kvm::NativeInputInjector::move_cursor_relative(final_x, final_y);
                 }
             }
             "k.md" | "remote.md" => {

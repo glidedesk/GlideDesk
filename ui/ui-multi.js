@@ -1,6 +1,5 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Multi-device tab, one-to-one app: what it is and the button that turns it on (multi.js). TwinDesk
-// restarts into mesh/main.js, whose own page (mesh/ui-multi.js) has the settings for several devices.
+// Multi-device tab: native multi-device mesh status and settings.
 'use strict';
 
 UI.tab({
@@ -9,24 +8,17 @@ UI.tab({
   title: 'Multi-device',
   color: 'linear-gradient(#5e5ce6, #3634a3)',
   desc: 'Several computers and phones connected at once',
-  tag: 'Beta',
   bottom: true,
   build(body) {
-    const { api } = UI;
-    // Mesh mode is in beta: the popup says so (shared/mesh-intro.js) before it restarts.
-    const turnOn = UI.button('Turn on', () => MeshIntro.confirm(() => {
-      turnOn.disabled = true;
-      turnOn.textContent = 'Restarting…';
-      api.setMulti(true);
-    }), 'small primary');
+    const statusPill = UI.el('span', { class: 'pill good', text: 'Enabled' });
+    const meshRow = UI.row('Multi-Device Mesh Active',
+      'GlideDesk operates natively as a multi-device mesh. All connected computers and phones share keyboard, mouse, and clipboard simultaneously across screen edges without needing mode switches.',
+      [statusPill]
+    );
 
     body.append(
-      UI.card('Mesh mode', [
-        UI.row('Use several devices at once',
-          'Computers and phones connected at the same time: one clipboard and one set of notifications for all, each screen edge leading to another device, a phone and a computer together',
-          [turnOn]),
-      ]),
-      UI.note('info', 'GlideDesk restarts when you turn it on or off.'),
+      UI.card('Mesh Networking', [meshRow]),
+      UI.note('info', 'Connect to other computers or phones using "Connect by address" or "Found nearby" on the Overview page.'),
       MeshIntro.art(),
     );
 

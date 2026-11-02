@@ -387,7 +387,7 @@ impl NativeInputInjector {
                     mouseData: 0,
                     dwFlags: MOUSEEVENTF_MOVE,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: 0x474C4944,
                 },
             },
         };
@@ -869,6 +869,11 @@ pub mod hook_engine {
             let msg = w_param.0 as u32;
             let m = *(l_param.0 as *const MSLLHOOKSTRUCT);
 
+            // Bypass hook for inputs injected by GlideDesk itself
+            if m.dwExtraInfo == 0x474C4944 {
+                return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
+            }
+
             if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
                 let snap = state.snapshot();
                 let has_peer = snap.client.is_some();
@@ -889,6 +894,7 @@ pub mod hook_engine {
                     };
 
                     if crossed {
+                        LAST_PT = m.pt;
                         let is_left_down = (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0;
                         let is_ctrl_down = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
 

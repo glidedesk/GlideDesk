@@ -654,19 +654,18 @@ impl AppState {
 
     pub fn add_client(&self, client: PeerInfo) {
         let mut s = self.inner.write();
-        if s.client.is_none() {
-            s.client = Some(client.clone());
-            s.peer = Some(client.clone());
-            s.paired = Some(PairedPeer {
-                mac_id: client.id.clone(),
-                mac_name: client.name.clone(),
-                os: client.os.clone(),
-                address: client.address.clone(),
-            });
-            s.link.state = "connected".to_string();
-            s.link.mac_name = Some(client.name.clone());
-            s.link.peer_name = Some(client.name.clone());
-        }
+        s.client = Some(client.clone());
+        s.peer = Some(client.clone());
+        s.paired = Some(PairedPeer {
+            mac_id: client.id.clone(),
+            mac_name: client.name.clone(),
+            os: client.os.clone(),
+            address: client.address.clone(),
+        });
+        s.link.state = "connected".to_string();
+        s.link.mac_name = Some(client.name.clone());
+        s.link.peer_name = Some(client.name.clone());
+
         if let Some(pos) = s.clients.iter().position(|p| p.id == client.id) {
             s.clients[pos] = client;
         } else {
