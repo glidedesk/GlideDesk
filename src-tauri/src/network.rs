@@ -140,6 +140,7 @@ impl Default for WireMessage {
 }
 
 impl WireMessage {
+    #[allow(dead_code)]
     pub fn new(t: &str) -> Self {
         Self {
             t: t.to_string(),
@@ -715,6 +716,7 @@ impl MotionCoalescer {
         self.accum_dy += dy;
     }
 
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.accum_dx = 0.0;
         self.accum_dy = 0.0;
@@ -1024,6 +1026,7 @@ impl NetworkManager {
     }
 
     /// Send to a specific peer in the mesh.
+    #[allow(dead_code)]
     pub async fn send_to(&self, target_id: &str, pkt: WireMessage) {
         self.flush_motion();
         let tx_opt = {
@@ -1060,5 +1063,47 @@ impl NetworkManager {
         self.state.set_where_input("home");
         let snap = self.state.snapshot();
         let _ = self.app.emit("state-change", &snap);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wire_message_roundtrip() {
+        let original = WireMessage {
+            t: "k.mm".to_string(),
+            v: Some(1),
+            dx: Some(12.5),
+            dy: Some(-4.2),
+            ..WireMessage::new("k.mm")
+        };
+        let serialized = serde_json::to_string(&original).expect("serialize wire message");
+        let parsed: WireMessage = serde_json::from_str(&serialized).expect("deserialize wire message");
+        assert_eq!(parsed.t, "k.mm");
+        assert_eq!(parsed.dx, Some(12.5));
+        assert_eq!(parsed.dy, Some(-4.2));
+    }
+
+    #[test]
+    fn test_motion_coalescer_accumulation() {
+        let mut coalescer = MotionCoalescer::new();
+        assert!(!coalescer.pending());
+        coalescer.add(1.5, 2.0);
+        coalescer.add(0.5, -1.0);
+        assert!(coalescer.pending());
+        let (dx, dy) = coalescer.take();
+        assert_eq!(dx, 2.0);
+        assert_eq!(dy, 1.0);
+        assert!(!coalescer.pending());
+    }
+
+    #[test]
+    fn test_heartbeat_tracker_freshness() {
+        let mut tracker = HeartbeatTracker::new();
+        assert!(!tracker.is_stale());
+        tracker.record_ping();
+        assert!(!tracker.is_stale());
     }
 }
