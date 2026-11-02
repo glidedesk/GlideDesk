@@ -794,6 +794,11 @@ impl MeshServer {
                     }));
                     let snap = state.snapshot();
                     let _ = app.emit("state-change", &snap);
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.unminimize();
+                        let _ = win.set_focus();
+                    }
                 }
             }
             "pair.reveal" => {
@@ -838,6 +843,11 @@ impl MeshServer {
                     }));
                     let snap = state.snapshot();
                     let _ = app.emit("state-change", &snap);
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.unminimize();
+                        let _ = win.set_focus();
+                    }
                 }
             }
             "pair.confirm" => {

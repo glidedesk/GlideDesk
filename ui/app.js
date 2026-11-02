@@ -248,6 +248,7 @@
       request: p.wired ? (p.allowed ? 'Pairing…' : p.macName + ' is on the USB cable. Click Allow to pair.') : !p.code ? 'Waiting for the code…' : p.allowed ? 'Waiting for ' + p.macName + '…' : 'Check that ' + p.macName + ' shows the same code, then click Allow.',
     };
     $('pair-hint').textContent = hints[p.phase] || '';
+    if (window.PairPop && typeof window.PairPop.sync === 'function') window.PairPop.sync();
   }
 
   $('content').append(UI.setup.page); // Setup screen in place of the tabs while something isn't ready

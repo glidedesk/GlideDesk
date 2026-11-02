@@ -3,6 +3,7 @@
 // Later closes the popup; the request stays in the banner (Deny / Cancel there), as before.
 // PairPop.attach(banner, primary): it follows the banner by itself (MutationObserver).
 (function () {
+  let activeSync = null;
   function attach(banner, primary) {
     const body = document.createElement('div');
     body.className = 'pop-body';
@@ -38,6 +39,7 @@
       ok.textContent = primary.textContent;
       pop.hidden = false;
     }
+    activeSync = sync;
     function close() {
       closed = key();
       pop.hidden = true;
@@ -51,5 +53,8 @@
     new MutationObserver(sync).observe(banner, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'disabled'] });
     sync();
   }
-  window.PairPop = { attach };
+  window.PairPop = {
+    attach,
+    sync: () => activeSync && activeSync(),
+  };
 })();
