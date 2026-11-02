@@ -269,12 +269,11 @@ UI.tab({
               (dev.id && s.peer.id === dev.id)
             ))
           );
-          // A Mac hosts; with a PC or Linux the one who clicks is the guest. A phone is asked to pair.
-          const btn = online || isKnown ? null : UI.button(dev.os === 'mac' || dev.os === 'android' ? 'Pair' : 'Connect', () => api.pair(dev.id), 'small' + (dev.invited ? ' primary' : ''));
+          // Either Mac or Windows can host or be guest. Unpaired devices show "Pair".
+          const btn = online || isKnown ? null : UI.button('Pair', () => api.pair(dev.id), 'small' + (dev.invited ? ' primary' : ''));
           if (btn) btn.disabled = busy || connected;
-          // Paired: Take over (the computer we're a guest of: a takeover hello; one that connects to us:
-          // invited, and its hello takes the session from whoever has it).
-          const take = !online && isKnown ? UI.button('Take over', () => (s.paired && dev.id === s.paired.macId ? api.connectAgain() : api.connectGuest(dev.id)), 'small') : null;
+          // Paired devices show "Connect".
+          const take = !online && isKnown ? UI.button('Connect', () => (s.paired && dev.id === s.paired.macId ? api.connectAgain() : api.connectGuest(dev.id)), 'small') : null;
           if (take) take.disabled = busy;
           if (btn && dev.invited && !busy) focus = btn;
           const r = UI.row(dev.name, dev.address + (dev.invited ? ' · wants to connect' : ''), [
