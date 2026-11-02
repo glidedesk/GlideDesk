@@ -332,7 +332,7 @@ pub struct UpdatesView {
 impl Default for UpdatesView {
     fn default() -> Self {
         Self {
-            current: "1.1.2-beta.1".to_string(),
+            current: "1.1.3".to_string(),
             latest: None,
             available: false,
             checking: false,
@@ -516,7 +516,7 @@ impl AppState {
             updates: UpdatesView::default(),
             about: AboutState {
                 app: AppInfo {
-                    version: "1.1.2-beta.1".to_string(),
+                    version: "1.1.3".to_string(),
                     name: "GlideDesk".to_string(),
                     arch: arch.clone(),
                     runtime: "GlideDesk (Tauri v2 + Rust Native Webview)".to_string(),
@@ -530,7 +530,7 @@ impl AppState {
             displays: Vec::new(),
             mac_name: host,
             active_tab: "overview".to_string(),
-            version: "1.1.2".to_string(),
+            version: "1.1.3".to_string(),
 
             kvm_state: KvmRuntimeState::default(),
             kvm: KvmSettings::default(),
