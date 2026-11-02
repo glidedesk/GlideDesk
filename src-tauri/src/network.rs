@@ -702,6 +702,23 @@ impl MeshServer {
             };
             let _ = sess.tx.send(welcome).await;
 
+            // Synchronize opposite layout to the connecting guest
+            let opp = match state.inner.read().layout.side.as_str() {
+                "right" => "left",
+                "left" => "right",
+                "top" => "bottom",
+                "bottom" => "top",
+                _ => "left",
+            };
+            let layout_sync = WireMessage {
+                t: "kvm.layout".to_string(),
+                v: Some(1),
+                side: Some(opp.to_string()),
+                pc_side: Some(opp.to_string()),
+                ..Default::default()
+            };
+            let _ = sess.tx.send(layout_sync).await;
+
             let snap = state.snapshot();
             let _ = app.emit("state-change", &snap);
         }
@@ -972,6 +989,23 @@ impl MeshServer {
                         ..Default::default()
                     };
                     let _ = out_tx.send(welcome).await;
+
+                    // Synchronize opposite layout to the connecting peer
+                    let opp = match state.inner.read().layout.side.as_str() {
+                        "right" => "left",
+                        "left" => "right",
+                        "top" => "bottom",
+                        "bottom" => "top",
+                        _ => "left",
+                    };
+                    let layout_sync = WireMessage {
+                        t: "kvm.layout".to_string(),
+                        v: Some(1),
+                        side: Some(opp.to_string()),
+                        pc_side: Some(opp.to_string()),
+                        ..Default::default()
+                    };
+                    let _ = out_tx.send(layout_sync).await;
                 }
 
                 let snap = state.snapshot();

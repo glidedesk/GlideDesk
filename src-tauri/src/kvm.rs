@@ -795,6 +795,8 @@ pub mod hook_engine {
     static mut APP_STATE: Option<AppState> = None;
     static mut NETWORK_MGR: Option<NetworkManager> = None;
     static mut LAST_PT: POINT = POINT { x: 0, y: 0 };
+    static mut VIRTUAL_REMOTE_X: f64 = 0.0;
+    static mut VIRTUAL_REMOTE_Y: f64 = 0.0;
 
     pub fn get_virtual_desktop_bounds() -> (i32, i32, i32, i32) {
         unsafe {
@@ -886,6 +888,9 @@ pub mod hook_engine {
 
                     if crossed {
                         LAST_PT = m.pt;
+                        VIRTUAL_REMOTE_X = 0.0;
+                        VIRTUAL_REMOTE_Y = 0.0;
+                        log::info!("[KVM] Cursor crossed to peer: side={}, pt=({}, {})", snap.layout.side, m.pt.x, m.pt.y);
                         let is_left_down = (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0;
                         let is_ctrl_down = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
 
@@ -916,7 +921,45 @@ pub mod hook_engine {
                         WM_MOUSEMOVE => {
                             let dx = (m.pt.x - LAST_PT.x) as f64;
                             let dy = (m.pt.y - LAST_PT.y) as f64;
-                            LAST_PT = m.pt;
+
+                            VIRTUAL_REMOTE_X += dx;
+                            VIRTUAL_REMOTE_Y += dy;
+
+                            let returned = match snap.layout.side.as_str() {
+                                "right" => VIRTUAL_REMOTE_X < -8.0,
+                                "left" => VIRTUAL_REMOTE_X > 8.0,
+                                "top" => VIRTUAL_REMOTE_Y > 8.0,
+                                "bottom" => VIRTUAL_REMOTE_Y < -8.0,
+                                _ => false,
+                            };
+
+                            if returned {
+                                log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, VIRTUAL_REMOTE_X);
+                                state.set_where_input("home");
+                                let new_snap = state.snapshot();
+                                let _ = app.emit("state-change", &new_snap);
+
+                                let home_msg = WireMessage {
+                                    t: "kvm.home".to_string(),
+                                    v: Some(1),
+                                    ..Default::default()
+                                };
+                                net.send_packet_sync(home_msg);
+
+                                let return_x = match snap.layout.side.as_str() {
+                                    "right" => max_x - 12,
+                                    "left" => vx + 12,
+                                    _ => m.pt.x,
+                                };
+                                let return_y = match snap.layout.side.as_str() {
+                                    "top" => vy + 12,
+                                    "bottom" => max_y - 12,
+                                    _ => m.pt.y,
+                                };
+                                let _ = SetCursorPos(return_x, return_y);
+                                LAST_PT = POINT { x: return_x, y: return_y };
+                                return LRESULT(1);
+                            }
 
                             if dx.abs() > 0.0 || dy.abs() > 0.0 {
                                 net.send_motion(dx, dy);
@@ -934,6 +977,7 @@ pub mod hook_engine {
                                 _ => m.pt.y,
                             };
                             let _ = SetCursorPos(park_x, park_y);
+                            LAST_PT = POINT { x: park_x, y: park_y };
                             return LRESULT(1);
                         }
                         WM_LBUTTONDOWN | WM_LBUTTONUP => {
@@ -1054,6 +1098,8 @@ pub mod hook_engine {
     static mut NETWORK_MGR: Option<NetworkManager> = None;
     static mut EVENT_TAP: Option<CFMachPortRef> = None;
     static mut LAST_PT: CGPoint = CGPoint { x: 0.0, y: 0.0 };
+    static mut VIRTUAL_REMOTE_X: f64 = 0.0;
+    static mut VIRTUAL_REMOTE_Y: f64 = 0.0;
 
     pub fn ensure_accessibility_permission() -> bool {
         unsafe {
@@ -1254,6 +1300,9 @@ pub mod hook_engine {
                     };
 
                     if crossed {
+                        VIRTUAL_REMOTE_X = 0.0;
+                        VIRTUAL_REMOTE_Y = 0.0;
+                        log::info!("[KVM] Cursor crossed to peer: side={}, pt=({:.1}, {:.1})", snap.layout.side, pt.x, pt.y);
                         let is_left_drag = r#type == kCGEventLeftMouseDragged;
                         let flags = CGEventGetFlags(event);
                         let cmd_held = (flags & kCGEventFlagMaskCommand) != 0;
@@ -1299,6 +1348,42 @@ pub mod hook_engine {
                         let pt = CGEventGetLocation(event);
                         let dx = pt.x - LAST_PT.x;
                         let dy = pt.y - LAST_PT.y;
+
+                        VIRTUAL_REMOTE_X += dx;
+                        VIRTUAL_REMOTE_Y += dy;
+
+                        let returned = match snap.layout.side.as_str() {
+                            "right" => VIRTUAL_REMOTE_X < -8.0,
+                            "left" => VIRTUAL_REMOTE_X > 8.0,
+                            "top" => VIRTUAL_REMOTE_Y > 8.0,
+                            "bottom" => VIRTUAL_REMOTE_Y < -8.0,
+                            _ => false,
+                        };
+
+                        if returned {
+                            log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, VIRTUAL_REMOTE_X);
+                            state.set_where_input("home");
+                            let new_snap = state.snapshot();
+                            let _ = app.emit("state-change", &new_snap);
+
+                            let home_msg = WireMessage {
+                                t: "kvm.home".to_string(),
+                                v: Some(1),
+                                ..Default::default()
+                            };
+                            net.send_packet_sync(home_msg);
+
+                            let return_pt = match snap.layout.side.as_str() {
+                                "right" => CGPoint { x: (max_x - 12) as f64, y: pt.y },
+                                "left" => CGPoint { x: (vx + 12) as f64, y: pt.y },
+                                "top" => CGPoint { x: pt.x, y: (vy + 12) as f64 },
+                                "bottom" => CGPoint { x: pt.x, y: (max_y - 12) as f64 },
+                                _ => pt,
+                            };
+                            let _ = CGWarpMouseCursorPosition(return_pt);
+                            LAST_PT = return_pt;
+                            return std::ptr::null_mut();
+                        }
 
                         if dx.abs() > 0.0 || dy.abs() > 0.0 {
                             net.send_motion(dx, dy);
