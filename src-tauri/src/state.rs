@@ -39,6 +39,23 @@ pub struct LayoutState {
     pub side: String, // "right" | "left" | "top" | "bottom"
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingState {
+    pub phase: String, // "connecting" | "starting" | "code" | "waiting" | "request" | "failed"
+    pub role: String,  // "host" | "guest"
+    #[serde(rename = "macName")]
+    pub mac_name: String,
+    pub os: String,
+    pub code: String,
+    pub allowed: bool,
+    #[serde(default)]
+    pub wired: bool,
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub error: String,
+}
+
 impl Default for LayoutState {
     fn default() -> Self {
         Self {
@@ -332,7 +349,7 @@ pub struct UpdatesView {
 impl Default for UpdatesView {
     fn default() -> Self {
         Self {
-            current: "1.1.3".to_string(),
+            current: "1.1.4".to_string(),
             latest: None,
             available: false,
             checking: false,
@@ -436,6 +453,8 @@ impl Default for DiscoveryState {
 pub struct FullState {
     pub device: DeviceInfo,
     pub paired: Option<PairedPeer>,
+    #[serde(default)]
+    pub pairing: Option<PairingState>,
     pub guests: Vec<PeerInfo>,
     pub found: Vec<PeerInfo>,
     pub peer: Option<PeerInfo>,
@@ -502,6 +521,7 @@ impl AppState {
                 name: host.clone(),
             },
             paired: None,
+            pairing: None,
             guests: Vec::new(),
             found: Vec::new(),
             peer: None,
@@ -516,7 +536,7 @@ impl AppState {
             updates: UpdatesView::default(),
             about: AboutState {
                 app: AppInfo {
-                    version: "1.1.3".to_string(),
+                    version: "1.1.4".to_string(),
                     name: "GlideDesk".to_string(),
                     arch: arch.clone(),
                     runtime: "GlideDesk (Tauri v2 + Rust Native Webview)".to_string(),
@@ -530,7 +550,7 @@ impl AppState {
             displays: Vec::new(),
             mac_name: host,
             active_tab: "overview".to_string(),
-            version: "1.1.3".to_string(),
+            version: "1.1.4".to_string(),
 
             kvm_state: KvmRuntimeState::default(),
             kvm: KvmSettings::default(),
@@ -650,6 +670,11 @@ impl AppState {
             s.link = LinkState::default();
             s.clients.clear();
         }
+    }
+
+    pub fn set_pairing(&self, pairing: Option<PairingState>) {
+        let mut s = self.inner.write();
+        s.pairing = pairing;
     }
 
     pub fn add_client(&self, client: PeerInfo) {

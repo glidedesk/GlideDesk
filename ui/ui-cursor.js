@@ -78,7 +78,7 @@ UI.tab({
       ble.set(k.ble !== false);
       resistance.set(k.resistancePx);
       const p = UI.peer(s);
-      const side = k.pcSide ? MAC_SIDE[k.pcSide] : null;
+      const side = (s.layout && s.layout.side) || (k && k.pcSide ? MAC_SIDE[k.pcSide] : 'right');
       cells.forEach((c, i) => {
         if (i === 4) return;
         const here = side && CELL[side] === i;

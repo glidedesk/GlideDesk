@@ -260,8 +260,15 @@ UI.tab({
         foundKey = fk;
         let focus = null;
         const rows = uniqueFound.map((dev) => {
-          const isKnown = known.has(dev.id);
-          const online = dev.id === live;
+          const isKnown = known.has(dev.id) || (s.paired && (s.paired.macId === dev.id || (dev.address && s.paired.address === dev.address) || (dev.name && s.paired.macName === dev.name)));
+          const online = connected && (
+            dev.id === live ||
+            (s.peer && (
+              (dev.address && s.peer.address === dev.address) ||
+              (dev.name && s.peer.name === dev.name) ||
+              (dev.id && s.peer.id === dev.id)
+            ))
+          );
           // A Mac hosts; with a PC or Linux the one who clicks is the guest. A phone is asked to pair.
           const btn = online || isKnown ? null : UI.button(dev.os === 'mac' || dev.os === 'android' ? 'Pair' : 'Connect', () => api.pair(dev.id), 'small' + (dev.invited ? ' primary' : ''));
           if (btn) btn.disabled = busy || connected;

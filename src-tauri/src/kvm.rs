@@ -727,14 +727,9 @@ impl ClipboardWatcher {
                         let msg = WireMessage {
                             t: "clip".to_string(),
                             v: Some(1),
-                            id: None, name: None, os: None, port: None, role: None,
-                            o: None, s: None, d: None, h: None, target: None,
-                            dx: None, dy: None, b: None, k: None, code: None,
-                            vk: None, mods: None, smooth: None,
                             text: Some(text),
                             ts: Some(chrono::Utc::now().timestamp_millis() as u64),
-                            png: None, w: None, height: None, bytes: None, parts: None, shot: None,
-                            files: None,
+                            ..Default::default()
                         };
                         self.network.send_packet(msg).await;
                     }
@@ -760,11 +755,6 @@ impl ClipboardWatcher {
                                 t: "clip.image".to_string(),
                                 v: Some(1),
                                 id: Some(format!("img_{}", chrono::Utc::now().timestamp_millis())),
-                                name: None, os: None, port: None, role: None,
-                                o: None, s: None, d: None, h: None, target: None,
-                                dx: None, dy: None, b: None, k: None, code: None,
-                                vk: None, mods: None, smooth: None,
-                                text: None,
                                 ts: Some(chrono::Utc::now().timestamp_millis() as u64),
                                 png: Some(b64),
                                 w: Some(w),
@@ -772,7 +762,7 @@ impl ClipboardWatcher {
                                 bytes: Some(len),
                                 parts: Some(1),
                                 shot: Some(true),
-                                files: None,
+                                ..Default::default()
                             };
                             self.network.send_packet(msg).await;
                         }

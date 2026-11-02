@@ -82,12 +82,27 @@ pub fn get_displays(app: AppHandle) -> Result<Vec<crate::state::MonitorInfo>, St
 }
 
 #[tauri::command]
-pub fn set_layout(side: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+pub fn set_layout(side: String, state: State<'_, AppState>, network: State<'_, NetworkManager>, app: AppHandle) -> Result<(), String> {
     {
         let mut s = state.inner.write();
-        s.layout.side = side;
+        s.layout.side = side.clone();
     }
     push_state(&app, &state);
+
+    let opp = match side.as_str() {
+        "right" => "left",
+        "left" => "right",
+        "top" => "bottom",
+        "bottom" => "top",
+        _ => "left",
+    };
+    network.send_packet_sync(crate::network::WireMessage {
+        t: "kvm.layout".to_string(),
+        v: Some(1),
+        side: Some(opp.to_string()),
+        pc_side: Some(opp.to_string()),
+        ..Default::default()
+    });
     Ok(())
 }
 
@@ -536,9 +551,10 @@ pub fn open_link(key: String, app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn pair(host: String, network: State<'_, NetworkManager>, state: State<'_, AppState>) -> Result<(), String> {
-    let target = {
+    let (target, is_already_paired) = {
         let s = state.inner.read();
-        if let Some(peer) = s.found.iter().find(|p| p.id.eq_ignore_ascii_case(&host) || p.address.as_deref() == Some(&host)) {
+        let peer_found = s.found.iter().find(|p| p.id.eq_ignore_ascii_case(&host) || p.address.as_deref() == Some(&host));
+        let resolved = if let Some(peer) = peer_found {
             peer.address.clone().map(|addr| {
                 if let Some(port) = peer.port {
                     format!("{}:{}", addr, port)
@@ -548,9 +564,31 @@ pub async fn pair(host: String, network: State<'_, NetworkManager>, state: State
             })
         } else {
             None
-        }
-    }.unwrap_or(host);
-    network.connect_to(&target).await
+        }.unwrap_or_else(|| host.clone());
+
+        let clean = resolved.trim_start_matches("ws://").trim_start_matches("wss://");
+        let ip = clean.split(':').next().unwrap_or(clean);
+
+        let paired = s.paired.as_ref().map_or(false, |p| {
+            p.mac_id.eq_ignore_ascii_case(&host)
+                || p.mac_id.eq_ignore_ascii_case(ip)
+                || p.address.as_deref() == Some(ip)
+        }) || s.guests.iter().any(|g| {
+            g.id.eq_ignore_ascii_case(&host)
+                || g.id.eq_ignore_ascii_case(ip)
+                || g.address.as_deref() == Some(ip)
+        });
+
+        (resolved, paired)
+    };
+
+    if is_already_paired {
+        log::info!("[Pair] Device {} is already paired, connecting directly", target);
+        network.connect_to(&target).await
+    } else {
+        log::info!("[Pair] Starting SAS pairing handshake with {}", target);
+        network.start_pair(&target).await
+    }
 }
 
 #[tauri::command]
@@ -594,10 +632,9 @@ pub async fn disconnect(
 }
 
 #[tauri::command]
-pub fn pair_respond(allowed: bool, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+pub async fn pair_respond(allowed: bool, network: State<'_, NetworkManager>) -> Result<(), String> {
     log::info!("Pair response: allowed = {}", allowed);
-    push_state(&app, &state);
-    Ok(())
+    network.respond_pair(allowed).await
 }
 
 #[tauri::command]
@@ -631,13 +668,15 @@ pub fn skip_setup() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn confirm_code() -> Result<(), String> {
-    Ok(())
+pub async fn confirm_code(network: State<'_, NetworkManager>) -> Result<(), String> {
+    log::info!("Confirm pairing code");
+    network.confirm_pair().await
 }
 
 #[tauri::command]
-pub fn cancel_pair() -> Result<(), String> {
-    Ok(())
+pub async fn cancel_pair(network: State<'_, NetworkManager>) -> Result<(), String> {
+    log::info!("Cancel pairing");
+    network.cancel_pair().await
 }
 
 #[tauri::command]
