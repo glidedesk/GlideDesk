@@ -804,6 +804,7 @@ pub mod hook_engine {
     static mut APP_HANDLE: Option<AppHandle> = None;
     static mut APP_STATE: Option<AppState> = None;
     static mut NETWORK_MGR: Option<NetworkManager> = None;
+    static mut LAST_PT: POINT = POINT { x: 0, y: 0 };
 
     pub fn get_virtual_desktop_bounds() -> (i32, i32, i32, i32) {
         unsafe {
@@ -923,7 +924,6 @@ pub mod hook_engine {
                     // Swallow and stream to peer
                     match msg {
                         WM_MOUSEMOVE => {
-                            static mut LAST_PT: POINT = POINT { x: 0, y: 0 };
                             let dx = (m.pt.x - LAST_PT.x) as f64;
                             let dy = (m.pt.y - LAST_PT.y) as f64;
                             LAST_PT = m.pt;
