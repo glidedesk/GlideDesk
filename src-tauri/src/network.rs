@@ -655,6 +655,9 @@ impl MeshServer {
             {
                 let mut s = state.inner.write();
                 s.pairing = None;
+                s.link.state = "connected".to_string();
+                s.link.mac_name = Some(sess.peer_name.clone());
+                s.link.peer_name = Some(sess.peer_name.clone());
                 let peer = PeerInfo {
                     id: sess.peer_id.clone(),
                     name: sess.peer_name.clone(),
@@ -665,7 +668,7 @@ impl MeshServer {
                     invited: None,
                 };
                 if !s.guests.iter().any(|g| g.id == sess.peer_id) {
-                    s.guests.push(peer);
+                    s.guests.push(peer.clone());
                 }
                 s.paired = Some(crate::state::PairedPeer {
                     mac_id: sess.peer_id.clone(),
@@ -673,6 +676,8 @@ impl MeshServer {
                     os: sess.peer_os.clone(),
                     address: None,
                 });
+                s.peer = Some(peer.clone());
+                s.client = Some(peer);
             }
             let ok_msg = WireMessage {
                 t: "pair.ok".to_string(),
@@ -862,6 +867,20 @@ impl MeshServer {
                 {
                     let mut s = state.inner.write();
                     s.pairing = None;
+                    s.link.state = "connected".to_string();
+                    s.link.mac_name = Some(host_name.clone());
+                    s.link.peer_name = Some(host_name.clone());
+                    let p_info = PeerInfo {
+                        id: host_id.clone(),
+                        name: host_name.clone(),
+                        os: host_os.clone(),
+                        address: Some(peer_addr.ip().to_string()),
+                        port: Some(peer_addr.port()),
+                        last_seen: Some(chrono::Utc::now().timestamp_millis() as u64),
+                        invited: None,
+                    };
+                    s.peer = Some(p_info.clone());
+                    s.client = Some(p_info);
                     s.paired = Some(crate::state::PairedPeer {
                         mac_id: host_id.clone(),
                         mac_name: host_name.clone(),
@@ -1362,6 +1381,25 @@ impl NetworkManager {
         let clean_addr = target_addr.trim_start_matches("ws://").trim_start_matches("wss://");
         let target_ip = clean_addr.split(':').next().unwrap_or(clean_addr);
 
+        // Drain any existing active client sessions to this peer before starting pairing
+        let to_remove: Vec<String> = {
+            let guard = self.active_clients.read();
+            guard.iter()
+                .filter(|(id, c)| c.peer_addr.ip().to_string() == target_ip || *id == target_addr)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in to_remove {
+            let sess = {
+                let mut guard = self.active_clients.write();
+                guard.remove(&id)
+            };
+            if let Some(s) = sess {
+                let bye = WireMessage { t: "bye".to_string(), v: Some(1), ..Default::default() };
+                let _ = s.tx.send(bye).await;
+            }
+        }
+
         let url = if target_addr.starts_with("ws://") || target_addr.starts_with("wss://") {
             target_addr.to_string()
         } else if target_addr.contains(':') {
@@ -1561,7 +1599,15 @@ impl NetworkManager {
             state.remove_client(&cur_id);
             state.remove_client(&resolved_addr.ip().to_string());
             state.set_where_input("home");
-            state.set_pairing(None);
+            {
+                let mut pair_guard = pending_pair.write();
+                if let Some(ref sess) = *pair_guard {
+                    if sess.peer_id == cur_id || sess.peer_id == resolved_addr.ip().to_string() {
+                        *pair_guard = None;
+                        state.set_pairing(None);
+                    }
+                }
+            }
             let snap = state.snapshot();
             let _ = app.emit("state-change", &snap);
 

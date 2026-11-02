@@ -867,7 +867,7 @@ pub mod hook_engine {
 
             if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
                 let snap = state.snapshot();
-                let has_peer = snap.client.is_some();
+                let has_peer = snap.client.is_some() || snap.peer.is_some() || snap.link.state == "connected";
                 let is_driving = snap.input == "driving";
 
                 let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
@@ -1230,7 +1230,7 @@ pub mod hook_engine {
 
         if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
             let snap = state.snapshot();
-            let has_peer = snap.client.is_some();
+            let has_peer = snap.client.is_some() || snap.peer.is_some() || snap.link.state == "connected";
             let is_driving = snap.input == "driving";
 
             let (vx, vy, vw, vh) = get_virtual_desktop_bounds();

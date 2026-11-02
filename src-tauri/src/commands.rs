@@ -551,10 +551,10 @@ pub fn open_link(key: String, app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn pair(host: String, network: State<'_, NetworkManager>, state: State<'_, AppState>) -> Result<(), String> {
-    let (target, is_already_paired) = {
+    let target = {
         let s = state.inner.read();
         let peer_found = s.found.iter().find(|p| p.id.eq_ignore_ascii_case(&host) || p.address.as_deref() == Some(&host));
-        let resolved = if let Some(peer) = peer_found {
+        if let Some(peer) = peer_found {
             peer.address.clone().map(|addr| {
                 if let Some(port) = peer.port {
                     format!("{}:{}", addr, port)
@@ -564,31 +564,11 @@ pub async fn pair(host: String, network: State<'_, NetworkManager>, state: State
             })
         } else {
             None
-        }.unwrap_or_else(|| host.clone());
-
-        let clean = resolved.trim_start_matches("ws://").trim_start_matches("wss://");
-        let ip = clean.split(':').next().unwrap_or(clean);
-
-        let paired = s.paired.as_ref().map_or(false, |p| {
-            p.mac_id.eq_ignore_ascii_case(&host)
-                || p.mac_id.eq_ignore_ascii_case(ip)
-                || p.address.as_deref() == Some(ip)
-        }) || s.guests.iter().any(|g| {
-            g.id.eq_ignore_ascii_case(&host)
-                || g.id.eq_ignore_ascii_case(ip)
-                || g.address.as_deref() == Some(ip)
-        });
-
-        (resolved, paired)
+        }.unwrap_or_else(|| host.clone())
     };
 
-    if is_already_paired {
-        log::info!("[Pair] Device {} is already paired, connecting directly", target);
-        network.connect_to(&target).await
-    } else {
-        log::info!("[Pair] Starting SAS pairing handshake with {}", target);
-        network.start_pair(&target).await
-    }
+    log::info!("[Pair] Starting SAS pairing handshake with {}", target);
+    network.start_pair(&target).await
 }
 
 #[tauri::command]

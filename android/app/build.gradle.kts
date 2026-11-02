@@ -10,8 +10,8 @@ android {
         applicationId = "com.glidedesk.android"
         minSdk = 29 // Android 10: wireless debugging needs 11, everything else works from 10
         targetSdk = 36
-        versionCode = 10104
-        versionName = "1.1.4"
+        versionCode = 10105
+        versionName = "1.1.5"
     }
     // Two builds of the same app (same id and signature, so one installs over the other):
     //   standard — what people download: no notification access, SMS or Accessibility service, which
