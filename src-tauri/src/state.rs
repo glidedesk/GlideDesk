@@ -349,7 +349,7 @@ pub struct UpdatesView {
 impl Default for UpdatesView {
     fn default() -> Self {
         Self {
-            current: "1.1.6".to_string(),
+            current: "1.1.7".to_string(),
             latest: None,
             available: false,
             checking: false,
@@ -536,7 +536,7 @@ impl AppState {
             updates: UpdatesView::default(),
             about: AboutState {
                 app: AppInfo {
-                    version: "1.1.6".to_string(),
+                    version: "1.1.7".to_string(),
                     name: "GlideDesk".to_string(),
                     arch: arch.clone(),
                     runtime: "GlideDesk (Tauri v2 + Rust Native Webview)".to_string(),
@@ -550,7 +550,7 @@ impl AppState {
             displays: Vec::new(),
             mac_name: host,
             active_tab: "overview".to_string(),
-            version: "1.1.6".to_string(),
+            version: "1.1.7".to_string(),
 
             kvm_state: KvmRuntimeState::default(),
             kvm: KvmSettings::default(),
@@ -649,6 +649,7 @@ impl AppState {
 
     pub fn set_client(&self, client: Option<PeerInfo>) {
         let mut s = self.inner.write();
+        s.pairing = None;
         s.client = client.clone();
         if let Some(c) = client {
             s.peer = Some(c.clone());
@@ -679,6 +680,7 @@ impl AppState {
 
     pub fn add_client(&self, client: PeerInfo) {
         let mut s = self.inner.write();
+        s.pairing = None;
         s.client = Some(client.clone());
         s.peer = Some(client.clone());
         s.paired = Some(PairedPeer {

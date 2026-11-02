@@ -948,6 +948,7 @@ impl MeshServer {
                     invited: None,
                 };
                 state.add_client(info);
+                state.set_pairing(None);
 
                 if pkt.t == "hello" {
                     let welcome = WireMessage {
@@ -1830,6 +1831,7 @@ impl NetworkManager {
             guard.clear();
         }
         self.state.set_client(None);
+        self.state.set_pairing(None);
         self.state.set_where_input("home");
         let snap = self.state.snapshot();
         let _ = self.app.emit("state-change", &snap);
