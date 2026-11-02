@@ -402,11 +402,21 @@ pub struct LinkState {
     pub state: String, // "disconnected"|"connecting"|"connected"|"reconnecting"|"identity_changed"
     pub rtt: Option<u32>,
     pub message: Option<String>,
+    #[serde(rename = "macName", default)]
+    pub mac_name: Option<String>,
+    #[serde(rename = "peerName", default)]
+    pub peer_name: Option<String>,
 }
 
 impl Default for LinkState {
     fn default() -> Self {
-        Self { state: "disconnected".to_string(), rtt: None, message: None }
+        Self {
+            state: "disconnected".to_string(),
+            rtt: None,
+            message: None,
+            mac_name: None,
+            peer_name: None,
+        }
     }
 }
 
@@ -629,11 +639,14 @@ impl AppState {
                 address: c.address.clone(),
             });
             s.link.state = "connected".to_string();
+            s.link.mac_name = Some(c.name.clone());
+            s.link.peer_name = Some(c.name.clone());
             if !s.clients.iter().any(|p| p.id == c.id) {
                 s.clients.push(c);
             }
         } else {
             s.peer = None;
+            s.paired = None;
             s.link = LinkState::default();
             s.clients.clear();
         }
@@ -651,6 +664,8 @@ impl AppState {
                 address: client.address.clone(),
             });
             s.link.state = "connected".to_string();
+            s.link.mac_name = Some(client.name.clone());
+            s.link.peer_name = Some(client.name.clone());
         }
         if let Some(pos) = s.clients.iter().position(|p| p.id == client.id) {
             s.clients[pos] = client;
@@ -661,13 +676,22 @@ impl AppState {
 
     pub fn remove_client(&self, client_id: &str) {
         let mut s = self.inner.write();
-        s.clients.retain(|p| p.id != client_id);
+        s.clients.retain(|p| p.id != client_id && p.address.as_deref() != Some(client_id));
+        let match_target = |p: &PeerInfo| -> bool {
+            p.id == client_id || p.address.as_deref() == Some(client_id)
+        };
         if let Some(ref c) = s.client {
-            if c.id == client_id {
+            if match_target(c) {
                 s.client = s.clients.first().cloned();
                 s.peer = s.clients.first().cloned();
-                if s.peer.is_none() {
+                let peer_name = s.peer.as_ref().map(|p| p.name.clone());
+                if let Some(name) = peer_name {
+                    s.link.state = "connected".to_string();
+                    s.link.mac_name = Some(name.clone());
+                    s.link.peer_name = Some(name);
+                } else {
                     s.link = LinkState::default();
+                    s.paired = None;
                 }
             }
         }
@@ -799,5 +823,36 @@ mod tests {
 
         let json = serde_json::to_string(&state).expect("serialize FullState");
         assert!(json.contains("\"setup\":{\"show\":false,\"missing\":[]}"));
+    }
+
+    #[test]
+    fn test_mutual_connection_state_lifecycle() {
+        let app_state = AppState::new();
+        assert_eq!(app_state.snapshot().link.state, "disconnected");
+        assert_eq!(app_state.snapshot().link.mac_name, None);
+
+        let peer = PeerInfo {
+            id: "vasanth".to_string(),
+            name: "VASANTH".to_string(),
+            os: "win".to_string(),
+            address: Some("192.168.4.9".to_string()),
+            port: Some(47800),
+            last_seen: None,
+            invited: None,
+        };
+
+        // Adding client populates link.state and peer/macName
+        app_state.add_client(peer);
+        let snap = app_state.snapshot();
+        assert_eq!(snap.link.state, "connected");
+        assert_eq!(snap.link.mac_name.as_deref(), Some("VASANTH"));
+        assert_eq!(snap.peer.as_ref().map(|p| p.name.as_str()), Some("VASANTH"));
+
+        // Removing by IP address cleanly disconnects and clears link state
+        app_state.remove_client("192.168.4.9");
+        let disc_snap = app_state.snapshot();
+        assert_eq!(disc_snap.link.state, "disconnected");
+        assert_eq!(disc_snap.link.mac_name, None);
+        assert!(disc_snap.peer.is_none());
     }
 }

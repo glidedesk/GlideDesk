@@ -323,6 +323,14 @@ impl DiscoveryService {
     }
 }
 
+/// Active client connection to a remote host or guest peer in the mesh.
+pub struct ActiveClientSession {
+    pub id: String,
+    pub peer_id: Arc<RwLock<Option<String>>>,
+    pub peer_addr: SocketAddr,
+    pub tx: mpsc::Sender<WireMessage>,
+}
+
 /// Mesh WebSocket Server listening for incoming KVM sessions.
 pub struct MeshServer {
     app: AppHandle,
@@ -330,16 +338,25 @@ pub struct MeshServer {
     port: u16,
     local_id: String,
     local_name: String,
+    active_clients: Arc<RwLock<HashMap<String, ActiveClientSession>>>,
 }
 
 impl MeshServer {
-    pub fn new(app: AppHandle, state: AppState, port: u16, local_id: String, local_name: String) -> Self {
+    pub fn new(
+        app: AppHandle,
+        state: AppState,
+        port: u16,
+        local_id: String,
+        local_name: String,
+        active_clients: Arc<RwLock<HashMap<String, ActiveClientSession>>>,
+    ) -> Self {
         Self {
             app,
             state,
             port,
             local_id,
             local_name,
+            active_clients,
         }
     }
 
@@ -373,9 +390,11 @@ impl MeshServer {
             let state = self.state.clone();
             let local_id = self.local_id.clone();
             let local_name = self.local_name.clone();
+            let active_clients = Arc::clone(&self.active_clients);
+            let port = self.port;
 
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = Self::handle_session(stream, peer_addr, app, state, local_id, local_name).await {
+                if let Err(e) = Self::handle_session(stream, peer_addr, app, state, local_id, local_name, port, active_clients).await {
                     log::info!("[MeshServer] Peer {} disconnected: {}", peer_addr, e);
                 }
             });
@@ -391,9 +410,27 @@ impl MeshServer {
         state: AppState,
         local_id: String,
         local_name: String,
+        port: u16,
+        active_clients: Arc<RwLock<HashMap<String, ActiveClientSession>>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut ws = accept_async(stream).await?;
-        let mut tracker = HeartbeatTracker::new();
+        let ws = accept_async(stream).await?;
+        let (mut write, mut read) = ws.split();
+
+        let session_id = peer_addr.to_string();
+        let peer_id_holder = Arc::new(RwLock::new(None));
+        let (out_tx, mut out_rx) = mpsc::channel::<WireMessage>(2048);
+        {
+            let mut guard = active_clients.write();
+            guard.insert(
+                session_id.clone(),
+                ActiveClientSession {
+                    id: session_id.clone(),
+                    peer_id: Arc::clone(&peer_id_holder),
+                    peer_addr,
+                    tx: out_tx.clone(),
+                },
+            );
+        }
 
         // Send welcome
         let welcome = WireMessage {
@@ -402,40 +439,87 @@ impl MeshServer {
             id: Some(local_id),
             name: Some(local_name),
             os: Some(current_os().to_string()),
+            port: Some(port),
+            role: Some("host".to_string()),
             ..Default::default()
         };
         let welcome_str = serde_json::to_string(&welcome)?;
-        ws.send(Message::Text(welcome_str)).await?;
+        write.send(Message::Text(welcome_str)).await?;
 
-        while let Some(msg_res) = ws.next().await {
-            let msg = msg_res?;
-            tracker.record_ping();
+        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let mut tracker = HeartbeatTracker::new();
 
-            match msg {
-                Message::Text(txt) => {
-                    if let Ok(pkt) = serde_json::from_str::<WireMessage>(&txt) {
-                        Self::dispatch_incoming(&pkt, &peer_addr, &app, &state).await;
+        loop {
+            tokio::select! {
+                _ = heartbeat.tick() => {
+                    if tracker.is_stale() {
+                        log::warn!("[MeshServer] Peer {} heartbeat timeout (12s silence)", peer_addr);
+                        break;
+                    }
+                    let ping = WireMessage {
+                        t: "ping".to_string(),
+                        v: Some(1),
+                        ..Default::default()
+                    };
+                    if let Ok(json) = serde_json::to_string(&ping) {
+                        let _ = write.send(Message::Text(json)).await;
                     }
                 }
-                Message::Binary(bin) => {
-                    if let Ok(pkt) = serde_json::from_slice::<WireMessage>(&bin) {
-                        Self::dispatch_incoming(&pkt, &peer_addr, &app, &state).await;
+
+                Some(pkt) = out_rx.recv() => {
+                    if let Ok(json) = serde_json::to_string(&pkt) {
+                        if write.send(Message::Text(json)).await.is_err() {
+                            break;
+                        }
                     }
                 }
-                Message::Ping(payload) => {
-                    ws.send(Message::Pong(payload)).await?;
-                }
-                Message::Close(_) => break,
-                _ => {}
-            }
 
-            if tracker.is_stale() {
-                log::warn!("[MeshServer] Peer {} heartbeat timeout", peer_addr);
-                break;
+                Some(msg_res) = read.next() => {
+                    match msg_res {
+                        Ok(msg) => {
+                            tracker.record_ping();
+                            match msg {
+                                Message::Text(txt) => {
+                                    if let Ok(pkt) = serde_json::from_str::<WireMessage>(&txt) {
+                                        let is_bye = pkt.t == "bye";
+                                        Self::dispatch_incoming(&pkt, &peer_addr, &app, &state, &peer_id_holder).await;
+                                        if is_bye {
+                                            break;
+                                        }
+                                    }
+                                }
+                                Message::Binary(bin) => {
+                                    if let Ok(pkt) = serde_json::from_slice::<WireMessage>(&bin) {
+                                        let is_bye = pkt.t == "bye";
+                                        Self::dispatch_incoming(&pkt, &peer_addr, &app, &state, &peer_id_holder).await;
+                                        if is_bye {
+                                            break;
+                                        }
+                                    }
+                                }
+                                Message::Ping(payload) => {
+                                    let _ = write.send(Message::Pong(payload)).await;
+                                }
+                                Message::Close(_) => break,
+                                _ => {}
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
             }
         }
 
-        state.set_client(None);
+        let recorded_peer_id = peer_id_holder.read().clone();
+        {
+            let mut guard = active_clients.write();
+            guard.remove(&session_id);
+        }
+        if let Some(ref pid) = recorded_peer_id {
+            state.remove_client(pid);
+        }
+        state.remove_client(&session_id);
+        state.remove_client(&peer_addr.ip().to_string());
         state.set_where_input("home");
         let snap = state.snapshot();
         let _ = app.emit("state-change", &snap);
@@ -450,9 +534,18 @@ impl MeshServer {
         Ok(())
     }
 
-    async fn dispatch_incoming(pkt: &WireMessage, peer_addr: &SocketAddr, app: &AppHandle, state: &AppState) {
+    async fn dispatch_incoming(
+        pkt: &WireMessage,
+        peer_addr: &SocketAddr,
+        app: &AppHandle,
+        state: &AppState,
+        peer_id_holder: &Arc<RwLock<Option<String>>>,
+    ) {
         match pkt.t.as_str() {
             "hello" | "welcome" => {
+                if let Some(ref pid) = pkt.id {
+                    *peer_id_holder.write() = Some(pid.clone());
+                }
                 let addr_str = if peer_addr.ip().is_unspecified() || peer_addr.ip().is_loopback() {
                     None
                 } else {
@@ -470,6 +563,17 @@ impl MeshServer {
                 state.add_client(info);
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
+            }
+            "bye" => {
+                if let Some(ref pid) = pkt.id {
+                    state.remove_client(pid);
+                }
+                state.remove_client(&peer_addr.ip().to_string());
+                state.set_where_input("home");
+                let snap = state.snapshot();
+                let _ = app.emit("state-change", &snap);
+                let window_reg = app.state::<crate::window_manager::ParkedWindowRegistry>();
+                let _ = window_reg.restore_all();
             }
             "k.mm" | "remote.mm" => {
                 // Inbound relative mouse / phone remote move
@@ -616,12 +720,6 @@ impl MotionCoalescer {
     }
 }
 
-/// Active client connection to a remote host or guest peer in the mesh.
-pub struct ActiveClientSession {
-    pub id: String,
-    pub tx: mpsc::Sender<WireMessage>,
-}
-
 #[derive(Clone)]
 pub struct NetworkManager {
     app: AppHandle,
@@ -670,11 +768,24 @@ impl NetworkManager {
             DEFAULT_PORT,
             local_id,
             local_name,
+            Arc::clone(&self.active_clients),
         ));
         server.start();
     }
 
     pub async fn connect_to(&self, target_addr: &str) -> Result<(), String> {
+        let clean_addr = target_addr.trim_start_matches("ws://").trim_start_matches("wss://");
+        let target_ip = clean_addr.split(':').next().unwrap_or(clean_addr);
+
+        // Avoid duplicate concurrent connection if already connected to this peer
+        {
+            let guard = self.active_clients.read();
+            if guard.values().any(|c| c.peer_addr.ip().to_string() == target_ip || c.id == target_addr) {
+                log::info!("[NetworkManager] Already connected to {}", target_addr);
+                return Ok(());
+            }
+        }
+
         let url = if target_addr.starts_with("ws://") || target_addr.starts_with("wss://") {
             target_addr.to_string()
         } else if target_addr.contains(':') {
@@ -687,11 +798,30 @@ impl NetworkManager {
         let (ws, _) = connect_async(&url).await.map_err(|e| format!("Failed to connect: {}", e))?;
         let (mut write, mut read) = ws.split();
 
+        let resolved_addr: SocketAddr = target_addr
+            .trim_start_matches("ws://")
+            .trim_start_matches("wss://")
+            .parse::<SocketAddr>()
+            .or_else(|_| {
+                let host = target_addr.split(':').next().unwrap_or(target_addr);
+                format!("{}:{}", host, DEFAULT_PORT).parse::<SocketAddr>()
+            })
+            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+
         let session_id = target_addr.to_string();
+        let peer_id_holder = Arc::new(RwLock::new(None));
         let (out_tx, mut out_rx) = mpsc::channel::<WireMessage>(2048);
         {
             let mut guard = self.active_clients.write();
-            guard.insert(session_id.clone(), ActiveClientSession { id: session_id.clone(), tx: out_tx.clone() });
+            guard.insert(
+                session_id.clone(),
+                ActiveClientSession {
+                    id: session_id.clone(),
+                    peer_id: Arc::clone(&peer_id_holder),
+                    peer_addr: resolved_addr,
+                    tx: out_tx.clone(),
+                },
+            );
         }
 
         // Send hello
@@ -712,16 +842,7 @@ impl NetworkManager {
         let state = self.state.clone();
         let clients_lock = Arc::clone(&self.active_clients);
         let cur_id = session_id.clone();
-
-        let resolved_addr: SocketAddr = target_addr
-            .trim_start_matches("ws://")
-            .trim_start_matches("wss://")
-            .parse::<SocketAddr>()
-            .or_else(|_| {
-                let host = target_addr.split(':').next().unwrap_or(target_addr);
-                format!("{}:{}", host, DEFAULT_PORT).parse::<SocketAddr>()
-            })
-            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+        let pid_holder = Arc::clone(&peer_id_holder);
 
         tauri::async_runtime::spawn(async move {
             let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -759,8 +880,24 @@ impl NetworkManager {
                                 match msg {
                                     Message::Text(txt) => {
                                         if let Ok(pkt) = serde_json::from_str::<WireMessage>(&txt) {
-                                            MeshServer::dispatch_incoming(&pkt, &resolved_addr, &app, &state).await;
+                                            let is_bye = pkt.t == "bye";
+                                            MeshServer::dispatch_incoming(&pkt, &resolved_addr, &app, &state, &pid_holder).await;
+                                            if is_bye {
+                                                break;
+                                            }
                                         }
+                                    }
+                                    Message::Binary(bin) => {
+                                        if let Ok(pkt) = serde_json::from_slice::<WireMessage>(&bin) {
+                                            let is_bye = pkt.t == "bye";
+                                            MeshServer::dispatch_incoming(&pkt, &resolved_addr, &app, &state, &pid_holder).await;
+                                            if is_bye {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Message::Ping(payload) => {
+                                        let _ = write.send(Message::Pong(payload)).await;
                                     }
                                     Message::Close(_) => break,
                                     _ => {}
@@ -772,11 +909,16 @@ impl NetworkManager {
                 }
             }
 
+            let recorded_peer_id = pid_holder.read().clone();
             {
                 let mut guard = clients_lock.write();
                 guard.remove(&cur_id);
             }
+            if let Some(ref pid) = recorded_peer_id {
+                state.remove_client(pid);
+            }
             state.remove_client(&cur_id);
+            state.remove_client(&resolved_addr.ip().to_string());
             state.set_where_input("home");
             let snap = state.snapshot();
             let _ = app.emit("state-change", &snap);
@@ -841,7 +983,7 @@ impl NetworkManager {
         }
 
         let guard = self.active_clients.read();
-        for (_, client) in guard.iter() {
+        for client in guard.values() {
             let _ = client.tx.try_send(pkt.clone());
         }
     }
@@ -874,7 +1016,13 @@ impl NetworkManager {
         self.flush_motion();
         let tx_opt = {
             let guard = self.active_clients.read();
-            guard.get(target_id).map(|c| c.tx.clone())
+            guard.get(target_id).map(|c| c.tx.clone()).or_else(|| {
+                guard.values().find(|c| {
+                    c.id == target_id
+                        || c.peer_id.read().as_deref() == Some(target_id)
+                        || c.peer_addr.ip().to_string() == target_id
+                }).map(|c| c.tx.clone())
+            })
         };
 
         if let Some(tx) = tx_opt {
