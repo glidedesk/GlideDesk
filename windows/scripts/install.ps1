@@ -10,7 +10,10 @@ Write-Host "==> Fetching latest GlideDesk release from GitHub..." -ForegroundCol
 try {
     $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
     $Version = $Release.tag_name -replace '^v',''
-    $Asset = $Release.assets | Where-Object { $_.name -like "*x64-setup.exe" } | Select-Object -First 1
+    $Asset = $Release.assets | Where-Object { $_.name -like "GlideDesk_${Version}_*x64-setup.exe" } | Select-Object -First 1
+    if (-not $Asset) {
+        $Asset = $Release.assets | Where-Object { $_.name -like "*x64-setup.exe" } | Sort-Object -Property name -Descending | Select-Object -First 1
+    }
     if (-not $Asset) {
         $Asset = $Release.assets | Where-Object { $_.name -like "*.exe" -and $_.name -notlike "*portable*" } | Select-Object -First 1
     }
@@ -41,7 +44,7 @@ if ($WasRunning) {
 }
 
 Write-Host "==> Executing silent installation..." -ForegroundColor Cyan
-Start-Process -FilePath $InstallerPath -ArgumentList "/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS" -Wait
+Start-Process -FilePath $InstallerPath -ArgumentList "/S" -Wait
 
 # Clean up installer artifact
 Remove-Item -Path $InstallerPath -Force -ErrorAction SilentlyContinue
