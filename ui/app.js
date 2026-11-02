@@ -139,8 +139,10 @@
     $('peer-dot').className = 'dot ' + dot;
     let text = 'Not paired';
     if (l.state === 'connected') {
-      const peerName = (s.peer && s.peer.name) || (s.paired && (s.paired.macName || s.paired.mac_name)) || (l && (l.macName || l.peerName)) || 'Connected';
-      text = peerName + (UI.via(s) !== 'Wi-Fi' ? ' · ' + UI.via(s) : '') + (l.rtt != null ? ' · ' + l.rtt + ' ms' : '');
+      let peerName = (s.peer && s.peer.name) || (s.paired && (s.paired.macName || s.paired.mac_name)) || (l && (l.macName || l.peerName)) || 'Connected';
+      if (!peerName || peerName === 'undefined') peerName = 'Connected';
+      const via = UI.via ? UI.via(s) : 'Wi-Fi';
+      text = peerName + (via && via !== 'Wi-Fi' ? ' · ' + via : '') + (l.rtt != null ? ' · ' + l.rtt + ' ms' : '');
     }
     else if (s.pairing) text = 'Pairing…';
     else if (l.state === 'connecting' || l.state === 'reconnecting') text = 'Reconnecting…';
