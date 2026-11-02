@@ -728,9 +728,27 @@ pub fn local_ip_addresses() -> Vec<String> {
 }
 
 pub fn whoami_host() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output() {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "GlideDesk-PC".to_string())
+        .unwrap_or_else(|_| {
+            if cfg!(target_os = "macos") {
+                "Mac".to_string()
+            } else if cfg!(target_os = "windows") {
+                "Windows-PC".to_string()
+            } else {
+                "Linux-PC".to_string()
+            }
+        })
 }
 
 #[cfg(test)]
