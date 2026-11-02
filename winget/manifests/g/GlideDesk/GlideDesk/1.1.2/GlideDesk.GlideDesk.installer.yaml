@@ -11,6 +11,6 @@ Installers:
   - Architecture: x64
     InstallerType: nullsoft
     InstallerUrl: https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_x64-setup.exe
-    InstallerSha256: A61081F0D644DFFB8F3E0E481E1AB9D39B0624B383DF9FFDB68DFE59C3F083C7
+    InstallerSha256: A71095C22ECD09F8C3B2AF4559E1BD40BDD6941077DAB0285831093E56BA97AC
 ManifestType: installer
 ManifestVersion: 1.6.0
