@@ -5,7 +5,7 @@
 mod tests {
     #[test]
     fn test_phone_assets_default_shape() {
-        let assets = crate::phone::phone_assets().unwrap();
+        let assets = crate::phone::get_phone_assets(None);
         assert!(assets.get("apps").is_some());
         assert!(assets.get("wallpaper").is_some());
     }

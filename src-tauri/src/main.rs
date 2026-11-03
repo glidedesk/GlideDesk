@@ -44,6 +44,7 @@ fn main() {
         .manage(state.clone())
         .manage(window_reg.clone())
         .manage(NativeBridgeManager::new())
+        .manage(phone::PhoneManager::new())
         .setup(move |app| {
             let handle = app.handle().clone();
             let network = NetworkManager::new(handle.clone(), setup_state);

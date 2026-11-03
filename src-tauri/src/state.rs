@@ -229,14 +229,135 @@ impl Default for FilesState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PhoneState {
-    pub connected: bool,
+pub struct PhoneConnectedDevice {
+    pub id: String,
+    pub name: String,
+    pub usb: bool,
+    #[serde(rename = "rttMs")]
+    pub rtt_ms: Option<u64>,
 }
 
-impl Default for PhoneState {
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PhoneInfoDetails {
+    pub model: Option<String>,
+    pub maker: Option<String>,
+    pub release: Option<String>,
+    pub sdk: Option<u32>,
+    pub battery: Option<u32>,
+    pub charging: bool,
+    pub colors: Vec<String>,
+    pub wallpaper: Option<String>,
+    pub display: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhoneBridgeInfo {
+    pub state: String, // 'off' | 'missing' | 'waitingWifi' | 'needsPair' | 'connecting' | 'ready' | 'error'
+    pub message: String,
+    pub serial: Option<String>,
+    pub available: bool,
+    #[serde(rename = "canPair")]
+    pub can_pair: bool,
+    #[serde(rename = "inputBlocked")]
+    pub input_blocked: bool,
+    pub via: Option<String>,
+    pub input: Option<String>,
+    #[serde(rename = "inputMode")]
+    pub input_mode: Option<String>,
+    pub control: bool,
+    pub driving: bool,
+    pub install: Option<serde_json::Value>,
+}
+
+impl Default for PhoneBridgeInfo {
     fn default() -> Self {
-        Self { connected: false }
+        Self {
+            state: "off".to_string(),
+            message: String::new(),
+            serial: None,
+            available: true,
+            can_pair: false,
+            input_blocked: false,
+            via: None,
+            input: Some("adb".to_string()),
+            input_mode: Some("adb".to_string()),
+            control: false,
+            driving: false,
+            install: None,
+        }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PhoneAdbInfo {
+    #[serde(rename = "devOptions")]
+    pub dev_options: bool,
+    pub wifi: bool,
+    #[serde(rename = "canEnable")]
+    pub can_enable: bool,
+    pub address: Option<String>,
+    pub full: bool,
+    pub port: u16,
+    pub net: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PhoneNearbyDevice {
+    pub id: String,
+    pub name: String,
+    pub connected: bool,
+    pub usb: bool,
+    pub address: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PhoneAppItem {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhoneSettingsData {
+    pub input: String,
+    #[serde(rename = "inputPicked")]
+    pub input_picked: bool,
+    pub sound: bool,
+    #[serde(rename = "bitrateMbps")]
+    pub bitrate_mbps: u32,
+    pub wallpaper: bool,
+    #[serde(rename = "enterSends")]
+    pub enter_sends: bool,
+    #[serde(rename = "arrowSwipe")]
+    pub arrow_swipe: bool,
+    pub controls: String,
+}
+
+impl Default for PhoneSettingsData {
+    fn default() -> Self {
+        Self {
+            input: "adb".to_string(),
+            input_picked: false,
+            sound: false,
+            bitrate_mbps: 8,
+            wallpaper: true,
+            enter_sends: true,
+            arrow_swipe: true,
+            controls: "side".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PhoneState {
+    pub connected: Option<PhoneConnectedDevice>,
+    pub info: Option<PhoneInfoDetails>,
+    pub bridge: PhoneBridgeInfo,
+    pub nearby: Vec<PhoneNearbyDevice>,
+    pub adb: Option<PhoneAdbInfo>,
+    pub settings: PhoneSettingsData,
+    pub apps: Vec<PhoneAppItem>,
+    pub windows: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
