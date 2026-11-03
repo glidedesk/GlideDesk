@@ -29,6 +29,9 @@ sha2 = "0.10"
 rand = "0.8"
 cpal = "0.15"
 nokhwa = { version = "0.10.11", features = ["input-native"] }
+rcgen = "0.14.10"
+rustls = "0.23.46"
+tokio-rustls = "0.26.6"
 # xcap v0.1.1 has compatibility issues with modern rustc; using scrap or image capture natively
 
 

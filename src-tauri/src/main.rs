@@ -18,6 +18,7 @@ mod camera;
 mod parity;
 mod streaming;
 mod device_control;
+pub mod transport;
 pub mod window_manager;
 
 use media::NativeBridgeManager;
@@ -48,6 +49,7 @@ fn main() {
         .manage(NativeBridgeManager::new())
         .manage(phone::PhoneManager::new())
         .manage(camera::CameraManager::new())
+        .manage(transport::TransferManager::new())
         .setup(move |app| {
             let handle = app.handle().clone();
             let network = NetworkManager::new(handle.clone(), setup_state);
@@ -213,6 +215,8 @@ fn main() {
             device_control::device_do,
             device_control::show_hud,
             device_control::hide_hud,
+            transport::transfer::cancel_transfer_task,
+            transport::transfer::get_transfer_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building GlideDesk application")

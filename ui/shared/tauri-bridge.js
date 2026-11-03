@@ -198,6 +198,8 @@
     allowFullDisk: () => invoke('allow_full_disk'),
     openSettings: (kind) => invoke('open_settings', { kind: kind ? String(kind) : null }),
     relaunch: () => invoke('relaunch'),
+    cancelTransferTask: (batchId) => invoke('cancel_transfer_task', { batch_id: String(batchId || '') }),
+    getTransferStatus: (batchId) => invoke('get_transfer_status', { batch_id: String(batchId || '') }),
     fixFirewall: () => invoke('fix_firewall'),
     netCancel: () => invoke('net_cancel'),
     netJoinHotspot: (ssid, key) => invoke('net_join_hotspot', { ssid: String(ssid || ''), key: String(key || '') }),
