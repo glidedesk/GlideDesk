@@ -200,6 +200,17 @@
     relaunch: () => invoke('relaunch'),
     cancelTransferTask: (batchId) => invoke('cancel_transfer_task', { batch_id: String(batchId || '') }),
     getTransferStatus: (batchId) => invoke('get_transfer_status', { batch_id: String(batchId || '') }),
+    setChats: (on) => invoke('set_chats', { on: !!on }),
+    notifReply: (r) => {
+      if (r && typeof r === 'object') {
+        return invoke('notif_reply', {
+          chat: r.chat ? String(r.chat) : null,
+          id: r.id ? String(r.id) : null,
+          text: String(r.text || ''),
+        });
+      }
+      return invoke('notif_reply', { chat: null, id: null, text: '' });
+    },
     fixFirewall: () => invoke('fix_firewall'),
     netCancel: () => invoke('net_cancel'),
     netJoinHotspot: (ssid, key) => invoke('net_join_hotspot', { ssid: String(ssid || ''), key: String(key || '') }),

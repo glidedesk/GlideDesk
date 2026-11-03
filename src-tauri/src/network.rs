@@ -161,6 +161,32 @@ pub struct WireMessage {
     #[serde(default)]
     pub on: Option<bool>,
 
+    // Chat / Messages fields
+    #[serde(default)]
+    pub app: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(rename = "appName", default)]
+    pub app_name: Option<String>,
+    #[serde(default)]
+    pub group: Option<bool>,
+    #[serde(default)]
+    pub reply: Option<bool>,
+    #[serde(default)]
+    pub items: Option<Vec<crate::state::ChatItem>>,
+
+    // Wake-on-LAN fields
+    #[serde(default)]
+    pub macs: Option<Vec<String>>,
+    #[serde(default)]
+    pub address: Option<String>,
+
+    // Media & Device Action fields
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub pos: Option<u64>,
+
     // File transfer batch broadcast
     #[serde(default)]
     pub files: Option<Vec<String>>,
@@ -222,6 +248,16 @@ impl Default for WireMessage {
             parts: None,
             shot: None,
             on: None,
+            app: None,
+            key: None,
+            app_name: None,
+            group: None,
+            reply: None,
+            items: None,
+            macs: None,
+            address: None,
+            action: None,
+            pos: None,
             files: None,
             commit: None,
             nonce: None,
@@ -1125,7 +1161,8 @@ impl MeshServer {
             "k.mm" | "remote.mm" | "k.md" | "remote.md" | "k.mu" | "remote.mu"
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
                 | "clip" | "clip.image" | "kvm.take" | "window.handoff.offer"
-                | "window.handoff.return" | "gamepad.event"
+                | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
+                | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
                 if !*authenticated.read() =>
             {
                 log::warn!(
@@ -1254,6 +1291,59 @@ impl MeshServer {
             "gamepad.event" => {
                 log::info!("[Gamepad] Inbound gamepad event from {}: button={:?}, pressed={:?}", peer_addr, pkt.k, pkt.b);
                 let _ = app.emit("gamepad-event", &pkt);
+            }
+            "chat.conv" => {
+                if let (Some(app_id), Some(key)) = (pkt.app.clone(), pkt.key.clone()) {
+                    let mut s = state.inner.write();
+                    let chats_vec = s.chats.get_or_insert_with(Vec::new);
+                    let mut found = false;
+                    for conv in chats_vec.iter_mut() {
+                        if conv.key == key {
+                            if let Some(ref items) = pkt.items {
+                                for item in items {
+                                    if !conv.items.iter().any(|x| x.text == item.text && (x.at as i64 - item.at as i64).abs() < 1500) {
+                                        conv.items.push(item.clone());
+                                    }
+                                }
+                                conv.items.sort_by_key(|i| i.at);
+                                if conv.items.len() > 150 {
+                                    let start = conv.items.len() - 150;
+                                    conv.items = conv.items[start..].to_vec();
+                                }
+                            }
+                            if let Some(ref app_name) = pkt.app_name {
+                                conv.app_name = app_name.clone();
+                            }
+                            if let Some(ref name) = pkt.name {
+                                conv.name = name.clone();
+                            }
+                            if let Some(ref id) = pkt.id {
+                                conv.id = Some(id.clone());
+                            }
+                            if let Some(reply) = pkt.reply {
+                                conv.reply = reply;
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        chats_vec.push(crate::state::ChatConversation {
+                            key,
+                            app: app_id,
+                            app_name: pkt.app_name.clone().unwrap_or_default(),
+                            name: pkt.name.clone().unwrap_or_default(),
+                            group: pkt.group.unwrap_or(false),
+                            id: pkt.id.clone(),
+                            reply: pkt.reply.unwrap_or(false),
+                            at: chrono::Utc::now().timestamp_millis() as u64,
+                            items: pkt.items.clone().unwrap_or_default(),
+                        });
+                    }
+                    drop(s);
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
+                }
             }
             _ => {}
         }
@@ -1959,7 +2049,8 @@ impl NetworkManager {
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
                 | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
-                | "gamepad.event"
+                | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
+                | "rz.offer" | "rz.take" | "phone.media.ctl"
         );
 
         let guard = self.active_clients.read();
@@ -2000,7 +2091,8 @@ impl NetworkManager {
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
                 | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
-                | "gamepad.event"
+                | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
+                | "rz.offer" | "rz.take" | "phone.media.ctl"
         );
 
         let senders: Vec<mpsc::Sender<WireMessage>> = {

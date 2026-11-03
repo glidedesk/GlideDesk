@@ -20,6 +20,7 @@ mod streaming;
 mod device_control;
 pub mod transport;
 pub mod window_manager;
+pub mod chat;
 
 use media::NativeBridgeManager;
 
@@ -217,6 +218,8 @@ fn main() {
             device_control::hide_hud,
             transport::transfer::cancel_transfer_task,
             transport::transfer::get_transfer_status,
+            chat::set_chats,
+            chat::notif_reply,
         ])
         .build(tauri::generate_context!())
         .expect("error while building GlideDesk application")

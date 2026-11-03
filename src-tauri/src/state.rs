@@ -864,6 +864,42 @@ pub struct AdbQrState {
     pub done: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UiSettings {
+    #[serde(default)]
+    pub chats: bool,
+    #[serde(default)]
+    pub tab: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatItem {
+    pub at: u64,
+    pub from: String,
+    pub text: String,
+    pub me: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatConversation {
+    pub key: String,
+    pub app: String,
+    #[serde(rename = "appName", default)]
+    pub app_name: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub group: bool,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub reply: bool,
+    #[serde(default)]
+    pub at: u64,
+    #[serde(default)]
+    pub items: Vec<ChatItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FullState {
     pub device: DeviceInfo,
@@ -923,6 +959,10 @@ pub struct FullState {
     pub adb_qr: Option<AdbQrState>,
     #[serde(default)]
     pub overview: OverviewSettings,
+    #[serde(default)]
+    pub ui: UiSettings,
+    #[serde(default)]
+    pub chats: Option<Vec<ChatConversation>>,
 }
 
 #[derive(Clone)]
@@ -1001,6 +1041,8 @@ impl AppState {
             camera: CameraState::default(),
             adb_qr: None,
             overview: OverviewSettings::default(),
+            ui: UiSettings::default(),
+            chats: Some(Vec::new()),
         };
 
         Self {
