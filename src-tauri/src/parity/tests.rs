@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
     use crate::camera::process_vcam_frame;
-    use crate::parity::{parse_wifi_toggle, scan_installed_apps};
+    use crate::parity::{generate_launchagent_plist, parse_wifi_toggle, scan_installed_apps, toggle_app_mute};
     use crate::phone::adb::{resolve_resource_path, AdbClient};
     use crate::phone::scrcpy::{self, ControlMessage, StreamHeader};
 
@@ -211,6 +211,13 @@ Timestamp     A/R    Flags  if Domain               Service Type             Ins
         assert!(!parse_wifi_toggle(&serde_json::json!({ "on": false })));
         assert!(parse_wifi_toggle(&serde_json::json!({ "power": "on" })));
         assert!(!parse_wifi_toggle(&serde_json::json!({ "power": "off" })));
+
+        // Test LaunchAgent plist generation
+        let plist = generate_launchagent_plist("/Applications/GlideDesk.app/Contents/MacOS/glidedesk");
+        assert!(plist.contains("<string>com.glidedesk.desktop</string>"));
+        assert!(plist.contains("<string>/Applications/GlideDesk.app/Contents/MacOS/glidedesk</string>"));
+        assert!(plist.contains("<key>RunAtLoad</key>"));
+        assert!(plist.contains("<true/>"));
     }
 
     #[test]
@@ -236,12 +243,11 @@ Timestamp     A/R    Flags  if Domain               Service Type             Ins
         let app_name = "Messages";
 
         // Mute
-        muted.push(app_name.to_string());
-        assert!(muted.iter().any(|x| x.eq_ignore_ascii_case(app_name)));
+        assert!(toggle_app_mute(&mut muted, app_name));
+        assert_eq!(muted, vec!["Messages"]);
 
-        // Unmute
-        let pos = muted.iter().position(|x| x.eq_ignore_ascii_case(app_name)).unwrap();
-        muted.remove(pos);
-        assert!(!muted.iter().any(|x| x.eq_ignore_ascii_case(app_name)));
+        // Case-insensitive Unmute
+        assert!(!toggle_app_mute(&mut muted, "messages"));
+        assert!(muted.is_empty());
     }
 }

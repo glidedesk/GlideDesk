@@ -284,6 +284,16 @@ pub fn clear_notif_history(state: State<'_, AppState>, app: AppHandle) -> Result
     Ok(())
 }
 
+pub fn toggle_app_mute(muted: &mut Vec<String>, name: &str) -> bool {
+    if let Some(pos) = muted.iter().position(|x| x.eq_ignore_ascii_case(name)) {
+        muted.remove(pos);
+        false
+    } else {
+        muted.push(name.to_string());
+        true
+    }
+}
+
 #[tauri::command]
 pub fn mute_notif_app(
     app: Option<serde_json::Value>,
@@ -311,13 +321,8 @@ pub fn mute_notif_app(
     log::info!("[Notifs] Toggling mute state for app notifications: {}", name);
     {
         let mut s = state.inner.write();
-        if let Some(pos) = s.notifs.muted.iter().position(|x| x.eq_ignore_ascii_case(&name)) {
-            s.notifs.muted.remove(pos);
-            log::info!("[Notifs] Unmuted notifications for {}", name);
-        } else {
-            s.notifs.muted.push(name.clone());
-            log::info!("[Notifs] Muted notifications for {}", name);
-        }
+        let is_muted = toggle_app_mute(&mut s.notifs.muted, &name);
+        log::info!("[Notifs] App '{}' is now {}", name, if is_muted { "muted" } else { "unmuted" });
     }
     push_state(&app_handle, &state);
     Ok(())
@@ -567,18 +572,9 @@ pub fn execute_net_wifi(on: bool) -> Result<(), String> {
     }
 }
 
-pub fn execute_set_startup(on: bool) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").map_err(|e| format!("Cannot locate HOME environment: {}", e))?;
-        let launch_agents = PathBuf::from(home).join("Library/LaunchAgents");
-        std::fs::create_dir_all(&launch_agents).map_err(|e| e.to_string())?;
-        let plist_path = launch_agents.join("com.glidedesk.desktop.plist");
-
-        if on {
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let plist_content = format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
+pub fn generate_launchagent_plist(exe_path: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -592,8 +588,21 @@ pub fn execute_set_startup(on: bool) -> Result<(), String> {
     <true/>
 </dict>
 </plist>"#,
-                exe.to_string_lossy()
-            );
+        exe_path
+    )
+}
+
+pub fn execute_set_startup(on: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").map_err(|e| format!("Cannot locate HOME environment: {}", e))?;
+        let launch_agents = PathBuf::from(home).join("Library/LaunchAgents");
+        std::fs::create_dir_all(&launch_agents).map_err(|e| e.to_string())?;
+        let plist_path = launch_agents.join("com.glidedesk.desktop.plist");
+
+        if on {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let plist_content = generate_launchagent_plist(&exe.to_string_lossy());
             std::fs::write(&plist_path, plist_content).map_err(|e| format!("Failed to write LaunchAgent plist: {}", e))?;
             let _ = Command::new("launchctl").args(["load", &plist_path.to_string_lossy()]).output();
         } else if plist_path.exists() {
@@ -685,26 +694,20 @@ pub fn net_join_hotspot(ssid: String, key: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn net_cancel() -> Result<(), String> {
+pub fn net_cancel(app: AppHandle) -> Result<(), String> {
     log::info!("[Network] Cancelling pending network operation");
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("killall").arg("airport").output();
-        let _ = output;
-        Ok(())
-    }
+    let _ = app.emit("net-state", serde_json::json!({ "state": "idle", "cancelled": true }));
     #[cfg(target_os = "windows")]
     {
         let output = Command::new("netsh").args(["wlan", "disconnect"]).output();
         let _ = output;
-        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
         let output = Command::new("nmcli").args(["device", "disconnect"]).output();
         let _ = output;
-        Ok(())
     }
+    Ok(())
 }
 
 // ==========================================

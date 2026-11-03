@@ -258,7 +258,7 @@ pub fn remove_vdd(cam_mgr: State<'_, CameraManager>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let output = std::process::Command::new("systemextensionsctl")
-            .args(["uninstall", "org.macshare.mac.camera.systemextension"])
+            .args(["uninstall", "-", "org.macshare.mac.camera.systemextension"])
             .output();
         match output {
             Ok(out) if out.status.success() => {
@@ -267,7 +267,12 @@ pub fn remove_vdd(cam_mgr: State<'_, CameraManager>) -> Result<(), String> {
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                Err(format!("Failed to deregister virtual camera extension: {}. System administrator privilege required.", stderr.trim()))
+                if stderr.contains("There is no installed extension") {
+                    log::info!("[VirtualDisplay] No extension was currently registered");
+                    Ok(())
+                } else {
+                    Err(format!("Failed to deregister virtual camera extension: {}. System administrator privilege required.", stderr.trim()))
+                }
             }
             Err(e) => Err(format!("systemextensionsctl execution failed: {}", e)),
         }
