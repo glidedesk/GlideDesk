@@ -1369,6 +1369,31 @@ impl MeshServer {
                     let _ = app.emit("state-change", &snap);
                 }
             }
+            "phone.media" => {
+                let mut s = state.inner.write();
+                if let Some(ref title) = pkt.name {
+                    s.now_playing = Some(crate::state::NowPlayingState {
+                        app: pkt.app.clone().unwrap_or_default(),
+                        app_name: pkt.app_name.clone().unwrap_or_default(),
+                        title: title.clone(),
+                        artist: pkt.text.clone().unwrap_or_default(),
+                        album: String::new(),
+                        playing: pkt.on.unwrap_or(false),
+                        duration: 0,
+                        position: pkt.pos.unwrap_or(0),
+                        speed: 1.0,
+                        next: true,
+                        prev: true,
+                        seek: true,
+                        art: pkt.png.clone().unwrap_or_default(),
+                    });
+                } else {
+                    s.now_playing = None;
+                }
+                drop(s);
+                let snap = state.snapshot();
+                let _ = app.emit("state-change", &snap);
+            }
             _ => {}
         }
     }

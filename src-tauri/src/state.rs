@@ -864,6 +864,29 @@ pub struct AdbQrState {
     pub done: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NowPlayingState {
+    pub app: String,
+    #[serde(rename = "appName", default)]
+    pub app_name: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub playing: bool,
+    pub duration: u64,
+    pub position: u64,
+    #[serde(default)]
+    pub speed: f32,
+    #[serde(default)]
+    pub next: bool,
+    #[serde(default)]
+    pub prev: bool,
+    #[serde(default)]
+    pub seek: bool,
+    #[serde(default)]
+    pub art: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RezumeSettings {
     #[serde(default)]
@@ -1051,6 +1074,8 @@ pub struct FullState {
     pub rezume: RezumeSettings,
     #[serde(rename = "rezumeShelf", default)]
     pub rezume_shelf: RezumeState,
+    #[serde(rename = "nowPlaying", default)]
+    pub now_playing: Option<NowPlayingState>,
 }
 
 #[derive(Clone)]
@@ -1133,6 +1158,7 @@ impl AppState {
             chats: Some(Vec::new()),
             rezume: RezumeSettings::default(),
             rezume_shelf: RezumeState::default(),
+            now_playing: None,
         };
 
         Self {

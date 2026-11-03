@@ -22,6 +22,7 @@ pub mod transport;
 pub mod window_manager;
 pub mod chat;
 pub mod rezume;
+pub mod media_playback;
 
 use media::NativeBridgeManager;
 
@@ -223,6 +224,8 @@ fn main() {
             chat::notif_reply,
             rezume::set_rezume,
             rezume::rezume_do,
+            media_playback::get_now_playing,
+            media_playback::control_media,
         ])
         .build(tauri::generate_context!())
         .expect("error while building GlideDesk application")

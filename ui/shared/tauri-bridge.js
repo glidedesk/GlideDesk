@@ -218,6 +218,12 @@
       const id = typeof m === 'object' && m ? (m.id || null) : null;
       return invoke('rezume_do', { action, id });
     },
+    getNowPlaying: () => invoke('get_now_playing'),
+    controlMedia: (action, position = null) => {
+      const act = typeof action === 'object' && action ? (action.a || action.action || '') : String(action || '');
+      const pos = typeof action === 'object' && action ? (action.pos != null ? Number(action.pos) : null) : (position != null ? Number(position) : null);
+      return invoke('control_media', { action: act, position: pos });
+    },
     fixFirewall: () => invoke('fix_firewall'),
     netCancel: () => invoke('net_cancel'),
     netJoinHotspot: (ssid, key) => invoke('net_join_hotspot', { ssid: String(ssid || ''), key: String(key || '') }),
