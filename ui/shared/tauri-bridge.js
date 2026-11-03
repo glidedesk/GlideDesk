@@ -321,8 +321,8 @@
     setPhoneRemote: (on) => invoke('set_phone_remote', { on: !!on }),
     setRemote: (partial) => invoke('set_remote', { partial: partial || {} }),
     setStartup: (on) => invoke('set_startup', { on: !!on }),
-    setWake: (on) => invoke('set_wake', { on: !!on }),
-    setWakeOnLan: (on) => invoke('set_wake', { on: !!on }),
+    setWake: (on, iface) => invoke('set_wake', { on: !!on, iface: iface || null }),
+    setWakeOnLan: (on, iface) => invoke('set_wake', { on: !!on, iface: iface || null }),
     setupSshd: () => invoke('setup_sshd'),
 
     pathsOf: (files) => [...files].map((f) => f.path || f.name).filter(Boolean),

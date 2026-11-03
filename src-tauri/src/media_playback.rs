@@ -157,6 +157,24 @@ pub fn parse_macos_media_output(text: &str) -> Result<NowPlayingState, String> {
 
 /// Query current now-playing status from local OS or active session.
 #[tauri::command]
+pub fn check_macos_osascript_error(stderr: &str) -> Option<String> {
+    let lower = stderr.to_lowercase();
+    if stderr.contains("Not authorized")
+        || stderr.contains("-1743")
+        || lower.contains("assistive access")
+        || lower.contains("permission")
+        || lower.contains("automation")
+    {
+        Some(format!(
+            "macOS Automation permission denied for osascript (error -1743). Grant GlideDesk permission in System Settings > Privacy & Security > Automation: {}",
+            stderr.trim()
+        ))
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
 pub fn get_now_playing(state: State<'_, AppState>) -> Result<NowPlayingState, String> {
     let s = state.inner.read();
     if let Some(ref np) = s.now_playing {
@@ -200,6 +218,11 @@ pub fn get_now_playing(state: State<'_, AppState>) -> Result<NowPlayingState, St
                 let out_str = String::from_utf8_lossy(&output.stdout);
                 if let Ok(np) = parse_macos_media_output(&out_str) {
                     return Ok(np);
+                }
+            } else {
+                let err_str = String::from_utf8_lossy(&output.stderr);
+                if let Some(hint) = check_macos_osascript_error(&err_str) {
+                    return Err(hint);
                 }
             }
         }
@@ -461,5 +484,19 @@ mod tests {
 
         assert!(parse_macos_media_output("").is_err());
         assert!(parse_macos_media_output("Music:::").is_err());
+    }
+
+    #[test]
+    fn test_check_macos_osascript_permission_error() {
+        let err_denied = "36:44: execution error: Not authorized to send Apple events to System Events. (-1743)";
+        let hint = check_macos_osascript_error(err_denied);
+        assert!(hint.is_some());
+        let msg = hint.unwrap();
+        assert!(msg.contains("macOS Automation permission denied for osascript (error -1743)"));
+        assert!(msg.contains("System Settings > Privacy & Security > Automation"));
+
+        // Regular or empty error does not trigger false positive permission hint
+        assert!(check_macos_osascript_error("").is_none());
+        assert!(check_macos_osascript_error("syntax error near token").is_none());
     }
 }

@@ -30,6 +30,24 @@ pub async fn set_chats(
     Ok(())
 }
 
+pub fn escape_adb_input_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '$' => out.push_str("\\$"),
+            '`' => out.push_str("\\`"),
+            '%' => out.push_str("\\%"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            ' ' => out.push_str("%s"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[tauri::command]
 pub async fn notif_reply(
     chat: Option<String>,
@@ -83,10 +101,7 @@ pub async fn notif_reply(
         };
 
         if let Some(ref serial) = active_serial {
-            let escaped_text = clean_text
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace(' ', "%s");
+            let escaped_text = escape_adb_input_text(&clean_text);
             let cmd = format!("input text \"{}\"", escaped_text);
             if let Err(e) = phone_mgr.adb.shell(serial, &cmd) {
                 log::warn!("[Chat] ADB input text reply returned: {}", e);
@@ -117,10 +132,7 @@ pub async fn notif_reply(
         };
 
         if let Some(ref serial) = active_serial {
-            let escaped_text = clean_text
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace(' ', "%s");
+            let escaped_text = escape_adb_input_text(&clean_text);
             let cmd = format!("input text \"{}\"", escaped_text);
             let _ = phone_mgr.adb.shell(serial, &cmd);
         }
@@ -133,6 +145,7 @@ pub async fn notif_reply(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::network::WireMessage;
     use crate::state::ChatItem;
 
@@ -226,5 +239,20 @@ mod tests {
         assert_eq!(conv.items.len(), 150);
         assert_eq!(conv.items[0].text, "msg_10");
         assert_eq!(conv.items[149].text, "msg_159");
+    }
+
+    #[test]
+    fn test_escape_adb_input_text() {
+        let raw = "Hello World! $VAR `date` 100% \"quotes\" and \\backslash\nnewline";
+        let escaped = escape_adb_input_text(raw);
+
+        // Verify all special characters are escaped properly
+        assert!(escaped.contains("\\$VAR"), "$ must be escaped: {}", escaped);
+        assert!(escaped.contains("\\`date\\`"), "backtick must be escaped: {}", escaped);
+        assert!(escaped.contains("100\\%"), "% must be escaped: {}", escaped);
+        assert!(escaped.contains("\\\"quotes\\\""), "quotes must be escaped: {}", escaped);
+        assert!(escaped.contains("\\\\backslash"), "backslash must be escaped: {}", escaped);
+        assert!(escaped.contains("\\nnewline"), "newline must be escaped: {}", escaped);
+        assert!(escaped.contains("Hello%sWorld!"), "space must become %s: {}", escaped);
     }
 }

@@ -259,15 +259,68 @@ pub fn wake_peer(
     Ok(())
 }
 
+pub fn detect_active_adapter(os: &str) -> Option<String> {
+    match os.to_lowercase().as_str() {
+        "windows" | "win" => {
+            #[cfg(target_os = "windows")]
+            {
+                if let Ok(output) = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", "Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Select-Object -ExpandProperty Name -First 1"])
+                    .output()
+                {
+                    if output.status.success() {
+                        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !name.is_empty() {
+                            return Some(name);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "linux" => {
+            #[cfg(target_os = "linux")]
+            {
+                if let Ok(output) = std::process::Command::new("ip")
+                    .args(["route", "show", "default"])
+                    .output()
+                {
+                    if output.status.success() {
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        let parts: Vec<&str> = text.split_whitespace().collect();
+                        if let Some(pos) = parts.iter().position(|&w| w == "dev") {
+                            if let Some(iface) = parts.get(pos + 1) {
+                                return Some(iface.to_string());
+                            }
+                        }
+                    }
+                }
+                if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name != "lo" && !name.starts_with("veth") && !name.starts_with("docker") {
+                            return Some(name);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 #[tauri::command]
 pub fn set_wake(
     on: bool,
+    iface: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[WoL] Setting Wake-on-LAN: {}", on);
+    log::info!("[WoL] Setting Wake-on-LAN: {} (iface={:?})", on, iface);
     let os = crate::network::current_os();
-    if let Ok((cmd, args)) = build_wake_config_command(os, on, None) {
+    let effective_iface = iface.or_else(|| detect_active_adapter(os));
+    if let Ok((cmd, args)) = build_wake_config_command(os, on, effective_iface.as_deref()) {
         let _ = std::process::Command::new(&cmd).args(&args).output();
     }
 
