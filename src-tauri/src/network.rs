@@ -158,6 +158,8 @@ pub struct WireMessage {
     pub parts: Option<u32>,
     #[serde(default)]
     pub shot: Option<bool>,
+    #[serde(default)]
+    pub on: Option<bool>,
 
     // File transfer batch broadcast
     #[serde(default)]
@@ -219,6 +221,7 @@ impl Default for WireMessage {
             bytes: None,
             parts: None,
             shot: None,
+            on: None,
             files: None,
             commit: None,
             nonce: None,

@@ -175,10 +175,35 @@ impl Default for NetState {
     }
 }
 
+fn default_off() -> String { "off".to_string() }
+fn default_max_height() -> u32 { 1080 }
+fn default_bitrate() -> u32 { 20 }
+fn default_extend_size() -> String { "mac".to_string() }
+fn default_extend_px() -> (u32, u32) { (1920, 1080) }
+fn default_1920() -> u32 { 1920 }
+fn default_1080() -> u32 { 1080 }
+fn default_60() -> u32 { 60 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamState {
     pub state: String,
     pub share: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub watching: bool,
+    #[serde(rename = "displayId", default)]
+    pub display_id: Option<String>,
+    #[serde(rename = "maxHeight", default = "default_max_height")]
+    pub max_height: u32,
+    #[serde(rename = "bitrateMbps", default = "default_bitrate")]
+    pub bitrate_mbps: u32,
+    #[serde(default)]
+    pub audio: bool,
+    #[serde(rename = "streamInput", default = "default_true")]
+    pub stream_input: bool,
+    #[serde(default)]
+    pub remote: Option<serde_json::Value>,
 }
 
 impl Default for StreamState {
@@ -186,6 +211,14 @@ impl Default for StreamState {
         Self {
             state: "off".to_string(),
             share: "off".to_string(),
+            name: "Display 1".to_string(),
+            watching: false,
+            display_id: None,
+            max_height: 1080,
+            bitrate_mbps: 20,
+            audio: false,
+            stream_input: true,
+            remote: None,
         }
     }
 }
@@ -419,13 +452,120 @@ pub struct AppsState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VddInfo {
+    #[serde(default)]
+    pub installed: bool,
+}
+
+impl Default for VddInfo {
+    fn default() -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            installed: std::path::Path::new("/Library/CoreMediaIO/Plug-Ins/DAL").exists(),
+            #[cfg(target_os = "windows")]
+            installed: std::path::Path::new("C:\\Windows\\System32\\drivers\\IddCx.sys").exists(),
+            #[cfg(target_os = "linux")]
+            installed: std::path::Path::new("/dev/video0").exists(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacAccept {
+    #[serde(default = "default_true")]
+    pub accept: bool,
+}
+
+impl Default for MacAccept {
+    fn default() -> Self {
+        Self { accept: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VirtualSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_1920")]
+    pub width: u32,
+    #[serde(default = "default_1080")]
+    pub height: u32,
+    #[serde(rename = "hiDPI", default)]
+    pub hi_dpi: bool,
+    #[serde(default = "default_60")]
+    pub hz: u32,
+}
+
+impl Default for VirtualSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            width: 1920,
+            height: 1080,
+            hi_dpi: false,
+            hz: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PcScreenState {
     pub mode: String,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default = "default_off")]
+    pub status: String,
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub vdd: VddInfo,
+    #[serde(default)]
+    pub monitors: Vec<MonitorInfo>,
+    #[serde(default)]
+    pub monitor: Option<String>,
+    #[serde(rename = "extendSize", default = "default_extend_size")]
+    pub extend_size: String,
+    #[serde(rename = "extendPx", default = "default_extend_px")]
+    pub extend_px: (u32, u32),
+    #[serde(rename = "maxHeight", default = "default_max_height")]
+    pub max_height: u32,
+    #[serde(default = "default_bitrate")]
+    pub mbps: u32,
+    #[serde(default)]
+    pub sound: bool,
+    #[serde(default = "default_true")]
+    pub input: bool,
+    #[serde(default = "default_true")]
+    pub remote: bool,
+    #[serde(default)]
+    pub mac: MacAccept,
+    #[serde(default)]
+    pub stats: Option<serde_json::Value>,
+    #[serde(default)]
+    pub virtual_settings: VirtualSettings,
 }
 
 impl Default for PcScreenState {
     fn default() -> Self {
-        Self { mode: "off".to_string() }
+        Self {
+            mode: "off".to_string(),
+            busy: false,
+            status: "off".to_string(),
+            error: String::new(),
+            vdd: VddInfo::default(),
+            monitors: Vec::new(),
+            monitor: None,
+            extend_size: "mac".to_string(),
+            extend_px: (1920, 1080),
+            max_height: 1080,
+            mbps: 20,
+            sound: false,
+            input: true,
+            remote: true,
+            mac: MacAccept::default(),
+            stats: None,
+            virtual_settings: VirtualSettings::default(),
+        }
     }
 }
 

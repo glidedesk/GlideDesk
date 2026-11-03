@@ -16,6 +16,7 @@ mod tray;
 mod phone;
 mod camera;
 mod parity;
+mod streaming;
 pub mod window_manager;
 
 use media::NativeBridgeManager;
@@ -191,6 +192,16 @@ fn main() {
             parity::net_join_hotspot,
             parity::net_cancel,
             parity::set_remote,
+            streaming::set_sharing,
+            streaming::set_sharing_opts,
+            streaming::set_stream_input,
+            streaming::select_display,
+            streaming::set_display_mode,
+            streaming::set_virtual,
+            streaming::set_stream_max_height,
+            streaming::set_bitrate,
+            streaming::set_screen_sound,
+            streaming::open_sharing_settings,
         ])
         .build(tauri::generate_context!())
         .expect("error while building GlideDesk application")
