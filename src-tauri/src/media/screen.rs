@@ -114,11 +114,11 @@ mod windows_capture {
                 return Err("GetDC failed".to_string());
             }
 
-            let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
+            let hdc_mem = CreateCompatibleDC(hdc_screen);
             let hbm = CreateCompatibleBitmap(hdc_screen, width, height);
             let old_obj = SelectObject(hdc_mem, hbm);
 
-            let ok = BitBlt(hdc_mem, 0, 0, width, height, Some(hdc_screen), 0, 0, SRCCOPY);
+            let ok = BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY);
             if ok.is_err() {
                 SelectObject(hdc_mem, old_obj);
                 let _ = DeleteObject(hbm);
