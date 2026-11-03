@@ -107,7 +107,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     let _ = window.show();
                     let _ = window.unminimize();
                     let _ = window.set_focus();
-                    let _ = window.emit("go-tab", "overview");
+                    let _ = window.emit("go", "overview");
                 }
             }
             "look_again" => {
@@ -124,7 +124,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.kvm_state.linked = full.kvm.linked;
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "share_keyboard" => {
                 let state = app.state::<AppState>();
@@ -132,7 +132,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.kvm.keyboard = !full.kvm.keyboard;
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "lock_cursor" => {
                 let state = app.state::<AppState>();
@@ -141,7 +141,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.kvm_state.locked = full.kvm.locked;
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "drive_other" => {
                 let state = app.state::<AppState>();
@@ -149,7 +149,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.kvm.drive_other = !full.kvm.drive_other;
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "be_driven" => {
                 let state = app.state::<AppState>();
@@ -157,7 +157,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.kvm.be_driven = !full.kvm.be_driven;
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "share_screen" => {
                 let state = app.state::<AppState>();
@@ -165,7 +165,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.stream.share = if full.stream.share == "on" { "off".to_string() } else { "on".to_string() };
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "receive_screen" => {
                 let state = app.state::<AppState>();
@@ -173,7 +173,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.stream.state = if full.stream.state == "on" { "off".to_string() } else { "on".to_string() };
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "share_clipboard" => {
                 let state = app.state::<AppState>();
@@ -181,7 +181,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.clipboard.share = !full.clipboard.share;
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "send_sound" => {
                 let state = app.state::<AppState>();
@@ -189,7 +189,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.audio.share = !full.audio.share;
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "drag_files" => {
                 let state = app.state::<AppState>();
@@ -197,7 +197,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.files.share_mac = !full.files.share_mac;
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "mount_files" => {
                 let state = app.state::<AppState>();
@@ -205,7 +205,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 full.files.mount_mac = !full.files.mount_mac;
                 let snap = full.clone();
                 drop(full);
-                let _ = app.emit("state-changed", snap);
+                let _ = app.emit("state-change", snap);
             }
             "check_updates" => {
                 if let Some(window) = app.get_webview_window("main") {

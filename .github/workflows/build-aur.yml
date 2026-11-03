@@ -1,0 +1,80 @@
+name: Build AUR
+
+# twindesk-bin (linux/aur/PKGBUILD) from the release's .deb (Build Linux puts it there first), built
+# and installed on Arch to check it, then put on the release. The PKGBUILD and .SRCINFO to push to the AUR are the artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release whose .deb to package (e.g. v2.3.0; a draft works too).
+        required: true
+      ref:
+        description: Branch the PKGBUILD comes from.
+        required: false
+        default: main
+
+# Write: the .deb can be on a draft release, which a read-only token can't see.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm git github-cli namcap
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'main' }}
+
+      # Downloaded here, not by makepkg: a draft's files aren't at the public URL yet. makepkg uses
+      # the file already in the folder under the source's name.
+      - name: Fetch the .deb and set the version
+        working-directory: linux/aur
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${{ inputs.tag }}"; VER="${VER#v}"
+          gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p "TwinDesk-$VER-amd64.deb"
+          SUM=$(sha256sum "TwinDesk-$VER-amd64.deb" | cut -d' ' -f1)
+          sed -i -e "s/^pkgver=.*/pkgver=$VER/" -e "s/^pkgrel=.*/pkgrel=1/" -e "s/^sha256sums=.*/sha256sums=('$SUM')/" PKGBUILD
+          grep -E '^(pkgver|pkgrel|sha256sums)=' PKGBUILD
+
+      # makepkg won't run as root: a user that may sudo pacman for the dependencies.
+      - name: Build
+        working-directory: linux/aur
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chown -R builder .
+          sudo -u builder makepkg -sf --noconfirm
+          sudo -u builder makepkg --printsrcinfo > .SRCINFO
+
+      - name: Check
+        working-directory: linux/aur
+        run: |
+          namcap PKGBUILD || true
+          namcap twindesk-bin-*.pkg.tar.zst || true
+          pacman -U --noconfirm twindesk-bin-*.pkg.tar.zst
+          test -x "$(readlink -f /usr/bin/twindesk)"
+          test -f /usr/share/licenses/twindesk-bin/LICENSE
+          ls /usr/share/applications/ | grep -i twindesk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twindesk-aur
+          include-hidden-files: true # .SRCINFO
+          path: |
+            linux/aur/PKGBUILD
+            linux/aur/.SRCINFO
+            linux/aur/twindesk-bin-*.pkg.tar.zst
+
+      # The package onto the release too, for `pacman -U` (the updater takes only .deb and .AppImage).
+      - name: Upload to the release
+        working-directory: linux/aur
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" -R "${{ github.repository }}" twindesk-bin-*.pkg.tar.zst --clobber

@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- TwinDesk — Copyright (C) 2026 inukaasith. GPL-3.0, see LICENSE. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; worker-src 'self'">
+  <title>Phone</title>
+  <link rel="stylesheet" href="phoneview.css">
+</head>
+<body>
+  <header id="bar">
+    <button id="panelBtn" class="ctl" title="Show or hide the phone controls" aria-label="Show or hide the phone controls"><svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M12.5 4v12"/></svg></button>
+    <span id="title"></span>
+    <span id="via" hidden></span>
+    <span class="tools"></span>
+    <button id="fullBtn" class="ctl" title="Fullscreen (F11)" aria-label="Fullscreen"><svg viewBox="0 0 20 20"><path d="M4 8V4h4 M12 4h4v4 M16 12v4h-4 M8 16H4v-4"/></svg></button>
+  </header>
+  <main id="stage">
+    <canvas id="screen" tabindex="0"></canvas>
+    <div id="status">Connecting to the phone…</div>
+  </main>
+  <!-- The controls: phoneview-renderer.js puts them here, in the title bar's tools, or in the bottom bar -->
+  <nav id="panel" aria-label="Phone controls"></nav>
+  <nav id="navbar" aria-label="Phone navigation"></nav>
+  <script src="../shared/vcam-feed.js"></script>
+  <script src="phoneview-renderer.js"></script>
+</body>
+</html>

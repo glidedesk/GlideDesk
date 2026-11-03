@@ -1,0 +1,94 @@
+<!doctype html>
+<!-- TwinDesk — Copyright (C) 2026 inukaasith, Erdoğan Yeşil. GPL-3.0, see LICENSE. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <base href="../"><!-- multi-device: this page is mac/mesh/control.html; everything else loads from mac/ -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <title>TwinDesk</title>
+  <link rel="stylesheet" href="mesh/control.css">
+  <link rel="stylesheet" href="mesh/control-pages.css">
+  <link rel="stylesheet" href="../shared/phonehub.css">
+  <link rel="stylesheet" href="../shared/updater.css">
+  <link rel="stylesheet" href="../shared/ui-device.css">
+</head>
+<body>
+  <nav id="sidebar" aria-label="Sections">
+    <div class="identity">
+      <div class="app-mark" aria-hidden="true"></div>
+      <div class="who">
+        <div class="app-name">TwinDesk<span class="mesh-pill" title="Multi-device is on: Mesh mode, in beta">MESH <span>beta</span></span></div>
+        <div class="peer"><span id="peer-dot" class="dot"></span><span id="peer-text">Not connected</span></div>
+      </div>
+    </div>
+    <div id="side-scroll">
+      <div id="phones"></div>
+      <ul id="nav" role="tablist"></ul>
+    </div>
+  </nav>
+
+  <main id="content">
+    <div class="drag-strip" aria-hidden="true"></div>
+    <section id="banner" class="banner" hidden>
+      <div class="banner-text">
+        <span id="pair-title"><strong id="pair-name"></strong> wants to pair</span>
+        <span id="pair-code-label" class="code-label">Code</span> <span id="pair-code" class="code"></span>
+        <div id="pair-hint" class="hint"></div>
+      </div>
+      <div class="banner-actions">
+        <button id="pair-deny" class="btn">Deny</button>
+        <button id="pair-allow" class="btn primary">Allow</button>
+      </div>
+    </section>
+    <section id="net-banner" class="banner" hidden>
+      <div class="banner-text">
+        <span id="net-title"></span>
+        <div id="net-hint" class="hint"></div>
+        <div id="net-form" class="net-form" hidden>
+          <input id="net-ssid" type="text" placeholder="Hotspot name" autocomplete="off" spellcheck="false" aria-label="Hotspot name">
+          <input id="net-pass" type="password" placeholder="Password" autocomplete="off" aria-label="Hotspot password">
+        </div>
+      </div>
+      <div class="banner-actions">
+        <button id="net-cancel" class="btn">Cancel</button>
+        <button id="net-join" class="btn primary">Join</button>
+      </div>
+    </section>
+    <div id="pages"></div>
+  </main>
+
+  <script src="../shared/protocol.js"></script>
+  <script src="control.js"></script>
+  <script src="../shared/otp.js"></script>
+  <script src="mesh/ui-overview.js"></script>
+  <script src="mesh/ui-display.js"></script>
+  <script src="ui-display-pc.js"></script>
+  <script src="mesh/ui-cursor.js"></script>
+  <script src="ui-keyboard.js"></script>
+  <script src="ui-clipboard.js"></script>
+  <script src="../shared/ui-nowplaying.js"></script>
+  <script src="ui-audio.js"></script>
+  <script src="ui-terminal.js"></script>
+  <script src="ui-notifs.js"></script>
+  <script src="ui-files.js"></script>
+  <script src="ui-mount.js"></script>
+  <script src="ui-apps.js"></script>
+  <script src="ui-phone.js"></script>
+  <script src="../shared/ui-device.js"></script>
+  <script src="../shared/ui-mirror.js"></script>
+  <script src="ui-general.js"></script>
+  <script src="ui-about.js"></script>
+  <script src="ui-setup.js"></script>
+  <script src="mesh/ui-multi.js"></script>
+  <script src="../shared/ui-hub.js"></script>
+  <script src="../shared/ui-calls.js"></script>
+  <script src="../shared/ui-messages.js"></script>
+  <script src="../shared/ui-media.js"></script>
+  <script src="../shared/ui-pfiles.js"></script>
+  <script src="../shared/feature-art.js"></script>
+  <script src="../shared/pairpop.js"></script>
+  <script src="../shared/ui-updater-modal.js"></script>
+  <script src="../shared/sidebar-model.js"></script>
+  <script src="mesh/ui-start.js"></script>
+</body>
+</html>

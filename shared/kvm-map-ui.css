@@ -1,0 +1,18 @@
+/* TwinDesk — Copyright (C) 2026 inukaasith. GPL-3.0, see LICENSE. */
+/* The Cursor tab's crossing map (shared/kvm-map-ui.js). Uses each app's colour tokens. */
+.kvm-map { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.kvm-map-svg { width: 100%; height: auto; max-height: 280px; display: block; touch-action: none; user-select: none; }
+.kvm-map-mine rect { fill: #0a84ff; stroke: var(--card); }
+.kvm-map-theirs rect { fill: #8e8e93; stroke: var(--card); cursor: grab; transition: fill 0.15s; }
+.kvm-map-theirs:hover rect { fill: #7c7c82; }
+.kvm-map-theirs.dragging rect { cursor: grabbing; fill: #6e6e73; }
+.kvm-map-theirs.placeholder rect { fill: var(--accent-soft); stroke: var(--muted); stroke-dasharray: 40 30; stroke-width: 8; }
+.kvm-map text { fill: #fff; font-weight: 600; pointer-events: none; }
+.kvm-map-touch { stroke: var(--accent); stroke-width: 5; stroke-linecap: round; vector-effect: non-scaling-stroke; pointer-events: none; }
+.kvm-map-legend { display: flex; justify-content: center; gap: 18px; font-size: 12px; }
+.kvm-map-key { display: flex; align-items: center; gap: 6px; }
+.kvm-map-key::before { content: ''; width: 12px; height: 9px; border-radius: 2px; background: #0a84ff; }
+.kvm-map-key.theirs::before { background: #8e8e93; }
+.kvm-map-foot { display: flex; align-items: center; gap: 12px; }
+.kvm-map-hint { flex: 1; color: var(--muted); font-size: 12px; }
+.kvm-map-identify { flex: none; }

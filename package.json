@@ -10,9 +10,11 @@
     "test": "node scripts/test-all.js",
     "test:fast": "node scripts/test-all.js --fast",
     "test:rust": "node scripts/test-all.js --rust",
-    "test:js": "node scripts/test-all.js --js"
+    "test:js": "node scripts/test-all.js --js",
+    "test:e2e": "node scripts/e2e/run-e2e.js"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0"
+    "@tauri-apps/cli": "^2.0.0",
+    "ws": "^8.22.1"
   }
 }

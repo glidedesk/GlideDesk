@@ -7,6 +7,10 @@ use std::collections::HashMap;
 use std::net::UdpSocket;
 use std::sync::Arc;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInfo {
     pub name: String,
@@ -20,6 +24,8 @@ pub struct PairedPeer {
     pub mac_name: String,
     pub os: String,
     pub address: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +130,8 @@ pub struct KvmSettings {
     #[serde(rename = "lockScreen")]
     pub lock_screen: bool,
     pub gestures: bool,
+    #[serde(rename = "pcSide", default)]
+    pub pc_side: Option<String>,
 }
 
 impl Default for KvmSettings {
@@ -140,6 +148,7 @@ impl Default for KvmSettings {
             reverse_scroll: false,
             lock_screen: true,
             gestures: true,
+            pc_side: Some("left".to_string()),
         }
     }
 }
@@ -185,6 +194,10 @@ impl Default for StreamState {
 pub struct FeatureToggleState {
     pub receive: bool,
     pub share: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub send: bool,
 }
 
 impl Default for FeatureToggleState {
@@ -192,6 +205,8 @@ impl Default for FeatureToggleState {
         Self {
             receive: true,
             share: true,
+            enabled: true,
+            send: true,
         }
     }
 }
@@ -282,6 +297,42 @@ pub struct PcAppsState {
 impl Default for PcAppsState {
     fn default() -> Self {
         Self { allow: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacAppsState {
+    pub on: bool,
+}
+
+impl Default for MacAppsState {
+    fn default() -> Self {
+        Self { on: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountState {
+    pub on: bool,
+    #[serde(default)]
+    pub mounted: String,
+    #[serde(default)]
+    pub busy: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub drive: String,
+}
+
+impl Default for MountState {
+    fn default() -> Self {
+        Self {
+            on: false,
+            mounted: String::new(),
+            busy: String::new(),
+            message: String::new(),
+            drive: String::new(),
+        }
     }
 }
 
@@ -494,6 +545,10 @@ pub struct FullState {
     pub pc_screen: PcScreenState,
     #[serde(rename = "pcApps")]
     pub pc_apps: PcAppsState,
+    #[serde(rename = "macApps", default)]
+    pub mac_apps: MacAppsState,
+    #[serde(default)]
+    pub mount: MountState,
     #[serde(default)]
     pub setup: SetupState,
 }
@@ -567,6 +622,8 @@ impl AppState {
             apps: AppsState::default(),
             pc_screen: PcScreenState::default(),
             pc_apps: PcAppsState::default(),
+            mac_apps: MacAppsState::default(),
+            mount: MountState::default(),
             setup: SetupState::default(),
         };
 
@@ -658,6 +715,7 @@ impl AppState {
                 mac_name: c.name.clone(),
                 os: c.os.clone(),
                 address: c.address.clone(),
+                token: None,
             });
             s.link.state = "connected".to_string();
             s.link.mac_name = Some(c.name.clone());
@@ -683,12 +741,11 @@ impl AppState {
         s.pairing = None;
         s.client = Some(client.clone());
         s.peer = Some(client.clone());
-        s.paired = Some(PairedPeer {
-            mac_id: client.id.clone(),
-            mac_name: client.name.clone(),
-            os: client.os.clone(),
-            address: client.address.clone(),
-        });
+        if let Some(ref mut p) = s.paired {
+            if p.mac_id.eq_ignore_ascii_case(&client.id) {
+                p.address = client.address.clone();
+            }
+        }
         s.link.state = "connected".to_string();
         s.link.mac_name = Some(client.name.clone());
         s.link.peer_name = Some(client.name.clone());
@@ -880,5 +937,110 @@ mod tests {
         assert_eq!(disc_snap.link.state, "disconnected");
         assert_eq!(disc_snap.link.mac_name, None);
         assert!(disc_snap.peer.is_none());
+    }
+
+    #[test]
+    fn test_layout_and_kvm_defaults_and_sync() {
+        let app_state = AppState::new();
+        let snap = app_state.snapshot();
+        assert_eq!(snap.layout.side, "right");
+        assert_eq!(snap.kvm.pc_side.as_deref(), Some("left"));
+        assert!(snap.kvm.mouse);
+        assert!(snap.kvm.keyboard);
+        assert!(snap.kvm.linked);
+        assert!(snap.kvm.be_driven);
+        assert!(snap.kvm.drive_other);
+        assert!(snap.kvm.gestures);
+
+        {
+            let mut s = app_state.inner.write();
+            s.layout.side = "left".to_string();
+            s.kvm.pc_side = Some("right".to_string());
+        }
+        let updated = app_state.snapshot();
+        assert_eq!(updated.layout.side, "left");
+        assert_eq!(updated.kvm.pc_side.as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn test_add_and_remove_multiple_clients() {
+        let app_state = AppState::new();
+        let peer1 = PeerInfo {
+            id: "peer1".to_string(),
+            name: "Peer One".to_string(),
+            os: "win".to_string(),
+            address: Some("192.168.4.10".to_string()),
+            port: Some(47800),
+            last_seen: None,
+            invited: None,
+        };
+        let peer2 = PeerInfo {
+            id: "peer2".to_string(),
+            name: "Peer Two".to_string(),
+            os: "macos".to_string(),
+            address: Some("192.168.4.20".to_string()),
+            port: Some(47800),
+            last_seen: None,
+            invited: None,
+        };
+
+        app_state.add_client(peer1);
+        app_state.add_client(peer2);
+
+        let snap = app_state.snapshot();
+        assert_eq!(snap.clients.len(), 2);
+        assert_eq!(snap.link.state, "connected");
+
+        // Remove first peer
+        app_state.remove_client("192.168.4.10");
+        let snap2 = app_state.snapshot();
+        assert_eq!(snap2.clients.len(), 1);
+        assert_eq!(snap2.clients[0].id, "peer2");
+        assert_eq!(snap2.link.state, "connected");
+
+        // Remove second peer
+        app_state.remove_client("peer2");
+        let snap3 = app_state.snapshot();
+        assert_eq!(snap3.clients.len(), 0);
+        assert_eq!(snap3.link.state, "disconnected");
+        assert!(snap3.peer.is_none());
+    }
+
+    #[test]
+    fn test_where_input_state_transitions() {
+        let app_state = AppState::new();
+        assert_eq!(app_state.snapshot().input, "home");
+
+        app_state.set_where_input("driving");
+        assert_eq!(app_state.snapshot().input, "driving");
+        assert_eq!(app_state.snapshot().kvm_state.mode, "driving");
+
+        app_state.set_where_input("driven");
+        assert_eq!(app_state.snapshot().input, "driven");
+        assert_eq!(app_state.snapshot().kvm_state.mode, "driven");
+
+        app_state.set_where_input("home");
+        assert_eq!(app_state.snapshot().input, "home");
+        assert_eq!(app_state.snapshot().kvm_state.mode, "home");
+    }
+
+    #[test]
+    fn test_full_state_serialization_roundtrip() {
+        let app_state = AppState::new();
+        let snap = app_state.snapshot();
+        let json = serde_json::to_string(&snap).expect("serialize FullState");
+
+        // Verify key structural elements expected by JS frontend
+        assert!(json.contains("\"layout\":{\"side\":\"right\"}"));
+        assert!(json.contains("\"pcSide\":\"left\""));
+        assert!(json.contains("\"beDriven\":true"));
+        assert!(json.contains("\"driveOther\":true"));
+        assert!(json.contains("\"macName\":"));
+        assert!(json.contains("\"activeTab\":\"overview\""));
+
+        let deserialized: FullState = serde_json::from_str(&json).expect("deserialize FullState");
+        assert_eq!(deserialized.layout.side, "right");
+        assert_eq!(deserialized.kvm.pc_side.as_deref(), Some("left"));
+        assert_eq!(deserialized.input, "home");
     }
 }

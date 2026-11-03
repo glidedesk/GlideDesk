@@ -4,10 +4,10 @@ plugins {
 }
 
 android {
-    namespace = "com.glidedesk.android"
+    namespace = "com.twindesk.android"
     compileSdk = 37
     defaultConfig {
-        applicationId = "com.glidedesk.android"
+        applicationId = "com.twindesk.android"
         minSdk = 29 // Android 10: wireless debugging needs 11, everything else works from 10
         targetSdk = 36
         versionCode = 10109

@@ -1,0 +1,33 @@
+<!doctype html>
+<!-- TwinDesk — Copyright (C) 2026 inukaasith. GPL-3.0, see LICENSE. -->
+<!-- The other computer's camera (camshare.js): hidden, its picture to the Camera tab and the virtual camera; Camera › Window shows it. -->
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>Camera</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; color: #f5f5f7; font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; user-select: none; }
+    video { width: 100%; height: 100%; object-fit: contain; display: block; }
+    /* the mirror and the turn: camera-view.js place() */
+    #status { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 0 24px; color: #a1a1a6; pointer-events: none; }
+    #status[hidden] { display: none; }
+    #tools { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 6px; opacity: 0; transition: opacity 0.2s; }
+    body:hover #tools, #tools:focus-within { opacity: 1; }
+    button { border: 0; border-radius: 6px; padding: 6px 10px; background: rgba(40, 40, 44, 0.85); color: #f5f5f7; font: inherit; cursor: pointer; }
+    button:hover { background: rgba(70, 70, 76, 0.95); }
+    button.on { background: rgba(10, 132, 255, 0.75); }
+    #again[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="status">Asking for the camera…</div>
+  <div id="tools">
+    <button id="again" hidden>Try again</button>
+    <button id="mirror" title="Show it as in a mirror">Mirror</button>
+  </div>
+  <script src="vcam-feed.js"></script>
+  <script src="camera-view.js"></script>
+</body>
+</html>

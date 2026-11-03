@@ -51,6 +51,30 @@ impl KvmQueue {
     }
 }
 
+/// Check if cursor coordinates cross the outer edge of the virtual desktop layout.
+pub fn check_edge_crossed(side: &str, pt_x: f64, pt_y: f64, vx: i32, vy: i32, vw: i32, vh: i32) -> bool {
+    let max_x = (vx + vw) as f64;
+    let max_y = (vy + vh) as f64;
+    match side {
+        "right" => pt_x >= max_x - 2.0,
+        "left" => pt_x <= (vx + 1) as f64,
+        "top" => pt_y <= (vy + 1) as f64,
+        "bottom" => pt_y >= max_y - 2.0,
+        _ => false,
+    }
+}
+
+/// Check if cumulative remote virtual deltas indicate cursor has moved back across the seam to home.
+pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: f64) -> bool {
+    match side {
+        "right" => virtual_remote_x < -8.0,
+        "left" => virtual_remote_x > 8.0,
+        "top" => virtual_remote_y > 8.0,
+        "bottom" => virtual_remote_y < -8.0,
+        _ => false,
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[allow(non_upper_case_globals, non_snake_case)]
 pub mod macos_ffi {
@@ -340,10 +364,110 @@ pub mod keycodes {
     }
 }
 
+static HELD_KEYS: parking_lot::Mutex<Option<std::collections::HashSet<u16>>> = parking_lot::Mutex::new(None);
+static HELD_BUTTONS: parking_lot::Mutex<Option<std::collections::HashSet<u8>>> = parking_lot::Mutex::new(None);
+
+fn track_key(vk: u16, is_down: bool) {
+    let mut guard = HELD_KEYS.lock();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if is_down {
+        set.insert(vk);
+    } else {
+        set.remove(&vk);
+    }
+}
+
+fn track_button(button: MouseButton, is_down: bool) {
+    let id = match button {
+        MouseButton::Left => 0,
+        MouseButton::Right => 1,
+        MouseButton::Middle => 2,
+    };
+    let mut guard = HELD_BUTTONS.lock();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if is_down {
+        set.insert(id);
+    } else {
+        set.remove(&id);
+    }
+}
+
 /// Native platform input injection implementation with pre-login and lock screen desktop synchronization.
 pub struct NativeInputInjector;
 
 impl NativeInputInjector {
+    pub fn release_all_keys() {
+        let keys_to_release: Vec<u16> = {
+            let mut guard = HELD_KEYS.lock();
+            if let Some(ref mut set) = *guard {
+                set.drain().collect()
+            } else {
+                Vec::new()
+            }
+        };
+        for vk in keys_to_release {
+            Self::key_event(vk, false, false);
+        }
+
+        // Proactively release common modifiers to prevent stuck modifiers
+        // 0x10 VK_SHIFT, 0x11 VK_CONTROL, 0x12 VK_MENU (Alt), 0x5B VK_LWIN, 0x5C VK_RWIN
+        // 0xA0 VK_LSHIFT, 0xA1 VK_RSHIFT, 0xA2 VK_LCONTROL, 0xA3 VK_RCONTROL, 0xA4 VK_LMENU, 0xA5 VK_RMENU
+        const COMMON_MODIFIERS: &[u16] = &[
+            0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5,
+        ];
+        for &vk in COMMON_MODIFIERS {
+            Self::key_event(vk, false, false);
+        }
+
+        let btns_to_release: Vec<u8> = {
+            let mut guard = HELD_BUTTONS.lock();
+            if let Some(ref mut set) = *guard {
+                set.drain().collect()
+            } else {
+                Vec::new()
+            }
+        };
+        for b in btns_to_release {
+            let btn = match b {
+                1 => MouseButton::Right,
+                2 => MouseButton::Middle,
+                _ => MouseButton::Left,
+            };
+            Self::mouse_button(btn, false);
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn recenter_local_cursor() {
+        let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
+        Self::recenter_cursor(vx, vy, vw, vh);
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub fn recenter_local_cursor() {}
+
+    #[cfg(windows)]
+    pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
+        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+        unsafe {
+            let _ = SetCursorPos(vx + vw / 2, vy + vh / 2);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
+        use macos_ffi::*;
+        let center_pt = CGPoint {
+            x: (vx + vw / 2) as f64,
+            y: (vy + vh / 2) as f64,
+        };
+        unsafe {
+            let _ = CGWarpMouseCursorPosition(center_pt);
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub fn recenter_cursor(_vx: i32, _vy: i32, _vw: i32, _vh: i32) {}
     #[cfg(windows)]
     pub fn sync_input_desktop() {
         use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -431,6 +555,7 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn mouse_button(button: MouseButton, is_down: bool) {
+        track_button(button, is_down);
         Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
@@ -468,6 +593,7 @@ impl NativeInputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn mouse_button(button: MouseButton, is_down: bool) {
+        track_button(button, is_down);
         use macos_ffi::*;
         unsafe {
             let dummy = CGEventCreate(std::ptr::null_mut());
@@ -571,6 +697,7 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn key_event(vk: u16, is_down: bool, extended: bool) {
+        track_key(vk, is_down);
         Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
@@ -606,6 +733,7 @@ impl NativeInputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn key_event(vk: u16, is_down: bool, _extended: bool) {
+        track_key(vk, is_down);
         use macos_ffi::*;
         if let Some(mac_code) = keycodes::windows_vk_to_macos_keycode(vk) {
             unsafe {
@@ -684,14 +812,16 @@ impl NativeClipboard {
 /// Real-time clipboard watcher polling system clipboard and broadcasting changes.
 pub struct ClipboardWatcher {
     network: NetworkManager,
+    state: AppState,
     last_text: Arc<Mutex<String>>,
     last_image_len: Arc<Mutex<usize>>,
 }
 
 impl ClipboardWatcher {
-    pub fn new(network: NetworkManager) -> Self {
+    pub fn new(network: NetworkManager, state: AppState) -> Self {
         Self {
             network,
+            state,
             last_text: Arc::new(Mutex::new(String::new())),
             last_image_len: Arc::new(Mutex::new(0)),
         }
@@ -705,6 +835,12 @@ impl ClipboardWatcher {
 
             loop {
                 interval.tick().await;
+
+                // Respect clipboard master switch: stop polling and broadcasting when disabled
+                if !self.state.inner.read().clipboard.enabled || !self.state.inner.read().clipboard.share {
+                    continue;
+                }
+
                 img_counter += 1;
 
                 let mut cb = NativeClipboard::new();
@@ -876,7 +1012,8 @@ pub mod hook_engine {
                 let max_x = vx + vw;
                 let max_y = vy + vh;
 
-                if !is_driving && has_peer {
+                let sharing_enabled = snap.kvm.mouse && snap.kvm.linked && snap.kvm.drive_other && !snap.kvm_state.paused;
+                if !is_driving && has_peer && sharing_enabled {
                     // Edge check across the entire virtual multi-monitor desktop
                     let crossed = match snap.layout.side.as_str() {
                         "right" => m.pt.x >= max_x - 2,
@@ -936,6 +1073,7 @@ pub mod hook_engine {
                             if returned {
                                 log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, VIRTUAL_REMOTE_X);
                                 state.set_where_input("home");
+                                NativeInputInjector::release_all_keys();
                                 let new_snap = state.snapshot();
                                 let _ = app.emit("state-change", &new_snap);
 
@@ -1047,24 +1185,43 @@ pub mod hook_engine {
                 let snap = state.snapshot();
                 let is_driving = snap.input == "driving";
 
-                // Hotkey to release: VK_RMENU (Right Alt, 165) or VK_RCONTROL (163)
+                // Hotkey to release: Double-tap VK_RMENU (Right Alt, 165) or VK_RCONTROL (163)
                 if (k.vkCode == 165 || k.vkCode == 163) && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
                     if is_driving {
-                        state.set_where_input("home");
-                        let new_snap = state.snapshot();
-                        let _ = app.emit("state-change", &new_snap);
-
-                        let home_msg = WireMessage {
-                            t: "kvm.home".to_string(),
-                            v: Some(1),
-                            ..Default::default()
+                        static mut LAST_WIN_EMERGENCY_TAP: Option<std::time::Instant> = None;
+                        let is_double_tap = unsafe {
+                            if let Some(prev) = LAST_WIN_EMERGENCY_TAP {
+                                if prev.elapsed() < std::time::Duration::from_millis(400) {
+                                    LAST_WIN_EMERGENCY_TAP = None;
+                                    true
+                                } else {
+                                    LAST_WIN_EMERGENCY_TAP = Some(std::time::Instant::now());
+                                    false
+                                }
+                            } else {
+                                LAST_WIN_EMERGENCY_TAP = Some(std::time::Instant::now());
+                                false
+                            }
                         };
-                        net.send_packet_sync(home_msg);
 
-                        // Center cursor on local virtual desktop
-                        let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
-                        let _ = SetCursorPos(vx + vw / 2, vy + vh / 2);
-                        return LRESULT(1);
+                        if is_double_tap {
+                            state.set_where_input("home");
+                            NativeInputInjector::release_all_keys();
+                            let new_snap = state.snapshot();
+                            let _ = app.emit("state-change", &new_snap);
+
+                            let home_msg = WireMessage {
+                                t: "kvm.home".to_string(),
+                                v: Some(1),
+                                ..Default::default()
+                            };
+                            net.send_packet_sync(home_msg);
+
+                            // Center cursor on local virtual desktop
+                            let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
+                            let _ = SetCursorPos(vx + vw / 2, vy + vh / 2);
+                            return LRESULT(1);
+                        }
                     }
                 }
 
@@ -1283,7 +1440,8 @@ pub mod hook_engine {
             let max_x = vx + vw;
             let max_y = vy + vh;
 
-            if !is_driving && has_peer {
+            let sharing_enabled = snap.kvm.mouse && snap.kvm.linked && snap.kvm.drive_other && !snap.kvm_state.paused;
+            if !is_driving && has_peer && sharing_enabled {
                 if r#type == kCGEventMouseMoved
                     || r#type == kCGEventLeftMouseDragged
                     || r#type == kCGEventRightMouseDragged
@@ -1291,13 +1449,7 @@ pub mod hook_engine {
                     let pt = CGEventGetLocation(event);
                     LAST_PT = pt;
 
-                    let crossed = match snap.layout.side.as_str() {
-                        "right" => pt.x >= (max_x - 2) as f64,
-                        "left" => pt.x <= (vx + 1) as f64,
-                        "top" => pt.y <= (vy + 1) as f64,
-                        "bottom" => pt.y >= (max_y - 2) as f64,
-                        _ => false,
-                    };
+                    let crossed = check_edge_crossed(&snap.layout.side, pt.x, pt.y, vx, vy, vw, vh);
 
                     if crossed {
                         VIRTUAL_REMOTE_X = 0.0;
@@ -1352,17 +1504,12 @@ pub mod hook_engine {
                         VIRTUAL_REMOTE_X += dx;
                         VIRTUAL_REMOTE_Y += dy;
 
-                        let returned = match snap.layout.side.as_str() {
-                            "right" => VIRTUAL_REMOTE_X < -8.0,
-                            "left" => VIRTUAL_REMOTE_X > 8.0,
-                            "top" => VIRTUAL_REMOTE_Y > 8.0,
-                            "bottom" => VIRTUAL_REMOTE_Y < -8.0,
-                            _ => false,
-                        };
+                        let returned = check_edge_returned(&snap.layout.side, VIRTUAL_REMOTE_X, VIRTUAL_REMOTE_Y);
 
                         if returned {
                             log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, VIRTUAL_REMOTE_X);
                             state.set_where_input("home");
+                            NativeInputInjector::release_all_keys();
                             let new_snap = state.snapshot();
                             let _ = app.emit("state-change", &new_snap);
 
@@ -1470,26 +1617,45 @@ pub mod hook_engine {
                             _ => false,
                         };
 
-                        // Release hotkeys: Right Option (61), Right Command (54), Right Control (62)
+                        // Release hotkeys: Double-tap Right Option (61), Right Command (54), Right Control (62)
                         if (keycode == 61 || keycode == 54 || keycode == 62) && is_down {
-                            state.set_where_input("home");
-                            let new_snap = state.snapshot();
-                            let _ = app.emit("state-change", &new_snap);
-
-                            let home_msg = WireMessage {
-                                t: "kvm.home".to_string(),
-                                v: Some(1),
-                                ..Default::default()
+                            static mut LAST_EMERGENCY_TAP: Option<std::time::Instant> = None;
+                            let is_double_tap = unsafe {
+                                if let Some(prev) = LAST_EMERGENCY_TAP {
+                                    if prev.elapsed() < std::time::Duration::from_millis(400) {
+                                        LAST_EMERGENCY_TAP = None;
+                                        true
+                                    } else {
+                                        LAST_EMERGENCY_TAP = Some(std::time::Instant::now());
+                                        false
+                                    }
+                                } else {
+                                    LAST_EMERGENCY_TAP = Some(std::time::Instant::now());
+                                    false
+                                }
                             };
-                            net.send_packet_sync(home_msg);
 
-                            let center_pt = CGPoint {
-                                x: (vx + vw / 2) as f64,
-                                y: (vy + vh / 2) as f64,
-                            };
-                            let _ = CGWarpMouseCursorPosition(center_pt);
-                            LAST_PT = center_pt;
-                            return std::ptr::null_mut();
+                            if is_double_tap {
+                                state.set_where_input("home");
+                                NativeInputInjector::release_all_keys();
+                                let new_snap = state.snapshot();
+                                let _ = app.emit("state-change", &new_snap);
+
+                                let home_msg = WireMessage {
+                                    t: "kvm.home".to_string(),
+                                    v: Some(1),
+                                    ..Default::default()
+                                };
+                                net.send_packet_sync(home_msg);
+
+                                let center_pt = CGPoint {
+                                    x: (vx + vw / 2) as f64,
+                                    y: (vy + vh / 2) as f64,
+                                };
+                                let _ = CGWarpMouseCursorPosition(center_pt);
+                                LAST_PT = center_pt;
+                                return std::ptr::null_mut();
+                            }
                         }
 
                         let vk = keycodes::macos_keycode_to_windows_vk(keycode);
@@ -1609,5 +1775,83 @@ mod tests {
         NativeInputInjector::mouse_button(MouseButton::Left, false);
         NativeInputInjector::mouse_wheel(0, 0);
         NativeInputInjector::key_event(0x41, false, false);
+    }
+
+    #[test]
+    fn test_edge_crossing_detection_math() {
+        let (vx, vy, vw, vh) = (0, 0, 1920, 1080);
+
+        // Right side: crosses when pt_x >= max_x - 2.0 (1918.0)
+        assert!(check_edge_crossed("right", 1918.0, 500.0, vx, vy, vw, vh));
+        assert!(check_edge_crossed("right", 1920.0, 500.0, vx, vy, vw, vh));
+        assert!(!check_edge_crossed("right", 1917.9, 500.0, vx, vy, vw, vh));
+
+        // Left side: crosses when pt_x <= vx + 1.0 (1.0)
+        assert!(check_edge_crossed("left", 0.0, 500.0, vx, vy, vw, vh));
+        assert!(check_edge_crossed("left", 1.0, 500.0, vx, vy, vw, vh));
+        assert!(!check_edge_crossed("left", 1.1, 500.0, vx, vy, vw, vh));
+
+        // Top side: crosses when pt_y <= vy + 1.0 (1.0)
+        assert!(check_edge_crossed("top", 500.0, 0.0, vx, vy, vw, vh));
+        assert!(check_edge_crossed("top", 500.0, 1.0, vx, vy, vw, vh));
+        assert!(!check_edge_crossed("top", 500.0, 1.1, vx, vy, vw, vh));
+
+        // Bottom side: crosses when pt_y >= max_y - 2.0 (1078.0)
+        assert!(check_edge_crossed("bottom", 500.0, 1078.0, vx, vy, vw, vh));
+        assert!(check_edge_crossed("bottom", 500.0, 1080.0, vx, vy, vw, vh));
+        assert!(!check_edge_crossed("bottom", 500.0, 1077.9, vx, vy, vw, vh));
+
+        // Unknown side never crosses
+        assert!(!check_edge_crossed("unknown", 0.0, 0.0, vx, vy, vw, vh));
+    }
+
+    #[test]
+    fn test_return_crossing_detection_math() {
+        // Right side: peer is to the right. Returning means moving left past seam (virtual_x < -8.0)
+        assert!(check_edge_returned("right", -8.5, 0.0));
+        assert!(!check_edge_returned("right", -8.0, 0.0));
+        assert!(!check_edge_returned("right", -5.0, 0.0));
+
+        // Left side: peer is to the left. Returning means moving right past seam (virtual_x > 8.0)
+        assert!(check_edge_returned("left", 8.5, 0.0));
+        assert!(!check_edge_returned("left", 8.0, 0.0));
+        assert!(!check_edge_returned("left", 5.0, 0.0));
+
+        // Top side: peer is above. Returning means moving down past seam (virtual_y > 8.0)
+        assert!(check_edge_returned("top", 0.0, 8.5));
+        assert!(!check_edge_returned("top", 0.0, 8.0));
+
+        // Bottom side: peer is below. Returning means moving up past seam (virtual_y < -8.0)
+        assert!(check_edge_returned("bottom", 0.0, -8.5));
+        assert!(!check_edge_returned("bottom", 0.0, -8.0));
+
+        // Unknown side never returns
+        assert!(!check_edge_returned("unknown", -100.0, -100.0));
+    }
+
+    #[test]
+    fn test_native_input_injector_release_all_keys() {
+        let test_key = 0x50; // VK_P
+        NativeInputInjector::key_event(test_key, true, false);
+        NativeInputInjector::mouse_button(MouseButton::Left, true);
+        NativeInputInjector::mouse_button(MouseButton::Right, true);
+
+        {
+            let k_guard = HELD_KEYS.lock();
+            assert!(k_guard.as_ref().unwrap().contains(&test_key));
+            let b_guard = HELD_BUTTONS.lock();
+            assert!(b_guard.as_ref().unwrap().contains(&0));
+            assert!(b_guard.as_ref().unwrap().contains(&1));
+        }
+
+        // Release all keys and verify tracking sets are completely drained
+        NativeInputInjector::release_all_keys();
+
+        {
+            let k_guard = HELD_KEYS.lock();
+            assert!(!k_guard.as_ref().unwrap().contains(&test_key));
+            let b_guard = HELD_BUTTONS.lock();
+            assert!(b_guard.as_ref().unwrap().is_empty());
+        }
     }
 }

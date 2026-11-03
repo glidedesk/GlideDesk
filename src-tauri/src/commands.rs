@@ -17,6 +17,15 @@ pub fn get_state(state: State<'_, AppState>) -> FullState {
 pub fn set_kvm(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     {
         let mut s = state.inner.write();
+        if let Some(shared) = partial.get("shared").and_then(|v| v.as_bool()) {
+            s.kvm.linked = shared;
+            s.kvm.mouse = shared;
+            s.kvm_state.linked = shared;
+        }
+        if let Some(linked) = partial.get("linked").and_then(|v| v.as_bool()) {
+            s.kvm.linked = linked;
+            s.kvm_state.linked = linked;
+        }
         if let Some(locked) = partial.get("locked").and_then(|v| v.as_bool()) {
             s.kvm.locked = locked;
             s.kvm_state.locked = locked;
@@ -81,21 +90,26 @@ pub fn get_displays(app: AppHandle) -> Result<Vec<crate::state::MonitorInfo>, St
     Ok(monitors)
 }
 
-#[tauri::command]
-pub fn set_layout(side: String, state: State<'_, AppState>, network: State<'_, NetworkManager>, app: AppHandle) -> Result<(), String> {
-    {
-        let mut s = state.inner.write();
-        s.layout.side = side.clone();
-    }
-    push_state(&app, &state);
-
-    let opp = match side.as_str() {
+pub fn opposite_direction(side: &str) -> &'static str {
+    match side {
         "right" => "left",
         "left" => "right",
         "top" => "bottom",
         "bottom" => "top",
         _ => "left",
-    };
+    }
+}
+
+#[tauri::command]
+pub fn set_layout(side: String, state: State<'_, AppState>, network: State<'_, NetworkManager>, app: AppHandle) -> Result<(), String> {
+    let opp = opposite_direction(&side);
+    {
+        let mut s = state.inner.write();
+        s.layout.side = side.clone();
+        s.kvm.pc_side = Some(opp.to_string());
+    }
+    push_state(&app, &state);
+
     network.send_packet_sync(crate::network::WireMessage {
         t: "kvm.layout".to_string(),
         v: Some(1),
@@ -132,7 +146,28 @@ pub fn set_tab(tab: String, state: State<'_, AppState>, app: AppHandle) -> Resul
 }
 
 #[tauri::command]
-pub fn set_clipboard(partial: Value, network: State<'_, NetworkManager>) -> Result<(), String> {
+pub fn set_clipboard(
+    partial: Value,
+    state: State<'_, AppState>,
+    network: State<'_, NetworkManager>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if let Some(enabled) = partial
+        .get("enabled")
+        .or_else(|| partial.get("share"))
+        .or_else(|| partial.get("send"))
+        .or_else(|| partial.get("on"))
+        .and_then(|v| v.as_bool())
+    {
+        let mut s = state.inner.write();
+        s.clipboard.enabled = enabled;
+        s.clipboard.share = enabled;
+        s.clipboard.send = enabled;
+    }
+    if let Some(receive) = partial.get("receive").and_then(|v| v.as_bool()) {
+        let mut s = state.inner.write();
+        s.clipboard.receive = receive;
+    }
     if let Some(text) = partial.get("text").and_then(|v| v.as_str()) {
         let mut cb = crate::kvm::NativeClipboard::new();
         cb.set_text(text);
@@ -149,6 +184,7 @@ pub fn set_clipboard(partial: Value, network: State<'_, NetworkManager>) -> Resu
             net.send_packet(msg).await;
         });
     }
+    push_state(&app, &state);
     Ok(())
 }
 
@@ -863,5 +899,63 @@ mod tests {
         assert_eq!(asset.name, "GlideDesk_1.1.2_x64-setup.exe");
         #[cfg(target_os = "linux")]
         assert_eq!(asset.name, "GlideDesk_1.1.2_amd64.AppImage");
+    }
+
+    #[test]
+    fn test_opposite_direction_helper() {
+        assert_eq!(opposite_direction("right"), "left");
+        assert_eq!(opposite_direction("left"), "right");
+        assert_eq!(opposite_direction("top"), "bottom");
+        assert_eq!(opposite_direction("bottom"), "top");
+        assert_eq!(opposite_direction("invalid_side"), "left");
+        assert_eq!(opposite_direction(""), "left");
+    }
+
+    #[test]
+    fn test_pick_asset_empty_or_mismatched() {
+        let empty_assets: Vec<GithubAsset> = Vec::new();
+        assert!(pick_asset(&empty_assets).is_none());
+
+        let wrong_assets = vec![
+            GithubAsset {
+                name: "unknown_file.tar.gz".to_string(),
+                browser_download_url: "https://example.com/unknown_file.tar.gz".to_string(),
+                size: Some(100),
+            },
+        ];
+        assert!(pick_asset(&wrong_assets).is_none());
+    }
+
+    #[test]
+    fn test_kvm_and_clipboard_master_switch_handling() {
+        let app_state = crate::state::AppState::new();
+        {
+            let mut s = app_state.inner.write();
+            assert!(s.kvm.linked);
+            assert!(s.kvm.mouse);
+            assert!(s.clipboard.enabled);
+            assert!(s.clipboard.share);
+
+            // 1. Cursor master switch { shared: false }
+            let kvm_payload = serde_json::json!({ "shared": false });
+            if let Some(shared) = kvm_payload.get("shared").and_then(|v| v.as_bool()) {
+                s.kvm.linked = shared;
+                s.kvm.mouse = shared;
+                s.kvm_state.linked = shared;
+            }
+            assert!(!s.kvm.linked);
+            assert!(!s.kvm.mouse);
+
+            // 2. Clipboard master switch { enabled: false }
+            let clip_payload = serde_json::json!({ "enabled": false });
+            if let Some(enabled) = clip_payload.get("enabled").and_then(|v| v.as_bool()) {
+                s.clipboard.enabled = enabled;
+                s.clipboard.share = enabled;
+                s.clipboard.send = enabled;
+            }
+            assert!(!s.clipboard.enabled);
+            assert!(!s.clipboard.share);
+            assert!(!s.clipboard.send);
+        }
     }
 }

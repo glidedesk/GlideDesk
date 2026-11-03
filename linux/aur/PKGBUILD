@@ -1,0 +1,28 @@
+# Maintainer: inukaasith <inukaasith@users.noreply.github.com>
+pkgname=twindesk-bin
+_pkgname=twindesk
+pkgver=2.3.0
+pkgrel=1
+pkgdesc="Share mouse, keyboard, clipboard, files, sound and screens with a Mac, a PC, another Linux computer or a phone"
+arch=('x86_64')
+url="https://github.com/InukaAsith/TwinDesk"
+license=('GPL-3.0-only')
+depends=('gtk3' 'libnotify' 'nss' 'libxss' 'libxtst' 'xdg-utils' 'at-spi2-core' 'util-linux-libs'
+         'libsecret' 'libxi' 'libxrandr' 'libxfixes' 'openssl' 'dbus' 'libpulse' 'polkit' 'glib2'
+         'alsa-lib' 'mesa')
+optdepends=('bluez: devices not on this network over Bluetooth'
+            'networkmanager: Wi-Fi Direct to devices not on this network'
+            'v4l2loopback-dkms: Camera › Virtual camera')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+options=('!strip' '!debug')
+source=("TwinDesk-${pkgver}-amd64.deb::${url}/releases/download/v${pkgver}/TwinDesk-${pkgver}-amd64.deb")
+sha256sums=('3a90972b447407207cc6f4cc2b10231c912f5ea48ff937d0ac4503d7ebc534ac')
+
+package() {
+  bsdtar -xf "$srcdir/data.tar."* -C "$pkgdir"
+  # electron-builder's .deb installs to /opt/TwinDesk; its postinst (not run here) links /usr/bin/twindesk
+  install -d "$pkgdir/usr/bin"
+  ln -sf /opt/TwinDesk/twindesk "$pkgdir/usr/bin/twindesk"
+  install -Dm644 "$pkgdir/opt/TwinDesk/resources/app/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

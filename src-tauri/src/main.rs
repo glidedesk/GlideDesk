@@ -45,7 +45,7 @@ fn main() {
             network.start();
 
             // 2. Start Clipboard Sync Daemon (Phase 3)
-            let clip_watcher = Arc::new(kvm::ClipboardWatcher::new(network.clone()));
+            let clip_watcher = Arc::new(kvm::ClipboardWatcher::new(network.clone(), state.clone()));
             clip_watcher.start();
 
             // 3. Start Native KVM Hook Engine (Phase 3: low-level mouse/keyboard & edge detection)

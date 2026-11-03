@@ -12,6 +12,8 @@ const args = process.argv.slice(2);
 const skipAndroid = args.includes('--no-android') || args.includes('--fast') || args.includes('--js') || args.includes('--rust');
 const runRustOnly = args.includes('--rust');
 const runJsOnly = args.includes('--js');
+const runE2eOnly = args.includes('--e2e');
+const includeE2E = args.includes('--e2e') || args.includes('--all');
 
 console.log('\n\x1b[1m\x1b[36m============================================================\x1b[0m');
 console.log('\x1b[1m\x1b[36m             GlideDesk Unified Test Suite                   \x1b[0m');
@@ -22,7 +24,7 @@ let totalFailed = 0;
 const results = [];
 
 // 1. Rust Engine Tests
-if (!runJsOnly) {
+if (!runJsOnly && !runE2eOnly) {
   console.log('\x1b[1m\x1b[33m[1/3] Running Rust Engine & KVM Tests (cargo test)...\x1b[0m');
   const rustStart = Date.now();
   const rustRes = spawnSync('cargo', ['test', '--manifest-path', path.join(ROOT, 'src-tauri', 'Cargo.toml')], {
@@ -43,7 +45,7 @@ if (!runJsOnly) {
 }
 
 // 2. JavaScript Protocol & Mesh Tests
-if (!runRustOnly) {
+if (!runRustOnly && !runE2eOnly) {
   console.log('\x1b[1m\x1b[33m[2/3] Running Frontend & Wire Protocol Tests (node ui/shared/test/*.js)...\x1b[0m');
   const testDir = path.join(ROOT, 'ui', 'shared', 'test');
   const testFiles = fs.readdirSync(testDir).filter((f) => f.endsWith('.js')).sort();
@@ -106,6 +108,26 @@ if (!skipAndroid && !runRustOnly && !runJsOnly) {
     }
   } else {
     console.log('\x1b[90m[-] Android gradlew not found, skipping Android tests.\x1b[0m\n');
+  }
+}
+
+// 4. End-to-End WebSocket & Security Tests
+if (includeE2E) {
+  console.log('\x1b[1m\x1b[33m[E2E] Running End-to-End WebSocket & Security Suite...\x1b[0m');
+  const e2eStart = Date.now();
+  const e2eRes = spawnSync(process.execPath, [path.join(__dirname, 'e2e', 'run-e2e.js')], {
+    stdio: 'inherit',
+    cwd: ROOT,
+  });
+  const e2eDuration = ((Date.now() - e2eStart) / 1000).toFixed(2);
+
+  if (e2eRes.status === 0) {
+    results.push({ name: 'Live WebSocket & Auth Gate E2E', status: 'PASS', duration: `${e2eDuration}s` });
+    totalPassed++;
+  } else {
+    console.error(`\x1b[31m✖ E2E tests failed (exit code ${e2eRes.status})\x1b[0m\n`);
+    results.push({ name: 'Live WebSocket & Auth Gate E2E', status: 'FAIL', duration: `${e2eDuration}s` });
+    totalFailed++;
   }
 }
 

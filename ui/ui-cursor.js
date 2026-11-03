@@ -3,6 +3,25 @@
 // layout (pick where the other computer is; either side can change it) and the live state below. Behaviour: kvm.js and windows-helper.
 'use strict';
 
+const MAC_SIDE = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' };
+const CELL = { top: 1, left: 3, right: 5, bottom: 7 };
+const SIDE_OF = { 1: 'top', 3: 'left', 5: 'right', 7: 'bottom' };
+
+function resolveSide(s) {
+  const k = s && s.kvm;
+  return (s && s.layout && s.layout.side) || (k && k.pcSide && MAC_SIDE[k.pcSide]) || 'right';
+}
+
+function calculateOppositeSide(side) {
+  return MAC_SIDE[side] || 'left';
+}
+
+function generateLayoutHint(side, who) {
+  const rel = { left: 'to the left of', right: 'to the right of', top: 'above', bottom: 'below' };
+  return (side ? who + ' is ' + (rel[side] || '') + ' {me}. ' : '') + 'Click a side to move it.';
+}
+
+if (typeof UI !== 'undefined' && UI.tab) {
 UI.tab({
   id: 'cursor',
   order: 20,
@@ -18,8 +37,6 @@ UI.tab({
     const { el, api } = UI;
     const set = (partial) => api.setKvm(partial);
     // kvm.layout says where the PC is seen from the Mac; the Mac is on the opposite side of the PC.
-    const MAC_SIDE = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' };
-    const CELL = { top: 1, left: 3, right: 5, bottom: 7 };
 
     const speed = UI.slider({ min: 0.25, max: 3, step: 0.05, format: (v) => v.toFixed(2) + '×' }, (v) => set({ speed: v }));
     const reverse = UI.switch((v) => set({ reverseScroll: v }), { label: 'Reverse scrolling' });
@@ -44,7 +61,6 @@ UI.tab({
 
     const cells = [];
     const grid = el('div', { class: 'layout-grid' });
-    const SIDE_OF = { 1: 'top', 3: 'left', 5: 'right', 7: 'bottom' };
     for (let i = 0; i < 9; i++) {
       const c = el('div', { class: i === 4 ? 'screen pc-screen' : '', text: i === 4 ? '{me}' : '' });
       if (SIDE_OF[i]) c.onclick = () => api.setLayout(SIDE_OF[i]); // kvm.layout from either side
@@ -78,7 +94,7 @@ UI.tab({
       ble.set(k.ble !== false);
       resistance.set(k.resistancePx);
       const p = UI.peer(s);
-      const side = (s.layout && s.layout.side) || (k && k.pcSide ? MAC_SIDE[k.pcSide] : 'right');
+      const side = resolveSide(s);
       cells.forEach((c, i) => {
         if (i === 4) return;
         const here = side && CELL[side] === i;
@@ -87,8 +103,19 @@ UI.tab({
         c.title = here ? '' : 'Put ' + p.them + ' here';
       });
       const who = p.os === 'mac' ? 'Your Mac' : p.them;
-      layoutHint.textContent = (side ? who + ' is ' + { left: 'to the left of', right: 'to the right of', top: 'above', bottom: 'below' }[side] + ' {me}. ' : '')
-        + 'Click a side to move it.';
+      layoutHint.textContent = generateLayoutHint(side, who);
     };
   },
 });
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    MAC_SIDE,
+    CELL,
+    SIDE_OF,
+    resolveSide,
+    calculateOppositeSide,
+    generateLayoutHint,
+  };
+}

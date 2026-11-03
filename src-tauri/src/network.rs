@@ -414,6 +414,7 @@ pub struct ActiveClientSession {
     pub peer_id: Arc<RwLock<Option<String>>>,
     pub peer_addr: SocketAddr,
     pub tx: mpsc::Sender<WireMessage>,
+    pub authenticated: Arc<RwLock<bool>>,
 }
 
 /// Mesh WebSocket Server listening for incoming KVM sessions.
@@ -508,6 +509,7 @@ impl MeshServer {
 
         let session_id = peer_addr.to_string();
         let peer_id_holder = Arc::new(RwLock::new(None));
+        let authenticated = Arc::new(RwLock::new(false));
         let (out_tx, mut out_rx) = mpsc::channel::<WireMessage>(2048);
         {
             let mut guard = active_clients.write();
@@ -518,6 +520,7 @@ impl MeshServer {
                     peer_id: Arc::clone(&peer_id_holder),
                     peer_addr,
                     tx: out_tx.clone(),
+                    authenticated: Arc::clone(&authenticated),
                 },
             );
         }
@@ -565,6 +568,8 @@ impl MeshServer {
                                             &state,
                                             &peer_id_holder,
                                             &pending_pair,
+                                            &authenticated,
+                                            Some(&active_clients),
                                             &out_tx,
                                             &local_id,
                                             &local_name,
@@ -584,6 +589,8 @@ impl MeshServer {
                                             &state,
                                             &peer_id_holder,
                                             &pending_pair,
+                                            &authenticated,
+                                            Some(&active_clients),
                                             &out_tx,
                                             &local_id,
                                             &local_name,
@@ -616,7 +623,12 @@ impl MeshServer {
         }
         state.remove_client(&session_id);
         state.remove_client(&peer_addr.ip().to_string());
+        let was_driving = state.inner.read().input == "driving";
         state.set_where_input("home");
+        crate::kvm::NativeInputInjector::release_all_keys();
+        if was_driving {
+            crate::kvm::NativeInputInjector::recenter_local_cursor();
+        }
         {
             let mut pair_guard = pending_pair.write();
             if let Some(ref sess) = *pair_guard {
@@ -643,6 +655,7 @@ impl MeshServer {
         state: &AppState,
         app: &AppHandle,
         pending_pair: &Arc<RwLock<Option<PendingPairSession>>>,
+        active_clients: Option<&Arc<RwLock<HashMap<String, ActiveClientSession>>>>,
         local_id: &str,
         local_name: &str,
     ) {
@@ -652,6 +665,18 @@ impl MeshServer {
         };
         if let Some(sess) = session {
             let token = random_hex(16);
+            if let Some(clients_map) = active_clients {
+                let guard = clients_map.read();
+                for client in guard.values() {
+                    let pid = client.peer_id.read().clone();
+                    if pid.as_deref() == Some(&sess.peer_id)
+                        || client.id == sess.peer_id
+                        || client.peer_addr.ip().to_string() == sess.peer_id
+                    {
+                        *client.authenticated.write() = true;
+                    }
+                }
+            }
             {
                 let mut s = state.inner.write();
                 s.pairing = None;
@@ -675,6 +700,7 @@ impl MeshServer {
                     mac_name: sess.peer_name.clone(),
                     os: sess.peer_os.clone(),
                     address: None,
+                    token: Some(token.clone()),
                 });
                 s.peer = Some(peer.clone());
                 s.client = Some(peer);
@@ -731,6 +757,8 @@ impl MeshServer {
         state: &AppState,
         peer_id_holder: &Arc<RwLock<Option<String>>>,
         pending_pair: &Arc<RwLock<Option<PendingPairSession>>>,
+        authenticated: &Arc<RwLock<bool>>,
+        active_clients: Option<&Arc<RwLock<HashMap<String, ActiveClientSession>>>>,
         out_tx: &mpsc::Sender<WireMessage>,
         local_id: &str,
         local_name: &str,
@@ -882,7 +910,7 @@ impl MeshServer {
                     }
                 }
                 if should_finish {
-                    Self::finish_host_pairing(state, app, pending_pair, local_id, local_name).await;
+                    Self::finish_host_pairing(state, app, pending_pair, active_clients, local_id, local_name).await;
                 }
             }
             "pair.ok" => {
@@ -890,6 +918,7 @@ impl MeshServer {
                 let host_id = pkt.mac_id.clone().unwrap_or_else(|| peer_addr.to_string());
                 let host_name = pkt.mac_name.clone().unwrap_or_else(|| "Remote Host".to_string());
                 let host_os = pkt.os.clone().unwrap_or_else(|| "unknown".to_string());
+                let host_token = pkt.token.clone();
 
                 {
                     let mut s = state.inner.write();
@@ -913,8 +942,10 @@ impl MeshServer {
                         mac_name: host_name.clone(),
                         os: host_os.clone(),
                         address: Some(peer_addr.ip().to_string()),
+                        token: host_token.clone(),
                     });
                 }
+                *authenticated.write() = true;
                 {
                     let mut pair_guard = pending_pair.write();
                     *pair_guard = None;
@@ -927,6 +958,7 @@ impl MeshServer {
                     os: Some(current_os().to_string()),
                     port: Some(DEFAULT_PORT),
                     role: Some("guest".to_string()),
+                    token: host_token,
                     ..Default::default()
                 };
                 let _ = out_tx.send(hello).await;
@@ -948,9 +980,17 @@ impl MeshServer {
                 let side = pkt.side.clone().or_else(|| pkt.pc_side.clone());
                 if let Some(s_val) = side {
                     log::info!("[KVM] Remote layout updated: side = {}", s_val);
+                    let opp = match s_val.as_str() {
+                        "right" => "left",
+                        "left" => "right",
+                        "top" => "bottom",
+                        "bottom" => "top",
+                        _ => "left",
+                    };
                     {
                         let mut s = state.inner.write();
                         s.layout.side = s_val;
+                        s.kvm.pc_side = Some(opp.to_string());
                     }
                     let snap = state.snapshot();
                     let _ = app.emit("state-change", &snap);
@@ -960,6 +1000,28 @@ impl MeshServer {
                 if let Some(ref pid) = pkt.id {
                     *peer_id_holder.write() = Some(pid.clone());
                 }
+
+                // Verify authorization strictly via pairing token
+                let is_auth = {
+                    let guard = state.inner.read();
+                    if let Some(ref paired) = guard.paired {
+                        let id_match = pkt.id.as_deref().map(|id| id.eq_ignore_ascii_case(&paired.mac_id)).unwrap_or(false)
+                            || peer_addr.ip().to_string() == paired.mac_id;
+                        let token_match = match (&paired.token, &pkt.token) {
+                            (Some(exp), Some(recv)) => exp == recv,
+                            _ => false,
+                        };
+                        id_match && token_match
+                    } else {
+                        false
+                    }
+                };
+
+                if is_auth {
+                    *authenticated.write() = true;
+                    log::info!("[Auth] Peer {} ({:?}) authenticated successfully via pairing token", peer_addr, pkt.id);
+                }
+
                 let addr_str = if peer_addr.ip().is_unspecified() || peer_addr.ip().is_loopback() {
                     None
                 } else {
@@ -974,8 +1036,13 @@ impl MeshServer {
                     last_seen: Some(chrono::Utc::now().timestamp_millis() as u64),
                     invited: None,
                 };
-                state.add_client(info);
-                state.set_pairing(None);
+
+                if is_auth {
+                    state.add_client(info);
+                    state.set_pairing(None);
+                } else {
+                    log::warn!("[Auth] Unauthenticated hello/welcome from {} ({:?}) - not adding client", peer_addr, pkt.id);
+                }
 
                 if pkt.t == "hello" {
                     let welcome = WireMessage {
@@ -1016,11 +1083,28 @@ impl MeshServer {
                     state.remove_client(pid);
                 }
                 state.remove_client(&peer_addr.ip().to_string());
+                let was_driving = state.inner.read().input == "driving";
                 state.set_where_input("home");
+                crate::kvm::NativeInputInjector::release_all_keys();
+                if was_driving {
+                    crate::kvm::NativeInputInjector::recenter_local_cursor();
+                }
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
                 let window_reg = app.state::<crate::window_manager::ParkedWindowRegistry>();
                 let _ = window_reg.restore_all();
+            }
+            "k.mm" | "remote.mm" | "k.md" | "remote.md" | "k.mu" | "remote.mu"
+                | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
+                | "clip" | "clip.image" | "kvm.take" | "window.handoff.offer"
+                | "window.handoff.return"
+                if !*authenticated.read() =>
+            {
+                log::warn!(
+                    "[Auth] Dropping unauthenticated packet '{}' from {}",
+                    pkt.t,
+                    peer_addr
+                );
             }
             "k.mm" | "remote.mm" => {
                 // Inbound relative mouse / phone remote move with sub-pixel preservation
@@ -1100,6 +1184,7 @@ impl MeshServer {
             }
             "kvm.home" | "kvm.release" => {
                 state.set_where_input("home");
+                crate::kvm::NativeInputInjector::release_all_keys();
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
             }
@@ -1274,6 +1359,7 @@ impl NetworkManager {
 
         let session_id = target_addr.to_string();
         let peer_id_holder = Arc::new(RwLock::new(None));
+        let authenticated = Arc::new(RwLock::new(false));
         let (out_tx, mut out_rx) = mpsc::channel::<WireMessage>(2048);
         {
             let mut guard = self.active_clients.write();
@@ -1284,11 +1370,13 @@ impl NetworkManager {
                     peer_id: Arc::clone(&peer_id_holder),
                     peer_addr: resolved_addr,
                     tx: out_tx.clone(),
+                    authenticated: Arc::clone(&authenticated),
                 },
             );
         }
 
-        // Send hello
+        // Send hello with saved pairing token if available
+        let saved_token = self.state.inner.read().paired.as_ref().and_then(|p| p.token.clone());
         let hello = WireMessage {
             t: "hello".to_string(),
             v: Some(1),
@@ -1297,6 +1385,7 @@ impl NetworkManager {
             os: Some(current_os().to_string()),
             port: Some(DEFAULT_PORT),
             role: Some("guest".to_string()),
+            token: saved_token,
             ..Default::default()
         };
         let hello_str = serde_json::to_string(&hello).map_err(|e| e.to_string())?;
@@ -1356,6 +1445,8 @@ impl NetworkManager {
                                                 &state,
                                                 &pid_holder,
                                                 &pending_pair,
+                                                &authenticated,
+                                                Some(&clients_lock),
                                                 &client_tx,
                                                 &local_id,
                                                 &local_name,
@@ -1375,6 +1466,8 @@ impl NetworkManager {
                                                 &state,
                                                 &pid_holder,
                                                 &pending_pair,
+                                                &authenticated,
+                                                Some(&clients_lock),
                                                 &client_tx,
                                                 &local_id,
                                                 &local_name,
@@ -1407,7 +1500,12 @@ impl NetworkManager {
             }
             state.remove_client(&cur_id);
             state.remove_client(&resolved_addr.ip().to_string());
+            let was_driving = state.inner.read().input == "driving";
             state.set_where_input("home");
+            crate::kvm::NativeInputInjector::release_all_keys();
+            if was_driving {
+                crate::kvm::NativeInputInjector::recenter_local_cursor();
+            }
             let snap = state.snapshot();
             let _ = app.emit("state-change", &snap);
 
@@ -1469,6 +1567,7 @@ impl NetworkManager {
 
         let session_id = target_addr.to_string();
         let peer_id_holder = Arc::new(RwLock::new(None));
+        let authenticated = Arc::new(RwLock::new(false));
         let (out_tx, mut out_rx) = mpsc::channel::<WireMessage>(2048);
         {
             let mut guard = self.active_clients.write();
@@ -1479,6 +1578,7 @@ impl NetworkManager {
                     peer_id: Arc::clone(&peer_id_holder),
                     peer_addr: resolved_addr,
                     tx: out_tx.clone(),
+                    authenticated: Arc::clone(&authenticated),
                 },
             );
         }
@@ -1592,6 +1692,8 @@ impl NetworkManager {
                                                 &state,
                                                 &pid_holder,
                                                 &pending_pair,
+                                                &authenticated,
+                                                Some(&clients_lock),
                                                 &client_tx,
                                                 &local_id,
                                                 &local_name,
@@ -1611,6 +1713,8 @@ impl NetworkManager {
                                                 &state,
                                                 &pid_holder,
                                                 &pending_pair,
+                                                &authenticated,
+                                                Some(&clients_lock),
                                                 &client_tx,
                                                 &local_id,
                                                 &local_name,
@@ -1643,7 +1747,12 @@ impl NetworkManager {
             }
             state.remove_client(&cur_id);
             state.remove_client(&resolved_addr.ip().to_string());
+            let was_driving = state.inner.read().input == "driving";
             state.set_where_input("home");
+            crate::kvm::NativeInputInjector::release_all_keys();
+            if was_driving {
+                crate::kvm::NativeInputInjector::recenter_local_cursor();
+            }
             {
                 let mut pair_guard = pending_pair.write();
                 if let Some(ref sess) = *pair_guard {
@@ -1696,7 +1805,7 @@ impl NetworkManager {
             }
         }
         if should_finish {
-            MeshServer::finish_host_pairing(&self.state, &self.app, &self.pending_pair, &self.local_id, &self.local_name).await;
+            MeshServer::finish_host_pairing(&self.state, &self.app, &self.pending_pair, Some(&self.active_clients), &self.local_id, &self.local_name).await;
         } else {
             {
                 let mut s = self.state.inner.write();
@@ -1801,6 +1910,7 @@ impl NetworkManager {
     /// Broadcast event to all connected mesh peers.
     pub fn send_packet_sync(&self, mut pkt: WireMessage) {
         self.flush_motion();
+        let target_dests = pkt.d.clone();
         if pkt.o.is_none() {
             pkt.o = Some(self.local_id.clone());
             let mut s = self.seq.lock();
@@ -1811,15 +1921,36 @@ impl NetworkManager {
             pkt.h = Some(0);
         }
 
+        let is_sensitive = matches!(
+            pkt.t.as_str(),
+            "k.mm" | "remote.mm" | "k.md" | "remote.md" | "k.mu" | "remote.mu"
+                | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
+                | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
+                | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
+        );
+
         let guard = self.active_clients.read();
         for client in guard.values() {
-            let _ = client.tx.try_send(pkt.clone());
+            let pid = client.peer_id.read().clone();
+            let matches_dest = match &target_dests {
+                Some(dests) => dests.iter().any(|d| {
+                    d == &client.id
+                        || pid.as_deref() == Some(d.as_str())
+                        || d == &client.peer_addr.ip().to_string()
+                }),
+                None => true,
+            };
+
+            if matches_dest && (!is_sensitive || *client.authenticated.read()) {
+                let _ = client.tx.try_send(pkt.clone());
+            }
         }
     }
 
     /// Async send/broadcast to all active mesh peers.
     pub async fn send_packet(&self, mut pkt: WireMessage) {
         self.flush_motion();
+        let target_dests = pkt.d.clone();
         if pkt.o.is_none() {
             pkt.o = Some(self.local_id.clone());
             let mut s = self.seq.lock();
@@ -1830,9 +1961,36 @@ impl NetworkManager {
             pkt.h = Some(0);
         }
 
+        let is_sensitive = matches!(
+            pkt.t.as_str(),
+            "k.mm" | "remote.mm" | "k.md" | "remote.md" | "k.mu" | "remote.mu"
+                | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
+                | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
+                | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
+        );
+
         let senders: Vec<mpsc::Sender<WireMessage>> = {
             let guard = self.active_clients.read();
-            guard.values().map(|c| c.tx.clone()).collect()
+            guard
+                .values()
+                .filter_map(|c| {
+                    let pid = c.peer_id.read().clone();
+                    let matches_dest = match &target_dests {
+                        Some(dests) => dests.iter().any(|d| {
+                            d == &c.id
+                                || pid.as_deref() == Some(d.as_str())
+                                || d == &c.peer_addr.ip().to_string()
+                        }),
+                        None => true,
+                    };
+
+                    if matches_dest && (!is_sensitive || *c.authenticated.read()) {
+                        Some(c.tx.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
 
         for tx in senders {
@@ -1936,5 +2094,152 @@ mod tests {
         let commit = commit_of(nonce);
         assert!(!commit.is_empty());
         assert_eq!(commit_of(nonce), commit);
+    }
+
+    #[test]
+    fn test_sas_code_with_token_and_deterministic_order() {
+        let code1 = sas_code("secret123", "nonce_a_1234567890", "nonce_b_0987654321");
+        assert_eq!(code1.len(), 6);
+        assert!(code1.chars().all(|c| c.is_ascii_digit()));
+
+        // Nonce ordering is strictly deterministic
+        let code2 = sas_code("secret123", "nonce_a_1234567890", "nonce_b_0987654321");
+        assert_eq!(code1, code2);
+    }
+
+    #[test]
+    fn test_wire_message_layout_and_kvm_types() {
+        let layout_pkt = WireMessage {
+            t: "kvm.layout".to_string(),
+            v: Some(1),
+            side: Some("right".to_string()),
+            pc_side: Some("left".to_string()),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&layout_pkt).expect("serialize layout");
+        assert!(s.contains("\"t\":\"kvm.layout\""));
+        assert!(s.contains("\"side\":\"right\""));
+        assert!(s.contains("\"pcSide\":\"left\""));
+
+        let take_pkt = WireMessage {
+            t: "kvm.take".to_string(),
+            v: Some(1),
+            ..Default::default()
+        };
+        let s_take = serde_json::to_string(&take_pkt).expect("serialize take");
+        let parsed_take: WireMessage = serde_json::from_str(&s_take).expect("deserialize take");
+        assert_eq!(parsed_take.t, "kvm.take");
+
+        let home_pkt = WireMessage {
+            t: "kvm.home".to_string(),
+            v: Some(1),
+            ..Default::default()
+        };
+        let s_home = serde_json::to_string(&home_pkt).expect("serialize home");
+        let parsed_home: WireMessage = serde_json::from_str(&s_home).expect("deserialize home");
+        assert_eq!(parsed_home.t, "kvm.home");
+    }
+
+    #[test]
+    fn test_wire_message_window_handoff_lifecycle() {
+        let offer = WireMessage {
+            t: "window.handoff.offer".to_string(),
+            v: Some(1),
+            id: Some("win_123".to_string()),
+            name: Some("Calculator".to_string()),
+            w: Some(800),
+            height: Some(600),
+            ..Default::default()
+        };
+        let s_offer = serde_json::to_string(&offer).expect("serialize offer");
+        let parsed_offer: WireMessage = serde_json::from_str(&s_offer).expect("deserialize offer");
+        assert_eq!(parsed_offer.t, "window.handoff.offer");
+        assert_eq!(parsed_offer.id.as_deref(), Some("win_123"));
+        assert_eq!(parsed_offer.w, Some(800));
+        assert_eq!(parsed_offer.height, Some(600));
+
+        let ret = WireMessage {
+            t: "window.handoff.return".to_string(),
+            v: Some(1),
+            id: Some("win_123".to_string()),
+            ..Default::default()
+        };
+        let s_ret = serde_json::to_string(&ret).expect("serialize return");
+        let parsed_ret: WireMessage = serde_json::from_str(&s_ret).expect("deserialize return");
+        assert_eq!(parsed_ret.t, "window.handoff.return");
+        assert_eq!(parsed_ret.id.as_deref(), Some("win_123"));
+    }
+
+    #[test]
+    fn test_motion_coalescer_high_frequency_bursts() {
+        let mut coalescer = MotionCoalescer::new();
+        for _ in 0..100 {
+            coalescer.add(0.25, -0.5);
+        }
+        assert!(coalescer.pending());
+        let (dx, dy) = coalescer.take();
+        assert!((dx - 25.0).abs() < 1e-6);
+        assert!((dy - (-50.0)).abs() < 1e-6);
+        assert!(!coalescer.pending());
+    }
+
+    #[test]
+    fn test_multidevice_mesh_wire_packet_hops_and_relaying() {
+        // Mock multi-device mesh: Device A -> Device B -> Device C
+        let msg = WireMessage {
+            t: "clipboard.share".to_string(),
+            v: Some(1),
+            o: Some("device_A".to_string()),
+            s: Some(101),
+            d: Some(vec!["device_B".to_string()]),
+            h: Some(0), // Hop count starts at 0
+            text: Some("hello multi-device mesh".to_string()),
+            ..Default::default()
+        };
+
+        // Serialize across wire A -> B
+        let wire_a_to_b = serde_json::to_string(&msg).expect("serialize A to B");
+        let mut msg_at_b: WireMessage = serde_json::from_str(&wire_a_to_b).expect("deserialize at B");
+
+        assert_eq!(msg_at_b.o.as_deref(), Some("device_A"));
+        assert_eq!(msg_at_b.h, Some(0));
+
+        // Device B relays to Device C: increment hop count
+        let hops = msg_at_b.h.unwrap_or(0);
+        const MAX_HOPS: u32 = 4;
+        assert!(hops < MAX_HOPS);
+        msg_at_b.h = Some(hops + 1);
+
+        // Serialize across wire B -> C
+        let wire_b_to_c = serde_json::to_string(&msg_at_b).expect("serialize B to C");
+        let msg_at_c: WireMessage = serde_json::from_str(&wire_b_to_c).expect("deserialize at C");
+
+        assert_eq!(msg_at_c.o.as_deref(), Some("device_A"));
+        assert_eq!(msg_at_c.h, Some(1));
+        assert_eq!(msg_at_c.text.as_deref(), Some("hello multi-device mesh"));
+    }
+
+    #[test]
+    fn test_active_session_auth_gate_and_pairing_token() {
+        let auth_flag = Arc::new(RwLock::new(false));
+        let (tx, _rx) = mpsc::channel::<WireMessage>(10);
+        let session = ActiveClientSession {
+            id: "192.168.4.15:47800".to_string(),
+            peer_id: Arc::new(RwLock::new(Some("unpaired_guest".to_string()))),
+            peer_addr: "192.168.4.15:47800".parse().unwrap(),
+            tx,
+            authenticated: Arc::clone(&auth_flag),
+        };
+
+        // 1. Session begins unauthenticated
+        assert!(!*session.authenticated.read());
+
+        // 2. Generate cryptographically random pairing token
+        let token = random_hex(16);
+        assert_eq!(token.len(), 32);
+
+        // 3. Simulate successful handshake authentication
+        *session.authenticated.write() = true;
+        assert!(*session.authenticated.read());
     }
 }

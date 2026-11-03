@@ -1,0 +1,397 @@
+/* TwinDesk — Copyright (C) 2026 inukaasith. GPL-3.0, see LICENSE. */
+/* Quotio/Sparkle-style in-app updater notification modal and top banner */
+
+/* ---------- Modal Backdrop & Dialog ---------- */
+.updater-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: updater-fade-in 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.updater-overlay[hidden] {
+  display: none !important;
+}
+
+.updater-pop {
+  position: relative;
+  width: min(540px, calc(100vw - 32px));
+  max-height: min(640px, calc(100vh - 48px));
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.32), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  padding: 22px 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-sizing: border-box;
+  animation: updater-pop-in 0.25s cubic-bezier(0.34, 1.4, 0.64, 1) both;
+  overflow: hidden;
+}
+
+@keyframes updater-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes updater-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* ---------- Header ---------- */
+.updater-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.updater-icon {
+  width: 54px;
+  height: 54px;
+  flex: none;
+  border-radius: 12px;
+  background: image-set(
+    url(assets/sidebar-icon@1x.png) 1x,
+    url(assets/sidebar-icon@2x.png) 2x,
+    url(assets/sidebar-icon@3x.png) 3x,
+    url(assets/sidebar-icon@4x.png) 4x
+  ) center / contain no-repeat;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+}
+
+.updater-title-box {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.updater-title {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0;
+  line-height: 1.25;
+}
+
+.updater-subtitle {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.35;
+  margin: 0;
+}
+
+.updater-badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.updater-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+  letter-spacing: 0.02em;
+}
+
+.updater-pill-subtle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--nav-hover);
+  color: var(--muted);
+}
+
+.updater-pill-current {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--nav-hover);
+  color: var(--faint);
+}
+
+/* ---------- Asset Info Bar ---------- */
+.updater-asset {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.updater-asset-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.updater-asset-size {
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: 10px;
+  white-space: nowrap;
+}
+
+/* ---------- Release Notes Container ---------- */
+.updater-notes-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+.updater-notes-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.updater-notes {
+  flex: 1;
+  min-height: 120px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--content);
+  border: 1px solid var(--row-line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  user-select: text;
+}
+
+.updater-notes::-webkit-scrollbar {
+  width: 6px;
+}
+.updater-notes::-webkit-scrollbar-thumb {
+  background: var(--track-off);
+  border-radius: 3px;
+}
+
+.updater-notes .updater-heading {
+  font-size: 13.5px;
+  font-weight: 600;
+  margin: 10px 0 4px;
+  color: var(--text);
+}
+
+.updater-notes .updater-heading:first-child {
+  margin-top: 0;
+}
+
+.updater-notes .updater-list {
+  margin: 4px 0 8px 18px;
+  padding: 0;
+  list-style-type: disc;
+}
+
+.updater-notes .updater-list li {
+  margin: 3px 0;
+}
+
+.updater-notes .updater-p {
+  margin: 4px 0 8px;
+}
+
+.updater-notes .updater-empty-notes {
+  color: var(--muted);
+  font-style: italic;
+  margin: 8px 0;
+}
+
+.updater-notes code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--card);
+  border: 1px solid var(--row-line);
+  font-size: 11.5px;
+}
+
+.updater-notes a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.updater-notes a:hover {
+  text-decoration: underline;
+}
+
+.updater-notes .updater-issue {
+  color: var(--accent);
+  font-weight: 600;
+  font-family: ui-monospace, Menlo, monospace;
+}
+
+.updater-notes .updater-mention {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* ---------- Footer Actions ---------- */
+.updater-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.updater-actions-left,
+.updater-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn.updater-btn-skip {
+  font-size: 12px;
+  color: var(--muted);
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
+  padding: 4px 8px;
+}
+
+.btn.updater-btn-skip:hover {
+  color: var(--bad);
+  background: var(--nav-hover);
+}
+
+.btn.updater-btn-link {
+  font-size: 12px;
+  color: var(--muted);
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
+  padding: 4px 8px;
+}
+
+.btn.updater-btn-link:hover {
+  color: var(--accent);
+  background: var(--nav-hover);
+}
+
+.btn.updater-btn-later {
+  font-size: 13px;
+  padding: 5px 14px;
+}
+
+.btn.updater-btn-update {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 5px 18px;
+}
+
+/* ---------- In-App Banner (Top of Content) ---------- */
+.updater-banner {
+  position: sticky;
+  top: 10px;
+  z-index: 20;
+  margin: 0 28px 10px;
+  padding: 10px 14px;
+  border-radius: 11px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 14%, var(--card)), var(--card) 85%);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  animation: updater-pop-in 0.25s cubic-bezier(0.34, 1.4, 0.64, 1) both;
+}
+
+.updater-banner[hidden] {
+  display: none !important;
+}
+
+.updater-banner-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  min-width: 0;
+}
+
+.updater-banner-spark {
+  font-size: 15px;
+  flex: none;
+}
+
+.updater-banner-lead {
+  font-weight: 600;
+}
+
+.updater-banner-sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.updater-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.updater-banner-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  background: none;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 15px;
+  cursor: default;
+  padding: 0;
+}
+
+.updater-banner-close:hover {
+  background: var(--nav-hover);
+  color: var(--text);
+}
