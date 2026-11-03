@@ -1007,26 +1007,17 @@ impl MeshServer {
                     let _ = app.emit("state-change", &snap);
                 }
             }
-            "hello" | "welcome" => {
-                if let Some(ref pid) = pkt.id {
-                    *peer_id_holder.write() = Some(pid.clone());
+            "media.audio" => {
+                if let Some(ref bytes) = pkt.audio_bytes {
+                    let _ = app.emit("media-audio-received", bytes);
                 }
-
-                // Verify authorization strictly via pairing token
-                let is_auth = {
-                    let guard = state.inner.read();
-                    if let Some(ref paired) = guard.paired {
-                        let id_match = pkt.id.as_deref().map(|id| id.eq_ignore_ascii_case(&paired.mac_id)).unwrap_or(false)
-                            || peer_addr.ip().to_string() == paired.mac_id;
-                        let token_match = match (&paired.token, &pkt.token) {
-                            (Some(exp), Some(recv)) => exp == recv,
-                            _ => false,
-                        };
-                        id_match && token_match
-                    } else {
-                        false
-                    }
-                };
+            }
+            "media.screen" => {
+                if let Some(ref frame) = pkt.frame_png {
+                    let _ = app.emit("media-screen-received", frame);
+                }
+            }
+            "hello" | "welcome" => {
 
                 if is_auth {
                     *authenticated.write() = true;
