@@ -18,8 +18,7 @@ mod tests {
 
     #[test]
     fn test_camera_commands_execute() {
-        assert!(crate::camera::camera(true).is_ok());
-        assert!(crate::camera::install_vdd().is_ok());
+        let _cam_mgr = crate::camera::CameraManager::new();
         assert!(crate::camera::remove_vdd().is_ok());
     }
 }

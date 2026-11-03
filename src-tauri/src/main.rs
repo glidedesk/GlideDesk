@@ -45,6 +45,7 @@ fn main() {
         .manage(window_reg.clone())
         .manage(NativeBridgeManager::new())
         .manage(phone::PhoneManager::new())
+        .manage(camera::CameraManager::new())
         .setup(move |app| {
             let handle = app.handle().clone();
             let network = NetworkManager::new(handle.clone(), setup_state);
@@ -154,6 +155,10 @@ fn main() {
             camera::phone_camera,
             camera::install_vdd,
             camera::remove_vdd,
+            camera::cam_send,
+            camera::vcam_hello,
+            camera::vcam_preview,
+            camera::vcam_frame,
             parity::cancel_drop,
             parity::check_firewall,
             parity::choose_received_folder,

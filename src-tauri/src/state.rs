@@ -622,6 +622,37 @@ impl Default for DiscoveryState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CameraState {
+    pub on: bool,
+    pub viewing: bool,
+    pub sending: bool,
+    pub connected: bool,
+    pub ble: bool,
+    #[serde(rename = "peerShares")]
+    pub peer_shares: bool,
+    #[serde(rename = "virtual")]
+    pub virtual_cam: bool,
+    pub rotate: u32,
+    pub target: String,
+}
+
+impl Default for CameraState {
+    fn default() -> Self {
+        Self {
+            on: false,
+            viewing: false,
+            sending: false,
+            connected: true,
+            ble: false,
+            peer_shares: true,
+            virtual_cam: false,
+            rotate: 0,
+            target: "obs".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FullState {
     pub device: DeviceInfo,
     pub paired: Option<PairedPeer>,
@@ -672,6 +703,8 @@ pub struct FullState {
     pub mount: MountState,
     #[serde(default)]
     pub setup: SetupState,
+    #[serde(default)]
+    pub camera: CameraState,
 }
 
 #[derive(Clone)]
@@ -746,6 +779,7 @@ impl AppState {
             mac_apps: MacAppsState::default(),
             mount: MountState::default(),
             setup: SetupState::default(),
+            camera: CameraState::default(),
         };
 
         Self {
