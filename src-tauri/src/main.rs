@@ -13,6 +13,9 @@ mod media;
 mod network;
 mod state;
 mod tray;
+mod phone;
+mod camera;
+mod parity;
 pub mod window_manager;
 
 use media::NativeBridgeManager;
@@ -132,6 +135,50 @@ fn main() {
             media::bridge::stop_screen_streaming,
             media::bridge::emulate_gamepad_event,
             media::bridge::create_virtual_display,
+            phone::connect_phone,
+            phone::disconnect_phone,
+            phone::phone_screen,
+            phone::phone_retry,
+            phone::phone_pair,
+            phone::phone_assets,
+            phone::set_phone,
+            phone::phone_open_app,
+            phone::phone_app_menu,
+            phone::phone_close_view,
+            phone::phone_install_full,
+            phone::phone_media,
+            phone::phone_bt_pick,
+            phone::hub_message,
+            camera::camera,
+            camera::phone_camera,
+            camera::install_vdd,
+            camera::remove_vdd,
+            parity::cancel_drop,
+            parity::check_firewall,
+            parity::choose_received_folder,
+            parity::choose_share_folder,
+            parity::clear_notif_history,
+            parity::launch_app,
+            parity::list_apps,
+            parity::mute_notif_app,
+            parity::open_bluetooth_settings,
+            parity::open_mac_drive,
+            parity::open_monitor,
+            parity::open_notified_app,
+            parity::open_received_folder,
+            parity::open_terminal,
+            parity::pin_app,
+            parity::remote_screen,
+            parity::reset_received_folder,
+            parity::set_mac_apps,
+            parity::set_mount,
+            parity::set_pc_screen,
+            parity::set_phone_remote,
+            parity::set_startup,
+            parity::set_wake,
+            parity::setup_sshd,
+            parity::phone_mount,
+            parity::phone_unmount,
         ])
         .build(tauri::generate_context!())
         .expect("error while building GlideDesk application")
