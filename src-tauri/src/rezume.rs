@@ -8,7 +8,7 @@ use tauri::{AppHandle, State};
 use crate::commands::push_state;
 use crate::network::NetworkManager;
 use crate::phone::PhoneManager;
-use crate::state::{AppState, RezumeItem};
+use crate::state::AppState;
 
 /// Helper to open target URL or file path cross-platform.
 pub fn open_target(target: &str) -> Result<(), String> {
