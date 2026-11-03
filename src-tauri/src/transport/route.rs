@@ -91,6 +91,104 @@ impl RoutePicker {
     }
 }
 
+/// Construct live route candidates from NetworkManager state and PhoneManager session,
+/// then pick the optimal transfer route according to priority rules.
+pub fn select_route_for_peer(
+    target_peer_id: Option<&str>,
+    state: &crate::state::AppState,
+    phone_mgr: &crate::phone::PhoneManager,
+) -> SelectedRoute {
+    let mut candidates = Vec::new();
+    let s = state.inner.read();
+
+    // 1. Direct TCP candidate from peer or guests
+    let mut direct_tcp_found = false;
+    let peer_info = target_peer_id
+        .and_then(|id| s.guests.iter().chain(s.found.iter()).chain(s.clients.iter()).find(|p| p.id == id))
+        .or(s.peer.as_ref())
+        .or(s.client.as_ref())
+        .or_else(|| s.clients.first());
+
+    if let Some(peer) = peer_info {
+        if let Some(ref addr) = peer.address {
+            direct_tcp_found = true;
+            candidates.push(RouteCandidate {
+                mode: RouteMode::DirectTcp,
+                target_addr: Some(addr.clone()),
+                port: peer.port.or(Some(47802)),
+                usb_serial: None,
+                available: true,
+                reason: format!("Peer '{}' reachable at {}:{}", peer.id, addr, peer.port.unwrap_or(47802)),
+            });
+        }
+    }
+
+    if !direct_tcp_found {
+        candidates.push(RouteCandidate {
+            mode: RouteMode::DirectTcp,
+            target_addr: None,
+            port: None,
+            usb_serial: None,
+            available: false,
+            reason: "no_direct_tcp_peer_address".to_string(),
+        });
+    }
+
+    // 2. P2P Direct
+    candidates.push(RouteCandidate {
+        mode: RouteMode::P2pDirect,
+        target_addr: None,
+        port: None,
+        usb_serial: None,
+        available: false,
+        reason: "p2p_direct_not_configured".to_string(),
+    });
+
+    // 3. USB ADB
+    let phone_session = phone_mgr.session.read();
+    if let Some(ref sess) = *phone_session {
+        candidates.push(RouteCandidate {
+            mode: RouteMode::UsbAdb,
+            target_addr: None,
+            port: None,
+            usb_serial: Some(sess.serial.clone()),
+            available: true,
+            reason: format!("Active Android ADB session '{}'", sess.serial),
+        });
+    } else {
+        candidates.push(RouteCandidate {
+            mode: RouteMode::UsbAdb,
+            target_addr: None,
+            port: None,
+            usb_serial: None,
+            available: false,
+            reason: "no_active_phone_session".to_string(),
+        });
+    }
+
+    // 4. HTTP Chunked Fallback
+    candidates.push(RouteCandidate {
+        mode: RouteMode::HttpChunked,
+        target_addr: Some("127.0.0.1".to_string()),
+        port: Some(47800),
+        usb_serial: None,
+        available: true,
+        reason: "Fallback WebSocket/HTTP chunked transport".to_string(),
+    });
+
+    RoutePicker::pick(&candidates)
+}
+
+#[tauri::command]
+pub fn get_transfer_route(
+    target: Option<String>,
+    state: tauri::State<'_, crate::state::AppState>,
+    phone_mgr: tauri::State<'_, crate::phone::PhoneManager>,
+) -> Result<SelectedRoute, String> {
+    let route = select_route_for_peer(target.as_deref(), &state, &phone_mgr);
+    Ok(route)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +268,36 @@ mod tests {
         ];
 
         let selected = RoutePicker::pick(&candidates);
+        assert_eq!(selected.mode, RouteMode::HttpChunked);
+        assert_eq!(selected.endpoint, "ws://127.0.0.1:47800");
+    }
+
+    #[test]
+    fn test_select_route_for_peer_direct_tcp() {
+        let app_state = crate::state::AppState::new();
+        {
+            let mut s = app_state.inner.write();
+            s.peer = Some(crate::state::PeerInfo {
+                id: "remote_peer_1".to_string(),
+                name: "Remote Mac".to_string(),
+                os: "macos".to_string(),
+                address: Some("192.168.1.75".to_string()),
+                port: Some(47802),
+                last_seen: None,
+                invited: None,
+            });
+        }
+        let phone_mgr = crate::phone::PhoneManager::new();
+        let selected = select_route_for_peer(Some("remote_peer_1"), &app_state, &phone_mgr);
+        assert_eq!(selected.mode, RouteMode::DirectTcp);
+        assert_eq!(selected.endpoint, "192.168.1.75:47802");
+    }
+
+    #[test]
+    fn test_select_route_for_peer_fallback_chunked() {
+        let app_state = crate::state::AppState::new();
+        let phone_mgr = crate::phone::PhoneManager::new();
+        let selected = select_route_for_peer(None, &app_state, &phone_mgr);
         assert_eq!(selected.mode, RouteMode::HttpChunked);
         assert_eq!(selected.endpoint, "ws://127.0.0.1:47800");
     }

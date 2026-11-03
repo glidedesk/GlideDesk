@@ -34,6 +34,57 @@ pub fn current_os() -> &'static str {
     return "win";
 }
 
+pub enum ServerStream {
+    Plain(TcpStream),
+    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+}
+
+impl tokio::io::AsyncRead for ServerStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ServerStream::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            ServerStream::Tls(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for ServerStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ServerStream::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            ServerStream::Tls(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ServerStream::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            ServerStream::Tls(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ServerStream::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            ServerStream::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
 pub fn hex_to_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)
@@ -191,6 +242,10 @@ pub struct WireMessage {
     #[serde(default)]
     pub rezume_item: Option<crate::state::RezumeItem>,
 
+    // TLS Certificate Fingerprint
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+
     // File transfer batch broadcast
     #[serde(default)]
     pub files: Option<Vec<String>>,
@@ -263,6 +318,7 @@ impl Default for WireMessage {
             action: None,
             pos: None,
             rezume_item: None,
+            fingerprint: None,
             files: None,
             commit: None,
             nonce: None,
@@ -481,6 +537,7 @@ pub struct MeshServer {
     local_name: String,
     active_clients: Arc<RwLock<HashMap<String, ActiveClientSession>>>,
     pending_pair: Arc<RwLock<Option<PendingPairSession>>>,
+    tls_identity: Arc<crate::transport::tls::LocalTlsIdentity>,
 }
 
 impl MeshServer {
@@ -492,6 +549,7 @@ impl MeshServer {
         local_name: String,
         active_clients: Arc<RwLock<HashMap<String, ActiveClientSession>>>,
         pending_pair: Arc<RwLock<Option<PendingPairSession>>>,
+        tls_identity: Arc<crate::transport::tls::LocalTlsIdentity>,
     ) -> Self {
         Self {
             app,
@@ -501,6 +559,7 @@ impl MeshServer {
             local_name,
             active_clients,
             pending_pair,
+            tls_identity,
         }
     }
 
@@ -536,10 +595,11 @@ impl MeshServer {
             let local_name = self.local_name.clone();
             let active_clients = Arc::clone(&self.active_clients);
             let pending_pair = Arc::clone(&self.pending_pair);
+            let tls_identity = Arc::clone(&self.tls_identity);
             let port = self.port;
 
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = Self::handle_session(stream, peer_addr, app, state, local_id, local_name, port, active_clients, pending_pair).await {
+                if let Err(e) = Self::handle_session(stream, peer_addr, app, state, local_id, local_name, port, active_clients, pending_pair, tls_identity).await {
                     log::info!("[MeshServer] Peer {} disconnected: {}", peer_addr, e);
                 }
             });
@@ -558,8 +618,36 @@ impl MeshServer {
         _port: u16,
         active_clients: Arc<RwLock<HashMap<String, ActiveClientSession>>>,
         pending_pair: Arc<RwLock<Option<PendingPairSession>>>,
+        tls_identity: Arc<crate::transport::tls::LocalTlsIdentity>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let ws = accept_async(stream).await?;
+        let mut peek_buf = [0u8; 3];
+        let is_tls = if let Ok(n) = stream.peek(&mut peek_buf).await {
+            n >= 3 && peek_buf[0] == 0x16 && peek_buf[1] == 0x03
+        } else {
+            false
+        };
+
+        let server_stream = if is_tls {
+            if let Ok(srv_cfg) = tls_identity.server_config() {
+                let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(srv_cfg));
+                match acceptor.accept(stream).await {
+                    Ok(tls_s) => {
+                        log::info!("[MeshServer] Accepted encrypted TLS session from {}", peer_addr);
+                        ServerStream::Tls(tls_s)
+                    }
+                    Err(e) => {
+                        log::warn!("[MeshServer] TLS handshake failed for {}: {}", peer_addr, e);
+                        return Err(e.into());
+                    }
+                }
+            } else {
+                ServerStream::Plain(stream)
+            }
+        } else {
+            ServerStream::Plain(stream)
+        };
+
+        let ws = accept_async(server_stream).await?;
         let (mut write, mut read) = ws.split();
 
         let session_id = peer_addr.to_string();
@@ -628,6 +716,7 @@ impl MeshServer {
                                             &out_tx,
                                             &local_id,
                                             &local_name,
+                                            &tls_identity.fingerprint_sha256,
                                         ).await;
                                         if is_bye {
                                             break;
@@ -649,6 +738,7 @@ impl MeshServer {
                                             &out_tx,
                                             &local_id,
                                             &local_name,
+                                            &tls_identity.fingerprint_sha256,
                                         ).await;
                                         if is_bye {
                                             break;
@@ -713,13 +803,15 @@ impl MeshServer {
         active_clients: Option<&Arc<RwLock<HashMap<String, ActiveClientSession>>>>,
         local_id: &str,
         local_name: &str,
+        tls_fingerprint: &str,
     ) {
         let session = {
             let mut guard = pending_pair.write();
             guard.take()
         };
         if let Some(sess) = session {
-            let token = random_hex(16);
+            let raw_token = random_hex(16);
+            let token = crate::transport::tls::format_beam_auth_token(&raw_token, tls_fingerprint);
             if let Some(clients_map) = active_clients {
                 let guard = clients_map.read();
                 for client in guard.values() {
@@ -817,6 +909,7 @@ impl MeshServer {
         out_tx: &mpsc::Sender<WireMessage>,
         local_id: &str,
         local_name: &str,
+        tls_fingerprint: &str,
     ) {
         match pkt.t.as_str() {
             "pair.start" => {
@@ -850,6 +943,7 @@ impl MeshServer {
                         v: Some(1),
                         nonce: Some(nm),
                         os: Some(current_os().to_string()),
+                        fingerprint: Some(tls_fingerprint.to_string()),
                         ..Default::default()
                     };
                     let _ = out_tx.send(nonce_msg).await;
@@ -864,7 +958,8 @@ impl MeshServer {
                         if session.role == "guest" {
                             if let (Some(ref nm_val), Some(ref nw_val)) = (&pkt.nonce, &session.nw) {
                                 session.nm = Some(nm_val.clone());
-                                let code = sas_code("", nw_val, nm_val);
+                                let fp = pkt.fingerprint.as_deref().unwrap_or("");
+                                let code = sas_code(fp, nw_val, nm_val);
                                 session.code = Some(code.clone());
                                 should_reveal = Some((nw_val.clone(), code, session.peer_name.clone(), session.peer_os.clone()));
                             }
@@ -877,6 +972,7 @@ impl MeshServer {
                         t: "pair.reveal".to_string(),
                         v: Some(1),
                         nonce: Some(nw),
+                        fingerprint: Some(tls_fingerprint.to_string()),
                         ..Default::default()
                     };
                     let _ = out_tx.send(reveal_msg).await;
@@ -915,7 +1011,8 @@ impl MeshServer {
                             if let (Some(ref nw_val), Some(ref nm_val), Some(ref commit_val)) = (&pkt.nonce, &session.nm, &session.commit) {
                                 if commit_of(nw_val).eq_ignore_ascii_case(commit_val) {
                                     session.nw = Some(nw_val.clone());
-                                    let code = sas_code("", nw_val, nm_val);
+                                    let fp = pkt.fingerprint.as_deref().unwrap_or("");
+                                    let code = sas_code(fp, nw_val, nm_val);
                                     session.code = Some(code.clone());
                                     verified = true;
                                     code_res = code;
@@ -965,7 +1062,7 @@ impl MeshServer {
                     }
                 }
                 if should_finish {
-                    Self::finish_host_pairing(state, app, pending_pair, active_clients, local_id, local_name).await;
+                    Self::finish_host_pairing(state, app, pending_pair, active_clients, local_id, local_name, tls_fingerprint).await;
                 }
             }
             "pair.ok" => {
@@ -1077,7 +1174,11 @@ impl MeshServer {
                         let id_match = pkt.id.as_deref().map(|id| id.eq_ignore_ascii_case(&paired.mac_id)).unwrap_or(false)
                             || peer_addr.ip().to_string() == paired.mac_id;
                         let token_match = match (&paired.token, &pkt.token) {
-                            (Some(exp), Some(recv)) => exp == recv,
+                            (Some(exp), Some(recv)) => {
+                                exp == recv
+                                    || exp.strip_prefix("BEAM_AUTH_V1:").and_then(|s| s.split(':').next()) == Some(recv.as_str())
+                                    || recv.strip_prefix("BEAM_AUTH_V1:").and_then(|s| s.split(':').next()) == Some(exp.as_str())
+                            }
                             _ => false,
                         };
                         id_match && token_match
@@ -1168,7 +1269,7 @@ impl MeshServer {
                 | "clip" | "clip.image" | "kvm.take" | "window.handoff.offer"
                 | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
                 | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
-                | "rz.offer" | "rz.take"
+                | "rz.offer" | "rz.take" | "files.batch" | "files.chunk"
                 if !*authenticated.read() =>
             {
                 log::warn!(
@@ -1394,6 +1495,31 @@ impl MeshServer {
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
             }
+            "files.batch" => {
+                log::info!("[Files] Inbound files.batch from {}: {:?}", peer_addr, pkt.files);
+                if let Some(ref files) = pkt.files {
+                    let batch_id = pkt
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| format!("batch_{}", chrono::Utc::now().timestamp_millis()));
+                    let transfer_mgr = app.state::<crate::transport::transfer::TransferManager>();
+                    let file_tuples: Vec<(String, u64)> =
+                        files.iter().map(|f| (f.clone(), 1024)).collect();
+                    let batch = crate::transport::transfer::TransferBatch::new(
+                        batch_id.clone(),
+                        file_tuples,
+                    );
+                    transfer_mgr.batches.write().insert(batch_id.clone(), batch);
+                    let _ = app.emit(
+                        "files-received",
+                        &serde_json::json!({
+                            "batch_id": batch_id,
+                            "files": files,
+                            "sender": pkt.name.clone().unwrap_or_else(|| peer_addr.to_string()),
+                        }),
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -1446,6 +1572,7 @@ pub struct NetworkManager {
     local_id: String,
     local_name: String,
     seq: Arc<Mutex<u64>>,
+    pub tls_identity: Arc<crate::transport::tls::LocalTlsIdentity>,
 }
 
 impl NetworkManager {
@@ -1453,6 +1580,17 @@ impl NetworkManager {
         let local_id = state.inner.read().about.pc.host.to_lowercase();
         let local_name = state.inner.read().about.pc.host.clone();
         let pending_pair = Arc::new(RwLock::new(None));
+        let tls_identity = Arc::new(
+            crate::transport::tls::LocalTlsIdentity::generate()
+                .unwrap_or_else(|e| {
+                    log::warn!("[TLS] Fallback TLS identity: {}", e);
+                    crate::transport::tls::LocalTlsIdentity {
+                        cert_der: Vec::new(),
+                        key_der: Vec::new(),
+                        fingerprint_sha256: "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00".to_string(),
+                    }
+                }),
+        );
 
         Self {
             app,
@@ -1463,6 +1601,7 @@ impl NetworkManager {
             local_id,
             local_name,
             seq: Arc::new(Mutex::new(chrono::Utc::now().timestamp_millis() as u64)),
+            tls_identity,
         }
     }
 
@@ -1489,6 +1628,7 @@ impl NetworkManager {
             local_name,
             Arc::clone(&self.active_clients),
             Arc::clone(&self.pending_pair),
+            Arc::clone(&self.tls_identity),
         ));
         server.start();
     }
@@ -1570,6 +1710,7 @@ impl NetworkManager {
         let pending_pair = Arc::clone(&self.pending_pair);
         let local_id = self.local_id.clone();
         let local_name = self.local_name.clone();
+        let tls_fingerprint = self.tls_identity.fingerprint_sha256.clone();
         let client_tx = out_tx.clone();
 
         tauri::async_runtime::spawn(async move {
@@ -1621,6 +1762,7 @@ impl NetworkManager {
                                                 &client_tx,
                                                 &local_id,
                                                 &local_name,
+                                                &tls_fingerprint,
                                             ).await;
                                             if is_bye {
                                                 break;
@@ -1642,6 +1784,7 @@ impl NetworkManager {
                                                 &client_tx,
                                                 &local_id,
                                                 &local_name,
+                                                &tls_fingerprint,
                                             ).await;
                                             if is_bye {
                                                 break;
@@ -1817,6 +1960,7 @@ impl NetworkManager {
         let pending_pair = Arc::clone(&self.pending_pair);
         let local_id = self.local_id.clone();
         let local_name = self.local_name.clone();
+        let tls_fingerprint = self.tls_identity.fingerprint_sha256.clone();
         let client_tx = out_tx.clone();
 
         tauri::async_runtime::spawn(async move {
@@ -1868,6 +2012,7 @@ impl NetworkManager {
                                                 &client_tx,
                                                 &local_id,
                                                 &local_name,
+                                                &tls_fingerprint,
                                             ).await;
                                             if is_bye {
                                                 break;
@@ -1889,6 +2034,7 @@ impl NetworkManager {
                                                 &client_tx,
                                                 &local_id,
                                                 &local_name,
+                                                &tls_fingerprint,
                                             ).await;
                                             if is_bye {
                                                 break;
@@ -1976,7 +2122,7 @@ impl NetworkManager {
             }
         }
         if should_finish {
-            MeshServer::finish_host_pairing(&self.state, &self.app, &self.pending_pair, Some(&self.active_clients), &self.local_id, &self.local_name).await;
+            MeshServer::finish_host_pairing(&self.state, &self.app, &self.pending_pair, Some(&self.active_clients), &self.local_id, &self.local_name, &self.tls_identity.fingerprint_sha256).await;
         } else {
             {
                 let mut s = self.state.inner.write();
@@ -2100,6 +2246,7 @@ impl NetworkManager {
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
+                | "files.batch" | "files.chunk"
         );
 
         let guard = self.active_clients.read();
@@ -2142,6 +2289,7 @@ impl NetworkManager {
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
+                | "files.batch" | "files.chunk"
         );
 
         let senders: Vec<mpsc::Sender<WireMessage>> = {

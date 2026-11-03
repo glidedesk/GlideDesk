@@ -222,6 +222,7 @@ fn main() {
             device_control::hide_hud,
             transport::transfer::cancel_transfer_task,
             transport::transfer::get_transfer_status,
+            transport::route::get_transfer_route,
             chat::set_chats,
             chat::notif_reply,
             rezume::set_rezume,

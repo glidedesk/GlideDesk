@@ -200,6 +200,7 @@
     relaunch: () => invoke('relaunch'),
     cancelTransferTask: (batchId) => invoke('cancel_transfer_task', { batch_id: String(batchId || '') }),
     getTransferStatus: (batchId) => invoke('get_transfer_status', { batch_id: String(batchId || '') }),
+    getTransferRoute: (target) => invoke('get_transfer_route', { target: target ? String(target) : null }),
     setChats: (on) => invoke('set_chats', { on: !!on }),
     notifReply: (r) => {
       if (r && typeof r === 'object') {

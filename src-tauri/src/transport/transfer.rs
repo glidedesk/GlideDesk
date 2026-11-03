@@ -223,4 +223,39 @@ mod tests {
         batch.cancel();
         assert_eq!(batch.phase, TransferPhase::Cancelled);
     }
+
+    #[test]
+    fn test_transfer_manager_live_batch_status_and_cancellation() {
+        let mgr = TransferManager::new();
+        let batch_id = "live_batch_99".to_string();
+        let files = vec![("document.pdf".to_string(), 2048)];
+        let mut batch = TransferBatch::new(batch_id.clone(), files);
+        let file_id = batch.items[0].file_id.clone();
+        assert!(batch.start_file(&file_id).is_ok());
+
+        // Insert into live TransferManager
+        mgr.batches.write().insert(batch_id.clone(), batch.clone());
+
+        // Check status on live batch
+        {
+            let guard = mgr.batches.read();
+            let retrieved = guard.get(&batch_id).expect("batch exists");
+            assert_eq!(retrieved.total_bytes, 2048);
+            assert_eq!(retrieved.phase, TransferPhase::Transferring);
+        }
+
+        // Cancel live batch
+        {
+            let mut guard = mgr.batches.write();
+            let retrieved_mut = guard.get_mut(&batch_id).expect("batch exists");
+            retrieved_mut.cancel();
+            assert_eq!(retrieved_mut.phase, TransferPhase::Cancelled);
+        }
+
+        // Missing batch returns None
+        {
+            let guard = mgr.batches.read();
+            assert!(guard.get("missing_batch_id").is_none());
+        }
+    }
 }
