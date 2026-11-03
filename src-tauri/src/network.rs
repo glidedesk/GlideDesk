@@ -701,6 +701,14 @@ impl ClientInfo {
     }
 }
 
+/// Checks whether a packet destination list targets this local node.
+pub fn is_addressed_to_local(dests: &Option<Vec<String>>, local_id: &str) -> bool {
+    match dests {
+        None => true,
+        Some(list) => list.iter().any(|d| d == local_id),
+    }
+}
+
 /// Resolves a transfer target string to a routing destination list.
 pub fn resolve_file_dest(target: Option<&str>, active: &[ClientInfo]) -> Result<Vec<String>, String> {
     if let Some(t) = target {
@@ -709,14 +717,22 @@ pub fn resolve_file_dest(target: Option<&str>, active: &[ClientInfo]) -> Result<
                 || c.peer_id.as_deref() == Some(t)
                 || c.peer_ip == t
         }) {
-            Ok(vec![client.id.clone()])
+            if let Some(ref pid) = client.peer_id {
+                Ok(vec![pid.clone()])
+            } else {
+                Err(format!("target peer '{}' has not identified itself yet", t))
+            }
         } else {
             Err(format!("target peer '{}' is not connected", t))
         }
     } else {
         let auth_clients: Vec<&ClientInfo> = active.iter().filter(|c| c.authenticated).collect();
         if auth_clients.len() == 1 {
-            Ok(vec![auth_clients[0].id.clone()])
+            if let Some(ref pid) = auth_clients[0].peer_id {
+                Ok(vec![pid.clone()])
+            } else {
+                Err(format!("target peer '{}' has not identified itself yet", auth_clients[0].id))
+            }
         } else {
             Err("send_files requires a target peer (multiple peers connected)".to_string())
         }
@@ -1726,11 +1742,9 @@ impl MeshServer {
                 let _ = app.emit("state-change", &snap);
             }
             "files.batch" => {
-                if let Some(ref dests) = pkt.d {
-                    if !dests.iter().any(|d| d == local_id || d == &peer_addr.ip().to_string() || d == &peer_addr.to_string()) {
-                        log::warn!("[Files] Ignoring files.batch not addressed to local peer (dests={:?}, local_id={})", dests, local_id);
-                        return;
-                    }
+                if !is_addressed_to_local(&pkt.d, local_id) {
+                    log::warn!("[Files] Ignoring files.batch not addressed to local peer (dests={:?}, local_id={})", pkt.d, local_id);
+                    return;
                 }
                 log::info!("[Files] Inbound files.batch from {}: batch_id={:?}", peer_addr, pkt.batch_id);
                 let batch_id = pkt.batch_id.clone().or(pkt.id.clone())
@@ -1767,11 +1781,9 @@ impl MeshServer {
                 );
             }
             "files.chunk" => {
-                if let Some(ref dests) = pkt.d {
-                    if !dests.iter().any(|d| d == local_id || d == &peer_addr.ip().to_string() || d == &peer_addr.to_string()) {
-                        log::warn!("[Files] Ignoring files.chunk not addressed to local peer (dests={:?}, local_id={})", dests, local_id);
-                        return;
-                    }
+                if !is_addressed_to_local(&pkt.d, local_id) {
+                    log::warn!("[Files] Ignoring files.chunk not addressed to local peer (dests={:?}, local_id={})", pkt.d, local_id);
+                    return;
                 }
                 let batch_id = match pkt.batch_id.as_deref().or(pkt.id.as_deref()) {
                     Some(b) => b.to_string(),
@@ -1883,11 +1895,9 @@ impl MeshServer {
                 );
             }
             "files.done" => {
-                if let Some(ref dests) = pkt.d {
-                    if !dests.iter().any(|d| d == local_id || d == &peer_addr.ip().to_string() || d == &peer_addr.to_string()) {
-                        log::warn!("[Files] Ignoring files.done not addressed to local peer (dests={:?}, local_id={})", dests, local_id);
-                        return;
-                    }
+                if !is_addressed_to_local(&pkt.d, local_id) {
+                    log::warn!("[Files] Ignoring files.done not addressed to local peer (dests={:?}, local_id={})", pkt.d, local_id);
+                    return;
                 }
                 let batch_id = match pkt.batch_id.as_deref().or(pkt.id.as_deref()) {
                     Some(b) => b.to_string(),
@@ -2003,11 +2013,9 @@ impl MeshServer {
                 }
             }
             "files.cancel" => {
-                if let Some(ref dests) = pkt.d {
-                    if !dests.iter().any(|d| d == local_id || d == &peer_addr.ip().to_string() || d == &peer_addr.to_string()) {
-                        log::warn!("[Files] Ignoring files.cancel not addressed to local peer (dests={:?}, local_id={})", dests, local_id);
-                        return;
-                    }
+                if !is_addressed_to_local(&pkt.d, local_id) {
+                    log::warn!("[Files] Ignoring files.cancel not addressed to local peer (dests={:?}, local_id={})", pkt.d, local_id);
+                    return;
                 }
                 if let Some(ref b_id) = pkt.batch_id {
                     let transfer_mgr = app.state::<crate::transport::transfer::TransferManager>();
@@ -3132,29 +3140,38 @@ mod tests {
             ClientInfo::new("192.168.1.103:47800", Some("peer_gamma".into()), "192.168.1.103", false),
         ];
 
-        // 1. Match by client id
+        // 1. Match by client id -> yields peer's stable id
         let res_id = resolve_file_dest(Some("192.168.1.101:47800"), &clients);
-        assert_eq!(res_id, Ok(vec!["192.168.1.101:47800".to_string()]));
+        assert_eq!(res_id, Ok(vec!["peer_alpha".to_string()]));
 
-        // 2. Match by peer_id
+        // 2. Match by peer_id -> yields peer's stable id
         let res_peer = resolve_file_dest(Some("peer_beta"), &clients);
-        assert_eq!(res_peer, Ok(vec!["192.168.1.102:47800".to_string()]));
+        assert_eq!(res_peer, Ok(vec!["peer_beta".to_string()]));
 
-        // 3. Match by IP
+        // 3. Match by IP -> yields peer's stable id
         let res_ip = resolve_file_dest(Some("192.168.1.101"), &clients);
-        assert_eq!(res_ip, Ok(vec!["192.168.1.101:47800".to_string()]));
+        assert_eq!(res_ip, Ok(vec!["peer_alpha".to_string()]));
 
         // 4. Unknown target -> Err
         let res_unknown = resolve_file_dest(Some("non_existent_peer"), &clients);
         assert_eq!(res_unknown, Err("target peer 'non_existent_peer' is not connected".to_string()));
 
-        // 5. None + single authenticated client -> use it
+        // 5. Matched client with no identified peer_id -> explicit Err
+        let unidentified = vec![
+            ClientInfo::new("192.168.1.104:47800", None, "192.168.1.104", true),
+        ];
+        assert_eq!(
+            resolve_file_dest(Some("192.168.1.104"), &unidentified),
+            Err("target peer '192.168.1.104' has not identified itself yet".to_string())
+        );
+
+        // 6. None + single authenticated client -> use it
         let single_auth = vec![
             ClientInfo::new("192.168.1.102:47800", Some("peer_beta".into()), "192.168.1.102", true),
         ];
-        assert_eq!(resolve_file_dest(None, &single_auth), Ok(vec!["192.168.1.102:47800".to_string()]));
+        assert_eq!(resolve_file_dest(None, &single_auth), Ok(vec!["peer_beta".to_string()]));
 
-        // 6. None + single unauthenticated client -> Err (0 authenticated)
+        // 7. None + single unauthenticated client -> Err (0 authenticated)
         let single_unauth = vec![
             ClientInfo::new("192.168.1.103:47800", Some("peer_gamma".into()), "192.168.1.103", false),
         ];
@@ -3164,14 +3181,14 @@ mod tests {
             "send_files requires a target peer (multiple peers connected)"
         );
 
-        // 7. None + zero clients -> Err
+        // 8. None + zero clients -> Err
         assert!(resolve_file_dest(None, &[]).is_err());
         assert_eq!(
             resolve_file_dest(None, &[]).unwrap_err(),
             "send_files requires a target peer (multiple peers connected)"
         );
 
-        // 8. None + multiple authenticated clients -> Err
+        // 9. None + multiple authenticated clients -> Err
         assert!(resolve_file_dest(None, &clients).is_err());
         assert_eq!(
             resolve_file_dest(None, &clients).unwrap_err(),
@@ -3186,7 +3203,7 @@ mod tests {
         ];
 
         let dest = resolve_file_dest(Some("peer_b"), &active).expect("resolve peer_b");
-        assert_eq!(dest, vec!["client_device_b".to_string()]);
+        assert_eq!(dest, vec!["peer_b".to_string()]);
 
         // Construct files.batch
         let batch_pkt = WireMessage {
@@ -3197,7 +3214,7 @@ mod tests {
             d: Some(dest.clone()),
             ..Default::default()
         };
-        assert_eq!(batch_pkt.d, Some(vec!["client_device_b".to_string()]));
+        assert_eq!(batch_pkt.d, Some(vec!["peer_b".to_string()]));
         assert!(!batch_pkt.d.as_ref().unwrap().is_empty());
 
         // Construct files.chunk
@@ -3212,7 +3229,7 @@ mod tests {
             d: Some(dest.clone()),
             ..Default::default()
         };
-        assert_eq!(chunk_pkt.d, Some(vec!["client_device_b".to_string()]));
+        assert_eq!(chunk_pkt.d, Some(vec!["peer_b".to_string()]));
         assert!(!chunk_pkt.d.as_ref().unwrap().is_empty());
 
         // Construct files.done
@@ -3226,7 +3243,7 @@ mod tests {
             d: Some(dest.clone()),
             ..Default::default()
         };
-        assert_eq!(done_pkt.d, Some(vec!["client_device_b".to_string()]));
+        assert_eq!(done_pkt.d, Some(vec!["peer_b".to_string()]));
         assert!(!done_pkt.d.as_ref().unwrap().is_empty());
 
         // Construct files.cancel
@@ -3237,7 +3254,7 @@ mod tests {
             d: Some(dest.clone()),
             ..Default::default()
         };
-        assert_eq!(cancel_pkt.d, Some(vec!["client_device_b".to_string()]));
+        assert_eq!(cancel_pkt.d, Some(vec!["peer_b".to_string()]));
         assert!(!cancel_pkt.d.as_ref().unwrap().is_empty());
     }
 
@@ -3280,9 +3297,9 @@ mod tests {
             }).collect::<Vec<_>>()
         };
 
-        // Resolve destination for peer_beta
+        // Resolve destination for peer_beta -> stable peer_id
         let dest = resolve_file_dest(Some("peer_beta"), &clients_info).expect("resolve peer_beta");
-        assert_eq!(dest, vec!["192.168.1.102:47800".to_string()]);
+        assert_eq!(dest, vec!["peer_beta".to_string()]);
 
         // Build file transfer packets addressed strictly to dest
         let packets = vec![
@@ -3359,5 +3376,104 @@ mod tests {
             rx_c.try_recv().is_err(),
             "Observer peer C must receive NO files.batch/chunk/done/cancel packets"
         );
+    }
+
+    #[test]
+    fn test_destination_contract_sender_and_receiver_agree() {
+        let (tx_b, mut rx_b) = mpsc::channel::<WireMessage>(10);
+        let (tx_c, mut rx_c) = mpsc::channel::<WireMessage>(10);
+
+        let session_b = ActiveClientSession {
+            id: "192.168.1.102:47800".to_string(),
+            peer_id: Arc::new(RwLock::new(Some("peer_beta".to_string()))),
+            peer_addr: "192.168.1.102:47800".parse().unwrap(),
+            tx: tx_b,
+            authenticated: Arc::new(RwLock::new(true)),
+        };
+
+        let session_c = ActiveClientSession {
+            id: "192.168.1.103:47800".to_string(),
+            peer_id: Arc::new(RwLock::new(Some("peer_gamma_observer".to_string()))),
+            peer_addr: "192.168.1.103:47800".parse().unwrap(),
+            tx: tx_c,
+            authenticated: Arc::new(RwLock::new(true)),
+        };
+
+        let active_map = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let mut map = active_map.write();
+            map.insert(session_b.id.clone(), session_b);
+            map.insert(session_c.id.clone(), session_c);
+        }
+
+        let clients_info = {
+            let guard = active_map.read();
+            guard.values().map(|c| ClientInfo {
+                id: c.id.clone(),
+                peer_id: c.peer_id.read().clone(),
+                peer_ip: c.peer_addr.ip().to_string(),
+                authenticated: *c.authenticated.read(),
+            }).collect::<Vec<_>>()
+        };
+
+        // 1. Sender resolves destination for "peer_beta" -> must yield stable peer_id
+        let dest = resolve_file_dest(Some("peer_beta"), &clients_info).expect("resolve peer_beta");
+        assert_eq!(dest, vec!["peer_beta".to_string()]);
+
+        // 2. Build WireMessage using sender's actual resolved dest output
+        let pkt = WireMessage {
+            t: "files.chunk".to_string(),
+            v: Some(1),
+            batch_id: Some("batch_agree_01".to_string()),
+            file_id: Some("file_0".to_string()),
+            offset: Some(0),
+            len: Some(1024),
+            d: Some(dest.clone()),
+            ..Default::default()
+        };
+
+        // 3. Receiver evaluates is_addressed_to_local against sender's actual pkt.d
+        assert!(
+            is_addressed_to_local(&pkt.d, "peer_beta"),
+            "Intended receiver (peer_beta) must accept packet"
+        );
+        assert!(
+            !is_addressed_to_local(&pkt.d, "peer_gamma_observer"),
+            "Observer (peer_gamma_observer) must reject packet"
+        );
+
+        // 4. Regression assertion: old bug where d contained socket address while receiver local_id was host name
+        let old_bug_d = Some(vec!["192.168.1.102:47800".to_string()]);
+        assert!(
+            !is_addressed_to_local(&old_bug_d, "bensons-imac"),
+            "Receiver must reject socket-address destination (documents the old bug)"
+        );
+
+        // 5. Broadcast / legacy compatibility: None dest accepted by all
+        assert!(
+            is_addressed_to_local(&None, "any_peer"),
+            "Unaddressed / broadcast packets remain acceptable"
+        );
+
+        // 6. Assert sender routing matcher delivers to peer_beta and NOT to peer_gamma_observer
+        let target_dests = pkt.d.clone();
+        let guard = active_map.read();
+        for client in guard.values() {
+            let pid = client.peer_id.read().clone();
+            let matches_dest = match &target_dests {
+                Some(dests) => dests.iter().any(|d| {
+                    d == &client.id
+                        || pid.as_deref() == Some(d.as_str())
+                        || d == &client.peer_addr.ip().to_string()
+                }),
+                None => true,
+            };
+            if matches_dest && *client.authenticated.read() {
+                let _ = client.tx.try_send(pkt.clone());
+            }
+        }
+
+        assert!(rx_b.try_recv().is_ok(), "peer_beta channel must receive packet");
+        assert!(rx_c.try_recv().is_err(), "peer_gamma_observer channel must receive NO packets");
     }
 }
