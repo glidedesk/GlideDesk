@@ -128,20 +128,21 @@ pub fn create_virtual_display(width: u32, height: u32) -> Result<(), String> {
     {
         let has_vdd = std::path::Path::new("/Library/CoreMediaIO/Plug-Ins/DAL").exists();
         if !has_vdd {
-            return Err("Virtual display driver not installed on host macOS system".to_string());
+            return Err("Virtual display driver not installed on host macOS system. Please install OBS Virtual Camera or CoreMediaIO DAL plugin.".to_string());
         }
-        Ok(())
+        // Native virtual display creation requires elevated DisplayServices authorization
+        Err("Creating native virtual display requires elevated DisplayServices authorization or BetterDisplay/IddCx driver.".to_string())
     }
     #[cfg(target_os = "windows")]
     {
         let driver_path = std::path::Path::new("C:\\Windows\\System32\\drivers\\IddCx.sys");
         if !driver_path.exists() {
-            return Err("Virtual display driver (IddCx) not installed on host Windows system".to_string());
+            return Err("Virtual display driver (IddCx) not installed on host Windows system. Run PowerShell as Administrator to install IddCx driver.".to_string());
         }
-        Ok(())
+        Err("Virtual display activation requires Windows Display Switcher elevation.".to_string())
     }
     #[cfg(target_os = "linux")]
     {
-        Err("Virtual display driver not supported on Linux".to_string())
+        Err("Virtual display creation requires xrandr virtual monitor setup. Run 'xrandr --setmonitor' with display manager permissions.".to_string())
     }
 }
