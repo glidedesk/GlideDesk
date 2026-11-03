@@ -717,6 +717,9 @@ pub fn resolve_file_dest(target: Option<&str>, active: &[ClientInfo]) -> Result<
                 || c.peer_id.as_deref() == Some(t)
                 || c.peer_ip == t
         }) {
+            if !client.authenticated {
+                return Err(format!("target peer '{}' is not authenticated", t));
+            }
             if let Some(ref pid) = client.peer_id {
                 Ok(vec![pid.clone()])
             } else {
@@ -726,8 +729,13 @@ pub fn resolve_file_dest(target: Option<&str>, active: &[ClientInfo]) -> Result<
             Err(format!("target peer '{}' is not connected", t))
         }
     } else {
+        if active.is_empty() {
+            return Err("no peers connected".to_string());
+        }
         let auth_clients: Vec<&ClientInfo> = active.iter().filter(|c| c.authenticated).collect();
-        if auth_clients.len() == 1 {
+        if auth_clients.is_empty() {
+            return Err("no peers connected".to_string());
+        } else if auth_clients.len() == 1 {
             if let Some(ref pid) = auth_clients[0].peer_id {
                 Ok(vec![pid.clone()])
             } else {
@@ -2873,8 +2881,6 @@ impl NetworkManager {
         }
     }
 
-    /// Send to a specific peer in the mesh.
-    #[allow(dead_code)]
     /// Returns snapshot list of active connected clients.
     pub fn get_active_clients_info(&self) -> Vec<ClientInfo> {
         let guard = self.active_clients.read();
@@ -2889,6 +2895,8 @@ impl NetworkManager {
             .collect()
     }
 
+    /// Send to a specific peer in the mesh.
+    #[allow(dead_code)]
     pub async fn send_to(&self, target_id: &str, pkt: WireMessage) {
         self.flush_motion();
         let tx_opt = {
@@ -3156,7 +3164,14 @@ mod tests {
         let res_unknown = resolve_file_dest(Some("non_existent_peer"), &clients);
         assert_eq!(res_unknown, Err("target peer 'non_existent_peer' is not connected".to_string()));
 
-        // 5. Matched client with no identified peer_id -> explicit Err
+        // 5. Explicit target matching unauthenticated client -> Err
+        let res_unauth = resolve_file_dest(Some("peer_gamma"), &clients);
+        assert_eq!(
+            res_unauth,
+            Err("target peer 'peer_gamma' is not authenticated".to_string())
+        );
+
+        // 6. Matched client with no identified peer_id -> explicit Err
         let unidentified = vec![
             ClientInfo::new("192.168.1.104:47800", None, "192.168.1.104", true),
         ];
@@ -3165,34 +3180,31 @@ mod tests {
             Err("target peer '192.168.1.104' has not identified itself yet".to_string())
         );
 
-        // 6. None + single authenticated client -> use it
+        // 7. None + single authenticated client -> use it
         let single_auth = vec![
             ClientInfo::new("192.168.1.102:47800", Some("peer_beta".into()), "192.168.1.102", true),
         ];
         assert_eq!(resolve_file_dest(None, &single_auth), Ok(vec!["peer_beta".to_string()]));
 
-        // 7. None + single unauthenticated client -> Err (0 authenticated)
+        // 8. None + single unauthenticated client -> Err("no peers connected")
         let single_unauth = vec![
             ClientInfo::new("192.168.1.103:47800", Some("peer_gamma".into()), "192.168.1.103", false),
         ];
-        assert!(resolve_file_dest(None, &single_unauth).is_err());
         assert_eq!(
-            resolve_file_dest(None, &single_unauth).unwrap_err(),
-            "send_files requires a target peer (multiple peers connected)"
+            resolve_file_dest(None, &single_unauth),
+            Err("no peers connected".to_string())
         );
 
-        // 8. None + zero clients -> Err
-        assert!(resolve_file_dest(None, &[]).is_err());
+        // 9. None + zero clients -> distinct Err("no peers connected")
         assert_eq!(
-            resolve_file_dest(None, &[]).unwrap_err(),
-            "send_files requires a target peer (multiple peers connected)"
+            resolve_file_dest(None, &[]),
+            Err("no peers connected".to_string())
         );
 
-        // 9. None + multiple authenticated clients -> Err
-        assert!(resolve_file_dest(None, &clients).is_err());
+        // 10. None + multiple authenticated clients -> Err
         assert_eq!(
-            resolve_file_dest(None, &clients).unwrap_err(),
-            "send_files requires a target peer (multiple peers connected)"
+            resolve_file_dest(None, &clients),
+            Err("send_files requires a target peer (multiple peers connected)".to_string())
         );
     }
 

@@ -792,7 +792,7 @@ pub async fn send_files(
         return Err("No files specified for transfer".to_string());
     }
 
-    let target_str = target.as_deref().filter(|s| !s.trim().is_empty());
+    let target_str = target.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let dest = resolve_file_dest(target_str, &network.get_active_clients_info())?;
     log::info!("[SendFiles] dest={:?}", dest);
 
