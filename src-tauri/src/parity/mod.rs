@@ -285,8 +285,20 @@ pub fn clear_notif_history(state: State<'_, AppState>, app: AppHandle) -> Result
 }
 
 #[tauri::command]
-pub fn mute_notif_app(app_name: String, _state: State<'_, AppState>, _app: AppHandle) -> Result<(), String> {
-    log::info!("[Notifs] Muting app notifications: {}", app_name);
+pub fn mute_notif_app(app: Option<serde_json::Value>, app_name: Option<String>, _state: State<'_, AppState>, _app: AppHandle) -> Result<(), String> {
+    let name = app.as_ref()
+        .and_then(|v| {
+            if let Some(s) = v.as_str() {
+                Some(s.to_string())
+            } else if let Some(obj) = v.as_object() {
+                obj.get("app").or_else(|| obj.get("appName")).and_then(|x| x.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .or(app_name)
+        .unwrap_or_default();
+    log::info!("[Notifs] Muting app notifications: {}", name);
     Ok(())
 }
 
@@ -400,11 +412,18 @@ pub fn set_remote(partial: serde_json::Value, state: State<'_, AppState>, app: A
 }
 
 #[tauri::command]
-pub fn set_pc_screen(mode: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    log::info!("[Monitor] Setting PC screen mode: {}", mode);
+pub fn set_pc_screen(mode: serde_json::Value, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    let mode_str = if let Some(s) = mode.as_str() {
+        s.to_string()
+    } else if let Some(m) = mode.get("mode").and_then(|v| v.as_str()) {
+        m.to_string()
+    } else {
+        mode.to_string()
+    };
+    log::info!("[Monitor] Setting PC screen mode: {}", mode_str);
     {
         let mut s = state.inner.write();
-        s.pc_screen.mode = mode;
+        s.pc_screen.mode = mode_str;
     }
     push_state(&app, &state);
     Ok(())

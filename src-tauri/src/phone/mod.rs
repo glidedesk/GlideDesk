@@ -308,14 +308,21 @@ pub fn set_phone(
 
 #[tauri::command]
 pub fn phone_open_app(
-    pkg: String,
+    pkg: serde_json::Value,
     phone_mgr: State<'_, PhoneManager>,
     _app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[PhoneADB] Opening phone application: {}", pkg);
+    let pkg_name = if let Some(s) = pkg.as_str() {
+        s.to_string()
+    } else if let Some(id) = pkg.get("id").or_else(|| pkg.get("pkg")).or_else(|| pkg.get("name")).and_then(|v| v.as_str()) {
+        id.to_string()
+    } else {
+        pkg.to_string()
+    };
+    log::info!("[PhoneADB] Opening phone application: {}", pkg_name);
     let guard = phone_mgr.session.read();
     if let Some(ref sess) = *guard {
-        let msg = scrcpy::ControlMessage::start_app(&pkg);
+        let msg = scrcpy::ControlMessage::start_app(&pkg_name);
         sess.send_control(&msg)?;
         Ok(())
     } else {
@@ -384,17 +391,24 @@ pub fn phone_install_full(
 }
 
 #[tauri::command]
-pub fn phone_media(action: String, phone_mgr: State<'_, PhoneManager>) -> Result<(), String> {
-    log::info!("[PhoneADB] Phone media action: {}", action);
+pub fn phone_media(action: serde_json::Value, phone_mgr: State<'_, PhoneManager>) -> Result<(), String> {
+    log::info!("[PhoneADB] Phone media action: {:?}", action);
+    let act_str = if let Some(s) = action.as_str() {
+        s.to_string()
+    } else if let Some(a) = action.get("a").and_then(|v| v.as_str()) {
+        a.to_string()
+    } else {
+        action.to_string()
+    };
     let guard = phone_mgr.session.read();
     if let Some(ref sess) = *guard {
-        let keycode = match action.as_str() {
+        let keycode = match act_str.as_str() {
             "play" | "pause" | "toggle" => 85, // KEYCODE_MEDIA_PLAY_PAUSE
             "next" => 87,                      // KEYCODE_MEDIA_NEXT
             "prev" | "previous" => 88,         // KEYCODE_MEDIA_PREVIOUS
             "volup" => 24,                     // KEYCODE_VOLUME_UP
             "voldn" => 25,                     // KEYCODE_VOLUME_DOWN
-            _ => return Err(format!("Unsupported media action: {}", action)),
+            _ => return Err(format!("Unsupported media action: {}", act_str)),
         };
         sess.inject_key(keycode, true)?;
         sess.inject_key(keycode, false)?;
