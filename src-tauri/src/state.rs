@@ -827,6 +827,35 @@ impl Default for CameraState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverviewSettings {
+    #[serde(default = "default_true")]
+    pub media: bool,
+    #[serde(default = "default_true")]
+    pub qs: bool,
+    #[serde(default = "default_true")]
+    pub notifs: bool,
+    #[serde(default = "default_true")]
+    pub apps: bool,
+    #[serde(default = "default_true")]
+    pub clipboard: bool,
+    #[serde(default = "default_true")]
+    pub files: bool,
+}
+
+impl Default for OverviewSettings {
+    fn default() -> Self {
+        Self {
+            media: true,
+            qs: true,
+            notifs: true,
+            apps: true,
+            clipboard: true,
+            files: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AdbQrState {
     #[serde(default)]
@@ -892,6 +921,8 @@ pub struct FullState {
     pub camera: CameraState,
     #[serde(rename = "adbQr", default)]
     pub adb_qr: Option<AdbQrState>,
+    #[serde(default)]
+    pub overview: OverviewSettings,
 }
 
 #[derive(Clone)]
@@ -969,6 +1000,7 @@ impl AppState {
             multi: MultiState::default(),
             camera: CameraState::default(),
             adb_qr: None,
+            overview: OverviewSettings::default(),
         };
 
         Self {
