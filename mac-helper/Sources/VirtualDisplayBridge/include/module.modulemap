@@ -1,4 +1,0 @@
-module VirtualDisplayBridge {
-  header "CGVirtualDisplayPrivate.h"
-  export *
-}
