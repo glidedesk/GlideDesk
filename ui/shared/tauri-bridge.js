@@ -49,6 +49,16 @@
         event.listen('projection-setup', (e) => fn(e.payload));
       }
     },
+    onAudioReceived: (fn) => {
+      if (event && event.listen) {
+        event.listen('media-audio-received', (e) => fn(e.payload));
+      }
+    },
+    onScreenReceived: (fn) => {
+      if (event && event.listen) {
+        event.listen('media-screen-received', (e) => fn(e.payload));
+      }
+    },
     onPortConflict: (fn) => {
       if (event && event.listen) {
         event.listen('port-conflict', (e) => fn(e.payload));
