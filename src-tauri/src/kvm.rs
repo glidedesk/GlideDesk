@@ -396,6 +396,16 @@ fn track_button(button: MouseButton, is_down: bool) {
 pub struct NativeInputInjector;
 
 impl NativeInputInjector {
+    pub fn key_event(vk: u16, is_down: bool, extended: bool) {
+        track_key(vk, is_down);
+        Self::platform_key_event(vk, is_down, extended);
+    }
+
+    pub fn mouse_button(button: MouseButton, is_down: bool) {
+        track_button(button, is_down);
+        Self::platform_mouse_button(button, is_down);
+    }
+
     pub fn release_all_keys() {
         let keys_to_release: Vec<u16> = {
             let mut guard = HELD_KEYS.lock();
@@ -554,8 +564,7 @@ impl NativeInputInjector {
     }
 
     #[cfg(windows)]
-    pub fn mouse_button(button: MouseButton, is_down: bool) {
-        track_button(button, is_down);
+    pub fn platform_mouse_button(button: MouseButton, is_down: bool) {
         Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
@@ -592,8 +601,7 @@ impl NativeInputInjector {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn mouse_button(button: MouseButton, is_down: bool) {
-        track_button(button, is_down);
+    pub fn platform_mouse_button(button: MouseButton, is_down: bool) {
         use macos_ffi::*;
         unsafe {
             let dummy = CGEventCreate(std::ptr::null_mut());
@@ -623,7 +631,7 @@ impl NativeInputInjector {
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    pub fn mouse_button(_button: MouseButton, _is_down: bool) {}
+    pub fn platform_mouse_button(_button: MouseButton, _is_down: bool) {}
 
     #[cfg(windows)]
     pub fn mouse_wheel(dx: i32, dy: i32) {
@@ -696,8 +704,7 @@ impl NativeInputInjector {
     pub fn mouse_wheel(_dx: i32, _dy: i32) {}
 
     #[cfg(windows)]
-    pub fn key_event(vk: u16, is_down: bool, extended: bool) {
-        track_key(vk, is_down);
+    pub fn platform_key_event(vk: u16, is_down: bool, extended: bool) {
         Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
@@ -732,8 +739,7 @@ impl NativeInputInjector {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn key_event(vk: u16, is_down: bool, _extended: bool) {
-        track_key(vk, is_down);
+    pub fn platform_key_event(vk: u16, is_down: bool, _extended: bool) {
         use macos_ffi::*;
         if let Some(mac_code) = keycodes::windows_vk_to_macos_keycode(vk) {
             unsafe {
@@ -747,7 +753,7 @@ impl NativeInputInjector {
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    pub fn key_event(_vk: u16, _is_down: bool, _extended: bool) {}
+    pub fn platform_key_event(_vk: u16, _is_down: bool, _extended: bool) {}
 }
 
 /// Unified cross-platform clipboard synchronization engine.
