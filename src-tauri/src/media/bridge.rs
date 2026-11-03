@@ -26,38 +26,32 @@ impl NativeBridgeManager {
 }
 
 #[tauri::command]
-#[allow(dead_code)]
 pub fn start_audio_capture(bridge: State<'_, NativeBridgeManager>) -> Result<(), String> {
     bridge.audio_engine.start_capture()
 }
 
 #[tauri::command]
-#[allow(dead_code)]
 pub fn stop_audio_capture(bridge: State<'_, NativeBridgeManager>) {
     bridge.audio_engine.stop_capture();
 }
 
 #[tauri::command]
-#[allow(dead_code)]
 pub fn start_screen_streaming(fps: u32, bridge: State<'_, NativeBridgeManager>) -> Result<(), String> {
     bridge.screen_engine.start_streaming(fps)
 }
 
 #[tauri::command]
-#[allow(dead_code)]
 pub fn stop_screen_streaming(bridge: State<'_, NativeBridgeManager>) {
     bridge.screen_engine.stop_streaming();
 }
 
 #[tauri::command]
-#[allow(dead_code)]
 pub fn emulate_gamepad_event(button: String, pressed: bool) -> Result<(), String> {
     log::info!("Pure Rust gamepad emulation: button={}, pressed={}", button, pressed);
     Ok(())
 }
 
 #[tauri::command]
-#[allow(dead_code)]
 pub fn create_virtual_display(width: u32, height: u32) -> Result<(), String> {
     log::info!("Pure Rust virtual display creation: {}x{}", width, height);
     Ok(())

@@ -126,6 +126,12 @@ fn main() {
             commands::get_parked_windows,
             commands::show_projection_window,
             commands::hide_projection_window,
+            media::bridge::start_audio_capture,
+            media::bridge::stop_audio_capture,
+            media::bridge::start_screen_streaming,
+            media::bridge::stop_screen_streaming,
+            media::bridge::emulate_gamepad_event,
+            media::bridge::create_virtual_display,
         ])
         .build(tauri::generate_context!())
         .expect("error while building GlideDesk application")
