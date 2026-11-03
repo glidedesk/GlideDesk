@@ -21,6 +21,7 @@ mod device_control;
 pub mod transport;
 pub mod window_manager;
 pub mod chat;
+pub mod rezume;
 
 use media::NativeBridgeManager;
 
@@ -220,6 +221,8 @@ fn main() {
             transport::transfer::get_transfer_status,
             chat::set_chats,
             chat::notif_reply,
+            rezume::set_rezume,
+            rezume::rezume_do,
         ])
         .build(tauri::generate_context!())
         .expect("error while building GlideDesk application")

@@ -187,6 +187,10 @@ pub struct WireMessage {
     #[serde(default)]
     pub pos: Option<u64>,
 
+    // ReZume Shelf fields
+    #[serde(default)]
+    pub rezume_item: Option<crate::state::RezumeItem>,
+
     // File transfer batch broadcast
     #[serde(default)]
     pub files: Option<Vec<String>>,
@@ -258,6 +262,7 @@ impl Default for WireMessage {
             address: None,
             action: None,
             pos: None,
+            rezume_item: None,
             files: None,
             commit: None,
             nonce: None,
@@ -1163,6 +1168,7 @@ impl MeshServer {
                 | "clip" | "clip.image" | "kvm.take" | "window.handoff.offer"
                 | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
                 | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
+                | "rz.offer" | "rz.take"
                 if !*authenticated.read() =>
             {
                 log::warn!(
@@ -1339,6 +1345,24 @@ impl MeshServer {
                             at: chrono::Utc::now().timestamp_millis() as u64,
                             items: pkt.items.clone().unwrap_or_default(),
                         });
+                    }
+                    drop(s);
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
+                }
+            }
+            "rz.offer" => {
+                if let Some(item) = pkt.rezume_item.clone() {
+                    let mut s = state.inner.write();
+                    if s.rezume.on && s.rezume.receive {
+                        s.rezume_shelf.incoming = Some(item.clone());
+                        let exists = s.rezume_shelf.shelf.iter().any(|x| x.id == item.id);
+                        if !exists {
+                            s.rezume_shelf.shelf.insert(0, item);
+                            if s.rezume_shelf.shelf.len() > 50 {
+                                s.rezume_shelf.shelf.truncate(50);
+                            }
+                        }
                     }
                     drop(s);
                     let snap = state.snapshot();

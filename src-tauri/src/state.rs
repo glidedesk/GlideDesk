@@ -864,6 +864,90 @@ pub struct AdbQrState {
     pub done: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RezumeSettings {
+    #[serde(default)]
+    pub on: bool,
+    #[serde(default = "default_true")]
+    pub send: bool,
+    #[serde(default = "default_true")]
+    pub receive: bool,
+    #[serde(default = "default_true")]
+    pub web: bool,
+    #[serde(default = "default_true")]
+    pub docs: bool,
+    #[serde(default = "default_true")]
+    pub apps: bool,
+    #[serde(default = "default_true")]
+    pub mirror: bool,
+    #[serde(default = "default_true")]
+    pub push: bool,
+    #[serde(default)]
+    pub notify: bool,
+    #[serde(default = "default_true")]
+    pub taskbar: bool,
+    #[serde(default = "default_true")]
+    pub tray: bool,
+    #[serde(default = "default_true")]
+    pub tab: bool,
+    #[serde(default = "default_true")]
+    pub video: bool,
+}
+
+impl Default for RezumeSettings {
+    fn default() -> Self {
+        Self {
+            on: false,
+            send: true,
+            receive: true,
+            web: true,
+            docs: true,
+            apps: true,
+            mirror: true,
+            push: true,
+            notify: false,
+            taskbar: true,
+            tray: true,
+            tab: true,
+            video: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RezumeItem {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: String, // "web" | "doc" | "app" | "video"
+    pub title: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub pkg: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub at: u64,
+    #[serde(default)]
+    pub checksum_sha256: Option<String>,
+    #[serde(default)]
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RezumeState {
+    #[serde(default)]
+    pub incoming: Option<RezumeItem>,
+    #[serde(default)]
+    pub shelf: Vec<RezumeItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UiSettings {
     #[serde(default)]
@@ -963,6 +1047,10 @@ pub struct FullState {
     pub ui: UiSettings,
     #[serde(default)]
     pub chats: Option<Vec<ChatConversation>>,
+    #[serde(default)]
+    pub rezume: RezumeSettings,
+    #[serde(rename = "rezumeShelf", default)]
+    pub rezume_shelf: RezumeState,
 }
 
 #[derive(Clone)]
@@ -1043,6 +1131,8 @@ impl AppState {
             overview: OverviewSettings::default(),
             ui: UiSettings::default(),
             chats: Some(Vec::new()),
+            rezume: RezumeSettings::default(),
+            rezume_shelf: RezumeState::default(),
         };
 
         Self {

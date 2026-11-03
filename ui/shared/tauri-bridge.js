@@ -211,6 +211,13 @@
       }
       return invoke('notif_reply', { chat: null, id: null, text: '' });
     },
+    setRezume: (m) => invoke('set_rezume', { partial: m || {} }),
+    setReZume: (m) => invoke('set_rezume', { partial: m || {} }),
+    rezumeDo: (m) => {
+      const action = typeof m === 'object' && m ? (m.a || m.action || '') : String(m || '');
+      const id = typeof m === 'object' && m ? (m.id || null) : null;
+      return invoke('rezume_do', { action, id });
+    },
     fixFirewall: () => invoke('fix_firewall'),
     netCancel: () => invoke('net_cancel'),
     netJoinHotspot: (ssid, key) => invoke('net_join_hotspot', { ssid: String(ssid || ''), key: String(key || '') }),
