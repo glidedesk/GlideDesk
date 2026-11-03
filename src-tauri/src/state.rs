@@ -827,6 +827,14 @@ impl Default for CameraState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AdbQrState {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub done: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FullState {
     pub device: DeviceInfo,
@@ -882,6 +890,8 @@ pub struct FullState {
     pub multi: MultiState,
     #[serde(default)]
     pub camera: CameraState,
+    #[serde(rename = "adbQr", default)]
+    pub adb_qr: Option<AdbQrState>,
 }
 
 #[derive(Clone)]
@@ -958,6 +968,7 @@ impl AppState {
             setup: SetupState::default(),
             multi: MultiState::default(),
             camera: CameraState::default(),
+            adb_qr: None,
         };
 
         Self {

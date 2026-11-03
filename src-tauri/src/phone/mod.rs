@@ -18,6 +18,7 @@ use session::ActivePhoneSession;
 pub struct PhoneManager {
     pub adb: AdbClient,
     pub session: Arc<RwLock<Option<ActivePhoneSession>>>,
+    pub qr_cancel: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
 }
 
 impl PhoneManager {
@@ -25,6 +26,7 @@ impl PhoneManager {
         Self {
             adb: AdbClient::new(),
             session: Arc::new(RwLock::new(None)),
+            qr_cancel: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -448,3 +450,152 @@ pub fn hub_message(
     push_state(&app, &state);
     Ok(())
 }
+
+pub fn build_adb_qr_payload(name: &str, pass: &str) -> String {
+    format!("WIFI:T:ADB;S:{};P:{};;", name, pass)
+}
+
+pub fn build_qr_pair_url(id: &str, name: &str, addrs: &[String], port: u16, nonce: &str) -> String {
+    format!(
+        "glidedesk://pair?id={}&n={}&a={}&p={}&k={}",
+        id.replace(' ', "%20"),
+        name.replace(' ', "%20"),
+        addrs.join(","),
+        port,
+        nonce
+    )
+}
+
+#[tauri::command]
+pub fn qr_pair(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let s = state.inner.read();
+    let id = s.device.name.clone();
+    let name = s.mac_name.clone();
+    let addrs = s.addresses.clone();
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let until = now + 10 * 60 * 1000;
+    let nonce = format!("{:016x}", now ^ 0x5a5a5a5a);
+    let url = build_qr_pair_url(&id, &name, &addrs, 47800, &nonce);
+    Ok(serde_json::json!({
+        "url": url,
+        "until": until,
+        "nonce": nonce,
+    }))
+}
+
+#[tauri::command]
+pub async fn adb_qr(
+    on: bool,
+    phone_mgr: State<'_, PhoneManager>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    log::info!("[PhoneADB] adb_qr called: on={}", on);
+
+    if let Some(tx) = phone_mgr.qr_cancel.write().take() {
+        let _ = tx.send(());
+    }
+
+    if !on {
+        {
+            let mut s = state.inner.write();
+            s.adb_qr = None;
+        }
+        push_state(&app, &state);
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let name = format!("glidedesk-{:08x}", now & 0xffffffff);
+    let pass = format!("{:010x}", now ^ 0x1337cafe);
+    let qr_payload = build_adb_qr_payload(&name, &pass);
+
+    {
+        let mut s = state.inner.write();
+        s.adb_qr = Some(crate::state::AdbQrState {
+            text: Some(qr_payload.clone()),
+            done: None,
+        });
+    }
+    push_state(&app, &state);
+
+    let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel::<()>(1);
+    *phone_mgr.qr_cancel.write() = Some(cancel_tx);
+
+    let adb_client = phone_mgr.adb.clone();
+    let state_arc = state.inner.clone();
+    let app_handle = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(180);
+
+        loop {
+            tokio::select! {
+                _ = cancel_rx.recv() => {
+                    log::info!("[PhoneADB] adb_qr cancelled");
+                    break;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(1500)) => {
+                    if start.elapsed() > timeout {
+                        let mut s = state_arc.write();
+                        if let Some(ref mut q) = s.adb_qr {
+                            q.done = Some("timeout".to_string());
+                        }
+                        drop(s);
+                        let _ = app_handle.emit("adb-qr-state", "timeout");
+                        break;
+                    }
+
+                    let services = AdbClient::query_bonjour_mdns().unwrap_or_default();
+                    if let Some(target) = services.iter().find(|svc| svc.name.contains(&name)) {
+                        log::info!("[PhoneADB] Discovered pairing service: {:?}", target);
+                        let pair_res = adb_client.pair(&target.address, target.port, &pass);
+                        let mut s = state_arc.write();
+                        if let Some(ref mut q) = s.adb_qr {
+                            if pair_res.is_ok() {
+                                q.done = Some("paired".to_string());
+                            } else {
+                                q.done = Some(format!("failed: {}", pair_res.unwrap_err()));
+                            }
+                        }
+                        drop(s);
+                        let _ = app_handle.emit("adb-qr-state", "paired");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_adb_qr_payload() {
+        let payload = build_adb_qr_payload("glidedesk-1234abcd", "secretpass99");
+        assert_eq!(payload, "WIFI:T:ADB;S:glidedesk-1234abcd;P:secretpass99;;");
+    }
+
+    #[test]
+    fn test_build_qr_pair_url() {
+        let url = build_qr_pair_url(
+            "mac-mini-01",
+            "Benson's Mac",
+            &["192.168.1.50".to_string(), "10.0.0.5".to_string()],
+            47800,
+            "deadbeef12345678",
+        );
+        assert!(url.starts_with("glidedesk://pair?"));
+        assert!(url.contains("id=mac-mini-01"));
+        assert!(url.contains("n=Benson's%20Mac"));
+        assert!(url.contains("a=192.168.1.50,10.0.0.5"));
+        assert!(url.contains("p=47800"));
+        assert!(url.contains("k=deadbeef12345678"));
+    }
+}
+

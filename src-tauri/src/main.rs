@@ -152,6 +152,8 @@ fn main() {
             phone::phone_media,
             phone::phone_bt_pick,
             phone::hub_message,
+            phone::qr_pair,
+            phone::adb_qr,
             camera::camera,
             camera::phone_camera,
             camera::install_vdd,

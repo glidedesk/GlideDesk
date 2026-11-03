@@ -233,6 +233,8 @@
     phoneScreen: (show) => invoke('phone_screen', { show: !!show }),
     phoneRetry: () => invoke('phone_retry'),
     phonePair: (opts) => invoke('phone_pair', { opts: opts || {} }),
+    qrPair: () => invoke('qr_pair'),
+    adbQr: (on) => invoke('adb_qr', { on: !!on }),
     phoneCamera: (on, opts) => invoke('phone_camera', { on: !!on, opts: opts || {} }),
     hub: (msg) => invoke('hub_message', { msg: msg || {} }),
 
