@@ -5,6 +5,7 @@
 // tabs along the bottom (the rest under More). The building blocks are in Ui.kt.
 package com.twindesk.android
 
+import com.twindesk.android.BuildConfig
 import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager

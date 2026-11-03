@@ -4,10 +4,10 @@ plugins {
 }
 
 android {
-    namespace = "com.glidedesk.android"
+    namespace = "com.twindesk.android"
     compileSdk = 37
     defaultConfig {
-        applicationId = "com.glidedesk.android"
+        applicationId = "com.twindesk.android"
         minSdk = 29 // Android 10: wireless debugging needs 11, everything else works from 10
         targetSdk = 36
         versionCode = 10109
@@ -57,4 +57,6 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 }

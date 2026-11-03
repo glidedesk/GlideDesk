@@ -9,7 +9,7 @@
 //   goes into the focused text field (characters, Backspace, Delete, arrows, Enter, Ctrl+A/C/X/V).
 package com.twindesk.android
 
-import com.glidedesk.android.BuildConfig
+import com.twindesk.android.BuildConfig
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
