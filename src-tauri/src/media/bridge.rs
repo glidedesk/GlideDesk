@@ -70,6 +70,7 @@ impl NativeBridgeManager {
                         ..Default::default()
                     };
                     let _ = app_screen.emit("media-screen-stream", &msg);
+                    let _ = app_screen.emit("media-screen-received", &msg);
                     if let Some(net) = app_screen.try_state::<NetworkManager>() {
                         net.send_packet(msg).await;
                     }
