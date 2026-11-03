@@ -1772,7 +1772,7 @@ mod tests {
     fn test_native_input_injector_macos() {
         // Test that relative move, mouse buttons, scroll, and key injection execute without panic
         NativeInputInjector::move_cursor_relative(0, 0);
-        NativeInputInjector::mouse_button(MouseButton::Left, false);
+        NativeInputInjector::mouse_button(MouseButton::Middle, false);
         NativeInputInjector::mouse_wheel(0, 0);
         NativeInputInjector::key_event(0x41, false, false);
     }
