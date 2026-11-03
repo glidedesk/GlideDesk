@@ -6,22 +6,46 @@ use tauri::State;
 use tokio::sync::mpsc;
 
 pub struct NativeBridgeManager {
-    audio_engine: AudioEngine,
-    screen_engine: ScreenEngine,
-    _audio_rx: mpsc::Receiver<Vec<u8>>,
-    _screen_rx: mpsc::Receiver<Vec<u8>>,
+    pub audio_engine: AudioEngine,
+    pub screen_engine: ScreenEngine,
+    audio_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>>,
+    screen_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>>,
 }
+
+use std::sync::Arc;
 
 impl NativeBridgeManager {
     pub fn new() -> Self {
         let (audio_engine, audio_rx) = AudioEngine::new();
         let (screen_engine, screen_rx) = ScreenEngine::new();
-        Self {
+        
+        let bridge = Self {
             audio_engine,
             screen_engine,
-            _audio_rx: audio_rx,
-            _screen_rx: screen_rx,
-        }
+            audio_rx: Arc::new(tokio::sync::Mutex::new(audio_rx)),
+            screen_rx: Arc::new(tokio::sync::Mutex::new(screen_rx)),
+        };
+
+        bridge.start_consumer_loops();
+        bridge
+    }
+
+    fn start_consumer_loops(&self) {
+        let audio_rx = self.audio_rx.clone();
+        tokio::spawn(async move {
+            let mut rx = audio_rx.lock().await;
+            while let Some(bytes) = rx.recv().await {
+                log::trace!("[AudioStream] Consumed {} bytes of real audio PCM sample data", bytes.len());
+            }
+        });
+
+        let screen_rx = self.screen_rx.clone();
+        tokio::spawn(async move {
+            let mut rx = screen_rx.lock().await;
+            while let Some(frame) = rx.recv().await {
+                log::trace!("[ScreenStream] Consumed {} bytes of real screen frame buffer data", frame.len());
+            }
+        });
     }
 }
 

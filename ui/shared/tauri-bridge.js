@@ -112,6 +112,12 @@
     getParkedWindows: () => invoke('get_parked_windows'),
     showProjectionWindow: (id, title, width, height) => invoke('show_projection_window', { id, title, width, height }),
     hideProjectionWindow: () => invoke('hide_projection_window'),
+    startAudioCapture: () => invoke('start_audio_capture'),
+    stopAudioCapture: () => invoke('stop_audio_capture'),
+    startScreenStreaming: (fps) => invoke('start_screen_streaming', { fps }),
+    stopScreenStreaming: () => invoke('stop_screen_streaming'),
+    emulateGamepadEvent: (button, pressed) => invoke('emulate_gamepad_event', { button, pressed }),
+    createVirtualDisplay: (width, height) => invoke('create_virtual_display', { width, height }),
 
     phoneAssets: () => Promise.resolve({ apps: [], wallpaper: '' }),
     connectPhone: (id) => invoke('connect_phone', { id }).catch(() => {}),
