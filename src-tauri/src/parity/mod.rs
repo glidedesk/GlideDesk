@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::push_state;
 use crate::state::AppState;
@@ -285,7 +285,12 @@ pub fn clear_notif_history(state: State<'_, AppState>, app: AppHandle) -> Result
 }
 
 #[tauri::command]
-pub fn mute_notif_app(app: Option<serde_json::Value>, app_name: Option<String>, _state: State<'_, AppState>, _app: AppHandle) -> Result<(), String> {
+pub fn mute_notif_app(
+    app: Option<serde_json::Value>,
+    app_name: Option<String>,
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
     let name = app.as_ref()
         .and_then(|v| {
             if let Some(s) = v.as_str() {
@@ -298,7 +303,23 @@ pub fn mute_notif_app(app: Option<serde_json::Value>, app_name: Option<String>, 
         })
         .or(app_name)
         .unwrap_or_default();
-    log::info!("[Notifs] Muting app notifications: {}", name);
+
+    if name.trim().is_empty() {
+        return Err("App name cannot be empty".to_string());
+    }
+
+    log::info!("[Notifs] Toggling mute state for app notifications: {}", name);
+    {
+        let mut s = state.inner.write();
+        if let Some(pos) = s.notifs.muted.iter().position(|x| x.eq_ignore_ascii_case(&name)) {
+            s.notifs.muted.remove(pos);
+            log::info!("[Notifs] Unmuted notifications for {}", name);
+        } else {
+            s.notifs.muted.push(name.clone());
+            log::info!("[Notifs] Muted notifications for {}", name);
+        }
+    }
+    push_state(&app_handle, &state);
     Ok(())
 }
 
@@ -504,10 +525,139 @@ pub fn fix_firewall() -> Result<(), String> {
     Ok(())
 }
 
+pub fn execute_net_wifi(on: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = if on { "on" } else { "off" };
+        let output = Command::new("networksetup")
+            .args(["-setairportpower", "en0", status])
+            .output()
+            .map_err(|e| format!("networksetup execution failed: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Failed to set Wi-Fi power to {}: {}", status, stderr.trim()));
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let status = if on { "admin=enable" } else { "admin=disable" };
+        let output = Command::new("netsh")
+            .args(["interface", "set", "interface", "Wi-Fi", status])
+            .output()
+            .map_err(|e| format!("netsh execution failed: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Failed to configure Windows Wi-Fi: {}", stderr.trim()));
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let status = if on { "on" } else { "off" };
+        let output = Command::new("nmcli")
+            .args(["radio", "wifi", status])
+            .output()
+            .map_err(|e| format!("nmcli execution failed: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Failed to toggle Wi-Fi radio via nmcli: {}", stderr.trim()));
+        }
+        Ok(())
+    }
+}
+
+pub fn execute_set_startup(on: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").map_err(|e| format!("Cannot locate HOME environment: {}", e))?;
+        let launch_agents = PathBuf::from(home).join("Library/LaunchAgents");
+        std::fs::create_dir_all(&launch_agents).map_err(|e| e.to_string())?;
+        let plist_path = launch_agents.join("com.glidedesk.desktop.plist");
+
+        if on {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let plist_content = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.glidedesk.desktop</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"#,
+                exe.to_string_lossy()
+            );
+            std::fs::write(&plist_path, plist_content).map_err(|e| format!("Failed to write LaunchAgent plist: {}", e))?;
+            let _ = Command::new("launchctl").args(["load", &plist_path.to_string_lossy()]).output();
+        } else if plist_path.exists() {
+            let _ = Command::new("launchctl").args(["unload", &plist_path.to_string_lossy()]).output();
+            let _ = std::fs::remove_file(plist_path);
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe_str = exe.to_string_lossy();
+        if on {
+            let output = Command::new("reg")
+                .args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GlideDesk", "/t", "REG_SZ", "/d", &exe_str, "/f"])
+                .output()
+                .map_err(|e| format!("Failed to configure Windows Run registry: {}", e))?;
+            if !output.status.success() {
+                return Err("Failed to register Windows startup key".to_string());
+            }
+        } else {
+            let output = Command::new("reg")
+                .args(["delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GlideDesk", "/f"])
+                .output()
+                .map_err(|e| format!("Failed to delete Windows Run registry: {}", e))?;
+            if !output.status.success() {
+                return Err("Failed to remove Windows startup key".to_string());
+            }
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").map_err(|e| format!("Cannot locate HOME environment: {}", e))?;
+        let autostart_dir = PathBuf::from(home).join(".config/autostart");
+        let desktop_file = autostart_dir.join("glidedesk.desktop");
+        if on {
+            std::fs::create_dir_all(&autostart_dir).map_err(|e| e.to_string())?;
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let content = format!(
+                "[Desktop Entry]\nType=Application\nName=GlideDesk\nExec={}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n",
+                exe.to_string_lossy()
+            );
+            std::fs::write(desktop_file, content).map_err(|e| e.to_string())?;
+        } else if desktop_file.exists() {
+            let _ = std::fs::remove_file(desktop_file);
+        }
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub fn net_wifi(arg: serde_json::Value) -> Result<(), String> {
     log::info!("[Network] net_wifi toggle: {:?}", arg);
-    Ok(())
+    let on = if let Some(b) = arg.as_bool() {
+        b
+    } else if let Some(b) = arg.get("on").and_then(|v| v.as_bool()) {
+        b
+    } else if let Some(s) = arg.get("power").and_then(|v| v.as_str()) {
+        s.eq_ignore_ascii_case("on")
+    } else {
+        true
+    };
+    execute_net_wifi(on)
 }
 
 #[tauri::command]
@@ -533,7 +683,24 @@ pub fn net_join_hotspot(ssid: String, key: String) -> Result<(), String> {
 #[tauri::command]
 pub fn net_cancel() -> Result<(), String> {
     log::info!("[Network] Cancelling pending network operation");
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("killall").arg("airport").output();
+        let _ = output;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("netsh").args(["wlan", "disconnect"]).output();
+        let _ = output;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("nmcli").args(["device", "disconnect"]).output();
+        let _ = output;
+        Ok(())
+    }
 }
 
 // ==========================================
@@ -564,15 +731,16 @@ pub fn open_bluetooth_settings() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn cancel_drop() -> Result<(), String> {
+pub fn cancel_drop(app: AppHandle) -> Result<(), String> {
     log::info!("[Files] File drop cancelled");
+    let _ = app.emit("drop-cancelled", ());
     Ok(())
 }
 
 #[tauri::command]
 pub fn set_startup(on: bool) -> Result<(), String> {
     log::info!("[System] Setting run at startup: {}", on);
-    Ok(())
+    execute_set_startup(on)
 }
 
 #[tauri::command]

@@ -206,6 +206,8 @@ pub struct FeatureToggleState {
     pub send: bool,
     #[serde(default)]
     pub history: Vec<ClipboardItem>,
+    #[serde(default)]
+    pub muted: Vec<String>,
 }
 
 impl Default for FeatureToggleState {
@@ -216,6 +218,7 @@ impl Default for FeatureToggleState {
             enabled: true,
             send: true,
             history: Vec::new(),
+            muted: Vec::new(),
         }
     }
 }
