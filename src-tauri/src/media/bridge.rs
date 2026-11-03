@@ -2,8 +2,8 @@
 // Pure Rust Native OS Bridge Commands (Virtual Display, Audio Capture, Gamepad Emulation)
 
 use crate::media::{AudioEngine, ScreenEngine};
-use crate::network::WireMessage;
-use tauri::{AppHandle, Emitter, State};
+use crate::network::{NetworkManager, WireMessage};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -49,6 +49,9 @@ impl NativeBridgeManager {
                         ..Default::default()
                     };
                     let _ = app_audio.emit("media-audio-stream", &msg);
+                    if let Some(net) = app_audio.try_state::<NetworkManager>() {
+                        net.send_packet(msg).await;
+                    }
                 }
             }
         });
@@ -67,6 +70,9 @@ impl NativeBridgeManager {
                         ..Default::default()
                     };
                     let _ = app_screen.emit("media-screen-stream", &msg);
+                    if let Some(net) = app_screen.try_state::<NetworkManager>() {
+                        net.send_packet(msg).await;
+                    }
                 }
             }
         });
@@ -97,7 +103,7 @@ pub fn stop_screen_streaming(bridge: State<'_, NativeBridgeManager>) {
 
 #[tauri::command]
 pub fn emulate_gamepad_event(button: String, pressed: bool) -> Result<(), String> {
-    log::info!("Pure Rust gamepad emulation: button={}, pressed={}", button, pressed);
+    log::info!("Pure Rust gamepad event emulation: button={}, pressed={}", button, pressed);
     Ok(())
 }
 
