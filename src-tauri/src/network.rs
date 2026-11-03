@@ -1008,12 +1008,16 @@ impl MeshServer {
                 }
             }
             "media.audio" => {
-                if let Some(ref bytes) = pkt.audio_bytes {
+                if !*authenticated.read() {
+                    log::warn!("[Auth] Dropping unauthenticated media.audio packet from {}", peer_addr);
+                } else if let Some(ref bytes) = pkt.audio_bytes {
                     let _ = app.emit("media-audio-received", bytes);
                 }
             }
             "media.screen" => {
-                if let Some(ref frame) = pkt.frame_png {
+                if !*authenticated.read() {
+                    log::warn!("[Auth] Dropping unauthenticated media.screen packet from {}", peer_addr);
+                } else if let Some(ref frame) = pkt.frame_png {
                     let _ = app.emit("media-screen-received", frame);
                 }
             }
