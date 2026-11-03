@@ -2,7 +2,7 @@
 // Pure Rust Native OS Bridge Commands (Virtual Display, Audio Capture, Gamepad Emulation)
 
 use crate::media::{AudioEngine, ScreenEngine};
-use tauri::{AppHandle, State};
+use tauri::State;
 
 pub struct NativeBridgeManager {
     audio_engine: AudioEngine,
