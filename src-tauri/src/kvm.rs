@@ -482,6 +482,32 @@ pub fn probe_display_available(display: Option<&str>) -> Result<(), String> {
     }
 }
 
+pub fn evaluate_linux_session_capability(
+    display: Option<&str>,
+    session_type: Option<&str>,
+) -> (&'static str, &'static str) {
+    match display {
+        None => (
+            "libxdo",
+            "Linux input capture: headless session (DISPLAY not set); remote input injection and local capture unavailable",
+        ),
+        Some(d) if d.trim().is_empty() => (
+            "libxdo",
+            "Linux input capture: headless session (DISPLAY not set); remote input injection and local capture unavailable",
+        ),
+        Some(_) => match session_type {
+            Some("wayland") => (
+                "wayland",
+                "Linux input capture: Wayland session detected; global raw input capture requires X11 session or root uinput privileges",
+            ),
+            _ => (
+                "x11",
+                "Linux input capture: active X11 session (XInput2/libxdo ready)",
+            ),
+        },
+    }
+}
+
 pub fn vk_to_x_keysym_name(vk: u16) -> Option<&'static str> {
     match vk {
         0x08 => Some("BackSpace"),
@@ -2305,6 +2331,18 @@ pub mod hook_engine {
     use super::*;
     pub fn start_hooks(_app: AppHandle, state: AppState, _network: NetworkManager) {
         set_kvm_app_state(state.clone());
+        let display = std::env::var("DISPLAY").ok();
+        let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+        let (helper, message) = evaluate_linux_session_capability(
+            display.as_deref(),
+            session_type.as_deref(),
+        );
+        {
+            let mut inner = state.inner.write();
+            inner.kvm_state.helper = helper.to_string();
+            inner.kvm_state.message = message.to_string();
+        }
+        log::info!("[KVM] {}", message);
         #[cfg(target_os = "linux")]
         {
             if let Err(e) = get_linux_backend() {
@@ -2599,5 +2637,33 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(snap.kvm_state.helper, "libxdo");
         assert_eq!(snap.kvm_state.message, "input injection unavailable: DISPLAY not set");
+    }
+
+    #[test]
+    fn test_evaluate_linux_session_capability() {
+        // Headless DISPLAY None
+        let (helper, msg) = evaluate_linux_session_capability(None, None);
+        assert_eq!(helper, "libxdo");
+        assert!(msg.contains("headless session"));
+
+        // Headless DISPLAY empty
+        let (helper, msg) = evaluate_linux_session_capability(Some("   "), None);
+        assert_eq!(helper, "libxdo");
+        assert!(msg.contains("headless session"));
+
+        // Wayland
+        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), Some("wayland"));
+        assert_eq!(helper, "wayland");
+        assert!(msg.contains("Wayland session detected"));
+
+        // X11
+        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), Some("x11"));
+        assert_eq!(helper, "x11");
+        assert!(msg.contains("active X11 session"));
+
+        // Default with DISPLAY set and no session_type
+        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), None);
+        assert_eq!(helper, "x11");
+        assert!(msg.contains("active X11 session"));
     }
 }
