@@ -796,8 +796,10 @@ pub async fn send_files(
     let dest = resolve_file_dest(target_str, &network.get_active_clients_info())?;
     log::info!("[SendFiles] dest={:?}", dest);
 
-    // 1. Select optimal transfer route from real state inputs
-    let route = crate::transport::route::select_route_for_peer(target.as_deref(), &state, &phone_mgr);
+    // 1. Select optimal transfer route from real state inputs.
+    // Use the same trimmed target the destination resolver saw, otherwise a padded
+    // target ("  peer_b  ") silently falls back to an unrelated peer's route.
+    let route = crate::transport::route::select_route_for_peer(target_str, &state, &phone_mgr);
     log::info!(
         "[SendFiles] Selected route mode={} endpoint={} for {} file(s)",
         route.mode,
@@ -833,7 +835,7 @@ pub async fn send_files(
     }
 
     // 3. Check for existing batch for resume
-    let target_id = target.as_deref().unwrap_or(&dest[0]);
+    let target_id = target_str.unwrap_or(dest[0].as_str());
     let existing_batch_info = {
         let batches = transfer_mgr.batches.read();
         batches.values().find(|b| {

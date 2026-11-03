@@ -702,11 +702,31 @@ impl ClientInfo {
 }
 
 /// Checks whether a packet destination list targets this local node.
+///
+/// `None` means the sender did not address the packet at all (legacy broadcast
+/// semantics); callers decide whether to accept that.
 pub fn is_addressed_to_local(dests: &Option<Vec<String>>, local_id: &str) -> bool {
     match dests {
         None => true,
         Some(list) => list.iter().any(|d| d == local_id),
     }
+}
+
+/// Receiver-side guard for `files.*` packets.
+///
+/// Addressed packets must name this node. Unaddressed packets are still accepted
+/// for compatibility with senders that predate unicast addressing, but they are
+/// logged so the remaining broadcast path is observable instead of silent.
+fn file_packet_targets_local(pkt: &WireMessage, local_id: &str) -> bool {
+    if pkt.d.is_none() {
+        log::warn!(
+            "[Files] {} has no destination list; accepting for legacy broadcast compatibility (local_id={})",
+            pkt.t,
+            local_id
+        );
+        return true;
+    }
+    is_addressed_to_local(&pkt.d, local_id)
 }
 
 /// Resolves a transfer target string to a routing destination list.
@@ -1750,7 +1770,7 @@ impl MeshServer {
                 let _ = app.emit("state-change", &snap);
             }
             "files.batch" => {
-                if !is_addressed_to_local(&pkt.d, local_id) {
+                if !file_packet_targets_local(pkt, local_id) {
                     log::warn!("[Files] Ignoring files.batch not addressed to local peer (dests={:?}, local_id={})", pkt.d, local_id);
                     return;
                 }
@@ -1789,7 +1809,7 @@ impl MeshServer {
                 );
             }
             "files.chunk" => {
-                if !is_addressed_to_local(&pkt.d, local_id) {
+                if !file_packet_targets_local(pkt, local_id) {
                     log::warn!("[Files] Ignoring files.chunk not addressed to local peer (dests={:?}, local_id={})", pkt.d, local_id);
                     return;
                 }
@@ -1903,7 +1923,7 @@ impl MeshServer {
                 );
             }
             "files.done" => {
-                if !is_addressed_to_local(&pkt.d, local_id) {
+                if !file_packet_targets_local(pkt, local_id) {
                     log::warn!("[Files] Ignoring files.done not addressed to local peer (dests={:?}, local_id={})", pkt.d, local_id);
                     return;
                 }
@@ -2021,7 +2041,7 @@ impl MeshServer {
                 }
             }
             "files.cancel" => {
-                if !is_addressed_to_local(&pkt.d, local_id) {
+                if !file_packet_targets_local(pkt, local_id) {
                     log::warn!("[Files] Ignoring files.cancel not addressed to local peer (dests={:?}, local_id={})", pkt.d, local_id);
                     return;
                 }
@@ -3487,5 +3507,34 @@ mod tests {
 
         assert!(rx_b.try_recv().is_ok(), "peer_beta channel must receive packet");
         assert!(rx_c.try_recv().is_err(), "peer_gamma_observer channel must receive NO packets");
+    }
+
+    #[test]
+    fn test_file_packet_guard_addresses_and_legacy_broadcast() {
+        // Addressed packet: only the named receiver accepts it.
+        let addressed = WireMessage {
+            t: "files.chunk".to_string(),
+            d: Some(vec!["peer_beta".to_string()]),
+            ..Default::default()
+        };
+        assert!(file_packet_targets_local(&addressed, "peer_beta"));
+        assert!(!file_packet_targets_local(&addressed, "peer_gamma_observer"));
+
+        // Legacy unaddressed packet: still accepted (compatibility), so a sender
+        // predating unicast addressing keeps working.
+        let legacy = WireMessage {
+            t: "files.batch".to_string(),
+            ..Default::default()
+        };
+        assert!(legacy.d.is_none());
+        assert!(file_packet_targets_local(&legacy, "peer_beta"));
+
+        // Explicit empty destination list matches nobody.
+        let empty = WireMessage {
+            t: "files.done".to_string(),
+            d: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(!file_packet_targets_local(&empty, "peer_beta"));
     }
 }
