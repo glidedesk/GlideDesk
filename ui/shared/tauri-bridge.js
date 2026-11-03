@@ -17,6 +17,48 @@
 
   const invoke = (cmd, args = {}) => core.invoke(cmd, args);
 
+  // WebCodecs H.264 NAL Consumer for Phone Video Frames
+  let phoneVideoDecoder = null;
+  let phoneCanvas = null;
+  let phoneCtx = null;
+
+  function initPhoneVideoDecoder() {
+    if (typeof VideoDecoder === 'undefined') return null;
+    try {
+      const decoder = new VideoDecoder({
+        output: (frame) => {
+          if (!phoneCanvas && typeof document !== 'undefined') {
+            phoneCanvas = document.getElementById('phone-screen') || document.querySelector('canvas.phone-display');
+            if (phoneCanvas) {
+              phoneCtx = phoneCanvas.getContext('2d');
+            }
+          }
+          if (phoneCtx && phoneCanvas) {
+            phoneCanvas.width = frame.displayWidth;
+            phoneCanvas.height = frame.displayHeight;
+            phoneCtx.drawImage(frame, 0, 0);
+          }
+          if (typeof window !== 'undefined' && typeof window.__onPhoneFrame === 'function') {
+            window.__onPhoneFrame(frame);
+          }
+          frame.close();
+        },
+        error: (e) => {
+          console.warn('[GlideDesk] WebCodecs VideoDecoder error:', e);
+        }
+      });
+
+      decoder.configure({
+        codec: 'avc1.42e01f', // H.264 baseline profile
+        optimizeForLatency: true,
+      });
+      return decoder;
+    } catch (err) {
+      console.warn('[GlideDesk] Failed to configure WebCodecs VideoDecoder:', err);
+      return null;
+    }
+  }
+
   const api = {
     getState: () => invoke('get_state'),
     onState: (fn) => {
@@ -56,9 +98,39 @@
     },
     onScreenReceived: (fn) => {
       if (event && event.listen) {
-        event.listen('media-screen-received', (e) => fn(e.payload));
+        event.listen('media-screen-received', (e) => {
+          const payload = e.payload;
+          if (payload && payload.source === 'phone' && payload.data && typeof atob === 'function') {
+            try {
+              if (!phoneVideoDecoder || phoneVideoDecoder.state === 'closed') {
+                phoneVideoDecoder = initPhoneVideoDecoder();
+              }
+              if (phoneVideoDecoder && phoneVideoDecoder.state === 'configured' && typeof EncodedVideoChunk !== 'undefined') {
+                const rawBin = atob(payload.data);
+                const bytes = new Uint8Array(rawBin.length);
+                for (let i = 0; i < rawBin.length; i++) {
+                  bytes[i] = rawBin.charCodeAt(i);
+                }
+                const isKey = (bytes[4] & 0x1f) === 7 || (bytes[4] & 0x1f) === 5;
+                const chunk = new EncodedVideoChunk({
+                  type: isKey ? 'key' : 'delta',
+                  timestamp: payload.pts || (performance.now() * 1000),
+                  data: bytes,
+                });
+                phoneVideoDecoder.decode(chunk);
+              }
+            } catch (decErr) {
+              // Frame decoding error caught
+            }
+          }
+          fn(payload);
+        });
       }
     },
+    getPhoneFrameConsumer: () => ({
+      getDecoder: () => phoneVideoDecoder,
+      setRenderer: (fn) => { window.__onPhoneFrame = fn; },
+    }),
     onPortConflict: (fn) => {
       if (event && event.listen) {
         event.listen('port-conflict', (e) => fn(e.payload));
