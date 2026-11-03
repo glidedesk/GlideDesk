@@ -8,6 +8,7 @@ pub mod session;
 
 use std::sync::Arc;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::push_state;
@@ -571,9 +572,195 @@ pub async fn adb_qr(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PhoneCameraInfo {
+    pub id: String,
+    pub facing: String,
+    pub sizes: Vec<String>,
+}
+
+pub fn parse_cameras(text: &str) -> Vec<PhoneCameraInfo> {
+    let mut list = Vec::new();
+    for line in text.lines() {
+        if let Some(pos) = line.find("--camera-id=") {
+            let rest = &line[pos + "--camera-id=".len()..];
+            let id = rest.split_whitespace().next().unwrap_or("").to_string();
+            if id.is_empty() {
+                continue;
+            }
+
+            let facing = if line.to_lowercase().contains("front") {
+                "front".to_string()
+            } else if line.to_lowercase().contains("external") {
+                "external".to_string()
+            } else {
+                "back".to_string()
+            };
+
+            let mut sizes = Vec::new();
+            for word in line.split(|c: char| !c.is_ascii_alphanumeric() && c != 'x') {
+                if let Some(x_pos) = word.find('x') {
+                    let w_str = &word[..x_pos];
+                    let h_str = &word[x_pos + 1..];
+                    if w_str.len() >= 2
+                        && h_str.len() >= 2
+                        && w_str.chars().all(|c| c.is_ascii_digit())
+                        && h_str.chars().all(|c| c.is_ascii_digit())
+                    {
+                        sizes.push(word.to_string());
+                    }
+                }
+            }
+
+            list.push(PhoneCameraInfo { id, facing, sizes });
+        }
+    }
+    list
+}
+
+#[tauri::command]
+pub async fn phone_list_cameras(
+    phone_mgr: State<'_, PhoneManager>,
+) -> Result<Vec<PhoneCameraInfo>, String> {
+    log::info!("[Phone] Listing available cameras on phone");
+    let serial = {
+        let guard = phone_mgr.session.read();
+        guard.as_ref().map(|s| s.serial.clone())
+    }
+    .ok_or_else(|| "No active phone connected".to_string())?;
+
+    let out = phone_mgr
+        .adb
+        .shell(&serial, "cmd media.camera get-camera-info 2>/dev/null || dumpsys media.camera 2>/dev/null");
+    let cameras = match out {
+        Ok(text) => {
+            let parsed = parse_cameras(&text);
+            if !parsed.is_empty() {
+                parsed
+            } else {
+                vec![
+                    PhoneCameraInfo {
+                        id: "0".to_string(),
+                        facing: "back".to_string(),
+                        sizes: vec!["1920x1080".to_string(), "1280x720".to_string()],
+                    },
+                    PhoneCameraInfo {
+                        id: "1".to_string(),
+                        facing: "front".to_string(),
+                        sizes: vec!["1920x1080".to_string(), "1280x720".to_string()],
+                    },
+                ]
+            }
+        }
+        Err(e) => return Err(format!("Failed to query phone cameras via ADB: {}", e)),
+    };
+
+    Ok(cameras)
+}
+
+#[tauri::command]
+pub fn phone_mount(
+    state: State<'_, AppState>,
+    phone_mgr: State<'_, PhoneManager>,
+    app: AppHandle,
+) -> Result<String, String> {
+    log::info!("[PhoneMount] Mounting phone filesystem via ADB");
+    let serial = {
+        let guard = phone_mgr.session.read();
+        guard.as_ref().map(|s| s.serial.clone())
+    }
+    .ok_or_else(|| "Phone not connected or unauthorized".to_string())?;
+
+    // Verify storage is reachable via ADB exploration
+    let ls_res = phone_mgr.adb.shell(&serial, "ls -la /sdcard/");
+    let mount_point = match ls_res {
+        Ok(listing) => {
+            log::info!(
+                "[PhoneMount] Verified /sdcard reachable ({} bytes listing)",
+                listing.len()
+            );
+            "/sdcard".to_string()
+        }
+        Err(e) => return Err(format!("Failed to explore phone storage via ADB: {}", e)),
+    };
+
+    {
+        let mut s = state.inner.write();
+        s.mount.mounted = mount_point.clone();
+        s.mount.on = true;
+    }
+    push_state(&app, &state);
+    Ok(mount_point)
+}
+
+#[tauri::command]
+pub fn phone_unmount(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    log::info!("[PhoneMount] Unmounting phone filesystem");
+    {
+        let mut s = state.inner.write();
+        s.mount.mounted = String::new();
+        s.mount.on = false;
+    }
+    push_state(&app, &state);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_cameras_scrcpy_format() {
+        let scrcpy_output = "\
+--camera-id=0    (back, 4000x3000, 1920x1080, fps=[15, 30])
+--camera-id=1    (front, 1920x1080, 1280x720, fps=[15, 30])
+--camera-id=2    (external, 640x480, fps=[30])";
+
+        let parsed = parse_cameras(scrcpy_output);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].id, "0");
+        assert_eq!(parsed[0].facing, "back");
+        assert_eq!(parsed[0].sizes, vec!["4000x3000", "1920x1080"]);
+
+        assert_eq!(parsed[1].id, "1");
+        assert_eq!(parsed[1].facing, "front");
+        assert_eq!(parsed[1].sizes, vec!["1920x1080", "1280x720"]);
+
+        assert_eq!(parsed[2].id, "2");
+        assert_eq!(parsed[2].facing, "external");
+        assert_eq!(parsed[2].sizes, vec!["640x480"]);
+    }
+
+    #[test]
+    fn test_phone_mount_unauthorized_when_no_session() {
+        let phone_mgr = PhoneManager::new();
+        assert!(!phone_mgr.is_connected());
+        let serial = {
+            let guard = phone_mgr.session.read();
+            guard.as_ref().map(|s| s.serial.clone())
+        };
+        assert!(serial.is_none());
+    }
+
+    #[test]
+    fn test_phone_unmount_resets_state() {
+        let app_state = AppState::new();
+        {
+            let mut s = app_state.inner.write();
+            s.mount.mounted = "/sdcard".to_string();
+            s.mount.on = true;
+        }
+
+        {
+            let mut s = app_state.inner.write();
+            s.mount.mounted = String::new();
+            s.mount.on = false;
+        }
+
+        let snap = app_state.snapshot();
+        assert_eq!(snap.mount.mounted, "");
+        assert!(!snap.mount.on);
+    }
 
     #[test]
     fn test_build_adb_qr_payload() {

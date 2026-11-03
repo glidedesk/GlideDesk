@@ -298,6 +298,7 @@
     phoneBtPick: () => invoke('phone_bt_pick'),
     phoneCloseView: () => invoke('phone_close_view'),
     phoneInstallFull: () => invoke('phone_install_full'),
+    phoneListCameras: () => invoke('phone_list_cameras'),
     phoneMedia: (action) => {
       const act = typeof action === 'object' && action ? (action.a || JSON.stringify(action)) : String(action || '');
       return invoke('phone_media', { action: act });

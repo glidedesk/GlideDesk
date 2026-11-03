@@ -235,28 +235,6 @@ pub fn reset_received_folder() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn phone_mount(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    log::info!("[Mount] Mounting phone filesystem");
-    {
-        let mut s = state.inner.write();
-        s.mount.mounted = "phone".to_string();
-    }
-    push_state(&app, &state);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn phone_unmount(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    log::info!("[Mount] Unmounting phone filesystem");
-    {
-        let mut s = state.inner.write();
-        s.mount.mounted = String::new();
-    }
-    push_state(&app, &state);
-    Ok(())
-}
-
-#[tauri::command]
 pub fn set_mount(partial: serde_json::Value, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     log::info!("[Mount] set_mount: {:?}", partial);
     {
