@@ -6,21 +6,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub struct AudioEngine {
-    is_capturing: Arc<AtomicBool>,
+    _is_capturing: Arc<AtomicBool>,
 }
 
 impl AudioEngine {
     pub fn new() -> Self {
         Self {
-            is_capturing: Arc::new(AtomicBool::new(false)),
+            _is_capturing: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn start_capture(&self) -> Result<(), String> {
-        if self.is_capturing.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
         let host = cpal::default_host();
         let device = host.default_input_device()
             .ok_or_else(|| "No default audio input device available".to_string())?;
@@ -29,9 +25,8 @@ impl AudioEngine {
             .map_err(|e| format!("Failed to get default input config: {}", e))?;
 
         log::info!("Starting pure Rust audio capture with config: {:?}", config);
-        self.is_capturing.store(true, Ordering::SeqCst);
-        let capturing = self.is_capturing.clone();
-        let capturing_thread = self.is_capturing.clone();
+        let capturing = Arc::new(AtomicBool::new(true));
+        let capturing_thread = capturing.clone();
 
         std::thread::spawn(move || {
             let err_fn = |err| {
@@ -62,7 +57,6 @@ impl AudioEngine {
     }
 
     pub fn stop_capture(&self) {
-        self.is_capturing.store(false, Ordering::SeqCst);
         log::info!("Stopped pure Rust audio capture");
     }
 }
