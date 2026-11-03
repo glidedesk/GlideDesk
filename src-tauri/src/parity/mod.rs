@@ -101,3 +101,6 @@ pub fn phone_mount() -> Result<(), String> { Ok(()) }
 
 #[tauri::command]
 pub fn phone_unmount() -> Result<(), String> { Ok(()) }
+
+#[cfg(test)]
+mod tests;
