@@ -21,6 +21,140 @@ pub fn validate_media_action(action: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Pure parser for Windows System Media Transport Controls (SMTC) JSON.
+pub fn parse_smtc_json(json_str: &str) -> Result<NowPlayingState, String> {
+    let trimmed = json_str.trim();
+    if trimmed.is_empty() {
+        return Err("No active media session".to_string());
+    }
+    let val: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|e| format!("Failed to parse SMTC JSON: {}", e))?;
+
+    let title = val.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if title.is_empty() {
+        return Err("No active media session".to_string());
+    }
+    let artist = val.get("artist").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let album = val.get("album").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let playing = val.get("playing").and_then(|v| v.as_bool()).unwrap_or(false);
+    let duration = val.get("duration").and_then(|v| v.as_u64()).unwrap_or(0);
+    let position = val.get("position").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    Ok(NowPlayingState {
+        app: "System SMTC".to_string(),
+        app_name: "Windows Media".to_string(),
+        title,
+        artist,
+        album,
+        playing,
+        duration,
+        position,
+        speed: 1.0,
+        next: true,
+        prev: true,
+        seek: true,
+        art: String::new(),
+    })
+}
+
+/// Pure parser for Linux playerctl MPRIS CLI output.
+pub fn parse_playerctl_output(text: &str) -> Result<NowPlayingState, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("No active media session".to_string());
+    }
+    let parts: Vec<&str> = trimmed.split(":::").collect();
+    if parts.len() < 4 {
+        return Err("Malformed playerctl output".to_string());
+    }
+    let title = parts[0].trim().to_string();
+    if title.is_empty() {
+        return Err("No active media session".to_string());
+    }
+    let artist = parts[1].trim().to_string();
+    let album = parts[2].trim().to_string();
+    let playing = parts[3].trim().eq_ignore_ascii_case("Playing");
+    let position = if parts.len() > 4 {
+        parts[4].trim().parse::<u64>().unwrap_or(0)
+    } else {
+        0
+    };
+    let duration = if parts.len() > 5 {
+        parts[5].trim().parse::<u64>().unwrap_or(0)
+    } else {
+        0
+    };
+
+    Ok(NowPlayingState {
+        app: "MPRIS".to_string(),
+        app_name: "Linux Media".to_string(),
+        title,
+        artist,
+        album,
+        playing,
+        duration,
+        position,
+        speed: 1.0,
+        next: true,
+        prev: true,
+        seek: true,
+        art: String::new(),
+    })
+}
+
+/// Pure parser for macOS AppleScript / JXA output formatted as:
+/// `app:::title:::artist:::album:::playing:::pos:::dur`
+pub fn parse_macos_media_output(text: &str) -> Result<NowPlayingState, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("No active media session".to_string());
+    }
+    let parts: Vec<&str> = trimmed.split(":::").collect();
+    if parts.len() < 5 {
+        return Err("Malformed macOS media output".to_string());
+    }
+    let app = parts[0].trim();
+    let title = parts[1].trim().to_string();
+    if title.is_empty() {
+        return Err("No active media session".to_string());
+    }
+    let artist = parts[2].trim().to_string();
+    let album = parts[3].trim().to_string();
+    let playing = parts[4].trim().eq_ignore_ascii_case("playing") || parts[4].trim() == "true";
+    let position = if parts.len() > 5 {
+        parts[5].trim().parse::<f64>().map(|v| v as u64).unwrap_or(0)
+    } else {
+        0
+    };
+    let duration = if parts.len() > 6 {
+        parts[6].trim().parse::<f64>().map(|v| v as u64).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let app_name = match app {
+        "Music" => "Apple Music",
+        "Spotify" => "Spotify",
+        other => other,
+    };
+
+    Ok(NowPlayingState {
+        app: app.to_string(),
+        app_name: app_name.to_string(),
+        title,
+        artist,
+        album,
+        playing,
+        duration,
+        position,
+        speed: 1.0,
+        next: true,
+        prev: true,
+        seek: true,
+        art: String::new(),
+    })
+}
+
 /// Query current now-playing status from local OS or active session.
 #[tauri::command]
 pub fn get_now_playing(state: State<'_, AppState>) -> Result<NowPlayingState, String> {
@@ -29,7 +163,48 @@ pub fn get_now_playing(state: State<'_, AppState>) -> Result<NowPlayingState, St
         return Ok(np.clone());
     }
 
-    // Attempt platform query if available
+    #[cfg(target_os = "macos")]
+    {
+        let script = r#"
+            function run() {
+                var se = Application("System Events");
+                var procs = se.processes.name();
+                if (procs.indexOf("Music") !== -1) {
+                    try {
+                        var m = Application("Music");
+                        var state = m.playerState();
+                        if (state !== "stopped") {
+                            var tr = m.currentTrack;
+                            return "Music:::" + tr.name() + ":::" + tr.artist() + ":::" + tr.album() + ":::" + state + ":::" + Math.floor(m.playerPosition()) + ":::" + Math.floor(tr.duration());
+                        }
+                    } catch(e) {}
+                }
+                if (procs.indexOf("Spotify") !== -1) {
+                    try {
+                        var s = Application("Spotify");
+                        var state = s.playerState();
+                        if (state !== "stopped") {
+                            var tr = s.currentTrack;
+                            return "Spotify:::" + tr.name() + ":::" + tr.artist() + ":::" + tr.album() + ":::" + state + ":::" + Math.floor(s.playerPosition()) + ":::" + Math.floor(tr.duration() / 1000);
+                        }
+                    } catch(e) {}
+                }
+                return "";
+            }
+        "#;
+        if let Ok(output) = std::process::Command::new("osascript")
+            .args(["-l", "JavaScript", "-e", script])
+            .output()
+        {
+            if output.status.success() {
+                let out_str = String::from_utf8_lossy(&output.stdout);
+                if let Ok(np) = parse_macos_media_output(&out_str) {
+                    return Ok(np);
+                }
+            }
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
         let script = r#"
@@ -58,23 +233,9 @@ pub fn get_now_playing(state: State<'_, AppState>) -> Result<NowPlayingState, St
             .output()
         {
             if output.status.success() {
-                let out_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&out_str) {
-                    return Ok(NowPlayingState {
-                        app: "System SMTC".to_string(),
-                        app_name: "Windows Media".to_string(),
-                        title: val.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        artist: val.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        album: val.get("album").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        playing: val.get("playing").and_then(|v| v.as_bool()).unwrap_or(false),
-                        duration: val.get("duration").and_then(|v| v.as_u64()).unwrap_or(0),
-                        position: val.get("position").and_then(|v| v.as_u64()).unwrap_or(0),
-                        speed: 1.0,
-                        next: true,
-                        prev: true,
-                        seek: true,
-                        art: String::new(),
-                    });
+                let out_str = String::from_utf8_lossy(&output.stdout);
+                if let Ok(np) = parse_smtc_json(&out_str) {
+                    return Ok(np);
                 }
             }
         }
@@ -83,28 +244,13 @@ pub fn get_now_playing(state: State<'_, AppState>) -> Result<NowPlayingState, St
     #[cfg(target_os = "linux")]
     {
         if let Ok(output) = std::process::Command::new("playerctl")
-            .args(["metadata", "--format", "{{title}}:::{{artist}}:::{{album}}:::{{status}}"])
+            .args(["metadata", "--format", "{{title}}:::{{artist}}:::{{album}}:::{{status}}:::{{position}}:::{{mpris:length}}"])
             .output()
         {
             if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let parts: Vec<&str> = text.split(":::").collect();
-                if parts.len() >= 4 {
-                    return Ok(NowPlayingState {
-                        app: "MPRIS".to_string(),
-                        app_name: "Linux Media".to_string(),
-                        title: parts[0].to_string(),
-                        artist: parts[1].to_string(),
-                        album: parts[2].to_string(),
-                        playing: parts[3].eq_ignore_ascii_case("Playing"),
-                        duration: 0,
-                        position: 0,
-                        speed: 1.0,
-                        next: true,
-                        prev: true,
-                        seek: true,
-                        art: String::new(),
-                    });
+                let text = String::from_utf8_lossy(&output.stdout);
+                if let Ok(np) = parse_playerctl_output(&text) {
+                    return Ok(np);
                 }
             }
         }
@@ -250,5 +396,70 @@ mod tests {
         let pos_some = Some(45);
         let is_valid_with_pos = canonical != "seek" || pos_some.is_some();
         assert!(is_valid_with_pos);
+    }
+
+    #[test]
+    fn test_parse_smtc_json_valid_and_empty() {
+        let fixture = r#"{
+            "title": "Comfortably Numb",
+            "artist": "Pink Floyd",
+            "album": "The Wall",
+            "playing": true,
+            "position": 142,
+            "duration": 382
+        }"#;
+        let np = parse_smtc_json(fixture).expect("valid smtc json");
+        assert_eq!(np.title, "Comfortably Numb");
+        assert_eq!(np.artist, "Pink Floyd");
+        assert_eq!(np.album, "The Wall");
+        assert!(np.playing);
+        assert_eq!(np.position, 142);
+        assert_eq!(np.duration, 382);
+        assert_eq!(np.app_name, "Windows Media");
+
+        // Empty json or empty title returns Err
+        assert!(parse_smtc_json("").is_err());
+        assert!(parse_smtc_json(r#"{"title": ""}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_playerctl_output_valid_and_empty() {
+        let fixture = "Stairway to Heaven:::Led Zeppelin:::Led Zeppelin IV:::Playing:::180:::482";
+        let np = parse_playerctl_output(fixture).expect("valid playerctl output");
+        assert_eq!(np.title, "Stairway to Heaven");
+        assert_eq!(np.artist, "Led Zeppelin");
+        assert_eq!(np.album, "Led Zeppelin IV");
+        assert!(np.playing);
+        assert_eq!(np.position, 180);
+        assert_eq!(np.duration, 482);
+        assert_eq!(np.app_name, "Linux Media");
+
+        // Empty or short returns Err
+        assert!(parse_playerctl_output("").is_err());
+        assert!(parse_playerctl_output("Too:::Few").is_err());
+    }
+
+    #[test]
+    fn test_parse_macos_media_output_valid_and_empty() {
+        let fixture_music = "Music:::Get Back:::The Beatles:::Let It Be:::playing:::45:::192";
+        let np_music = parse_macos_media_output(fixture_music).expect("valid music output");
+        assert_eq!(np_music.app, "Music");
+        assert_eq!(np_music.app_name, "Apple Music");
+        assert_eq!(np_music.title, "Get Back");
+        assert_eq!(np_music.artist, "The Beatles");
+        assert_eq!(np_music.album, "Let It Be");
+        assert!(np_music.playing);
+        assert_eq!(np_music.position, 45);
+        assert_eq!(np_music.duration, 192);
+
+        let fixture_spotify = "Spotify:::Starboy:::The Weeknd:::Starboy:::playing:::60:::230";
+        let np_spot = parse_macos_media_output(fixture_spotify).expect("valid spotify output");
+        assert_eq!(np_spot.app, "Spotify");
+        assert_eq!(np_spot.app_name, "Spotify");
+        assert_eq!(np_spot.title, "Starboy");
+        assert!(np_spot.playing);
+
+        assert!(parse_macos_media_output("").is_err());
+        assert!(parse_macos_media_output("Music:::").is_err());
     }
 }
