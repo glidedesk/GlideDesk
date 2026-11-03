@@ -76,13 +76,24 @@ pub async fn notif_reply(
             })
             .await;
 
-        // If active phone session, route via ADB if needed
+        // If active phone session, route via ADB
         let active_serial = {
             let s_guard = phone_mgr.session.read();
             s_guard.as_ref().map(|s| s.serial.clone())
         };
 
-        if active_serial.is_none() && !has_conv && notif_id.is_none() {
+        if let Some(ref serial) = active_serial {
+            let escaped_text = clean_text
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace(' ', "%s");
+            let cmd = format!("input text \"{}\"", escaped_text);
+            if let Err(e) = phone_mgr.adb.shell(serial, &cmd) {
+                log::warn!("[Chat] ADB input text reply returned: {}", e);
+            } else {
+                log::info!("[Chat] Injected chat reply via ADB on device '{}'", serial);
+            }
+        } else if !has_conv && notif_id.is_none() {
             return Err("No active peer or phone connection to reply to chat".to_string());
         }
 
@@ -95,10 +106,25 @@ pub async fn notif_reply(
             .send_packet(crate::network::WireMessage {
                 t: "notif.reply".to_string(),
                 id: Some(notif_id),
-                text: Some(clean_text),
+                text: Some(clean_text.clone()),
                 ..Default::default()
             })
             .await;
+
+        let active_serial = {
+            let s_guard = phone_mgr.session.read();
+            s_guard.as_ref().map(|s| s.serial.clone())
+        };
+
+        if let Some(ref serial) = active_serial {
+            let escaped_text = clean_text
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace(' ', "%s");
+            let cmd = format!("input text \"{}\"", escaped_text);
+            let _ = phone_mgr.adb.shell(serial, &cmd);
+        }
+
         return Ok(());
     }
 

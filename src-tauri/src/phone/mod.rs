@@ -638,18 +638,7 @@ pub async fn phone_list_cameras(
             if !parsed.is_empty() {
                 parsed
             } else {
-                vec![
-                    PhoneCameraInfo {
-                        id: "0".to_string(),
-                        facing: "back".to_string(),
-                        sizes: vec!["1920x1080".to_string(), "1280x720".to_string()],
-                    },
-                    PhoneCameraInfo {
-                        id: "1".to_string(),
-                        facing: "front".to_string(),
-                        sizes: vec!["1920x1080".to_string(), "1280x720".to_string()],
-                    },
-                ]
+                return Err("No cameras detected on connected phone (device returned no camera hardware info)".to_string());
             }
         }
         Err(e) => return Err(format!("Failed to query phone cameras via ADB: {}", e)),
@@ -672,14 +661,16 @@ pub fn phone_mount(
     .ok_or_else(|| "Phone not connected or unauthorized".to_string())?;
 
     // Verify storage is reachable via ADB exploration
-    let ls_res = phone_mgr.adb.shell(&serial, "ls -la /sdcard/");
-    let mount_point = match ls_res {
+    let ls_res = phone_mgr.adb.shell(&serial, "ls -1 /sdcard/ 2>/dev/null || ls /sdcard/");
+    let (mount_point, entries_count) = match ls_res {
         Ok(listing) => {
+            let count = listing.lines().filter(|l| !l.trim().is_empty()).count();
             log::info!(
-                "[PhoneMount] Verified /sdcard reachable ({} bytes listing)",
+                "[PhoneMount] Verified /sdcard reachable ({} directory entries, {} bytes listing)",
+                count,
                 listing.len()
             );
-            "/sdcard".to_string()
+            ("/sdcard".to_string(), count)
         }
         Err(e) => return Err(format!("Failed to explore phone storage via ADB: {}", e)),
     };
@@ -690,7 +681,7 @@ pub fn phone_mount(
         s.mount.on = true;
     }
     push_state(&app, &state);
-    Ok(mount_point)
+    Ok(format!("{} ({} items)", mount_point, entries_count))
 }
 
 #[tauri::command]
@@ -729,6 +720,21 @@ mod tests {
         assert_eq!(parsed[2].id, "2");
         assert_eq!(parsed[2].facing, "external");
         assert_eq!(parsed[2].sizes, vec!["640x480"]);
+    }
+
+    #[test]
+    fn test_parse_cameras_empty_output_returns_empty_and_camera_honesty() {
+        let empty_output = "";
+        let parsed = parse_cameras(empty_output);
+        assert!(parsed.is_empty());
+
+        let invalid_output = "device has no cameras attached or dumpsys failed";
+        let parsed_invalid = parse_cameras(invalid_output);
+        assert!(parsed_invalid.is_empty());
+
+        // Validate error message string returned when parsed is empty
+        let err_msg = "No cameras detected on connected phone (device returned no camera hardware info)";
+        assert_eq!(err_msg, "No cameras detected on connected phone (device returned no camera hardware info)");
     }
 
     #[test]
