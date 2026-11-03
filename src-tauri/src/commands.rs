@@ -776,14 +776,6 @@ pub fn forget(_id: String, state: State<'_, AppState>, app: AppHandle) -> Result
 }
 
 #[tauri::command]
-pub fn wake_peer(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    log::info!("Waking peer via Wake-on-LAN: {}", id);
-    let _s = state.inner.read();
-    // In local network discovery without persisted MAC arp table, return Err if no MAC recorded
-    Err(format!("No MAC address recorded for peer '{}'", id))
-}
-
-#[tauri::command]
 pub async fn send_files(files: Vec<String>, target: Option<String>, network: State<'_, NetworkManager>) -> Result<(), String> {
     let msg = crate::network::WireMessage {
         t: "files.batch".to_string(),

@@ -23,6 +23,7 @@ pub mod window_manager;
 pub mod chat;
 pub mod rezume;
 pub mod media_playback;
+pub mod wol;
 
 use media::NativeBridgeManager;
 
@@ -127,7 +128,7 @@ fn main() {
             commands::confirm_code,
             commands::cancel_pair,
             commands::forget,
-            commands::wake_peer,
+            wol::wake_peer,
             commands::get_displays,
             commands::send_files,
             commands::choose_send_files,
@@ -193,7 +194,7 @@ fn main() {
             parity::set_pc_screen,
             parity::set_phone_remote,
             parity::set_startup,
-            parity::set_wake,
+            wol::set_wake,
             parity::setup_sshd,
             parity::fix_firewall,
             parity::net_wifi,

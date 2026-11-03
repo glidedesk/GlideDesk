@@ -763,17 +763,6 @@ pub fn set_startup(on: bool) -> Result<(), String> {
     execute_set_startup(on)
 }
 
-#[tauri::command]
-pub fn set_wake(on: bool, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    log::info!("[System] Setting wake-on-LAN: {}", on);
-    {
-        let mut s = state.inner.write();
-        s.wake.waking = if on { Some("active".to_string()) } else { None };
-    }
-    push_state(&app, &state);
-    Ok(())
-}
-
 pub fn get_settings_url(kind: &str) -> Option<&'static str> {
     match kind {
         "screen" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
