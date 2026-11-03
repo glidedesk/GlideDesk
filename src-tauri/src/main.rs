@@ -9,6 +9,7 @@
 
 mod commands;
 mod kvm;
+mod media;
 mod network;
 mod state;
 mod tray;
