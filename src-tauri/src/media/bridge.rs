@@ -103,13 +103,45 @@ pub fn stop_screen_streaming(bridge: State<'_, NativeBridgeManager>) {
 }
 
 #[tauri::command]
-pub fn emulate_gamepad_event(button: String, pressed: bool) -> Result<(), String> {
+pub fn emulate_gamepad_event(
+    button: String,
+    pressed: bool,
+    app: AppHandle,
+) -> Result<(), String> {
     log::info!("Pure Rust gamepad event emulation: button={}, pressed={}", button, pressed);
+    let pkt = WireMessage {
+        t: "gamepad.event".to_string(),
+        k: Some(button),
+        b: Some(if pressed { 1 } else { 0 }),
+        ..Default::default()
+    };
+    if let Some(net) = app.try_state::<NetworkManager>() {
+        net.send_packet_sync(pkt);
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub fn create_virtual_display(width: u32, height: u32) -> Result<(), String> {
     log::info!("Pure Rust virtual display creation: {}x{}", width, height);
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        let has_vdd = std::path::Path::new("/Library/CoreMediaIO/Plug-Ins/DAL").exists();
+        if !has_vdd {
+            return Err("Virtual display driver not installed on host macOS system".to_string());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let driver_path = std::path::Path::new("C:\\Windows\\System32\\drivers\\IddCx.sys");
+        if !driver_path.exists() {
+            return Err("Virtual display driver (IddCx) not installed on host Windows system".to_string());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Err("Virtual display driver not supported on Linux".to_string())
+    }
 }

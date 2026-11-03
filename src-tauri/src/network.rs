@@ -1122,7 +1122,7 @@ impl MeshServer {
             "k.mm" | "remote.mm" | "k.md" | "remote.md" | "k.mu" | "remote.mu"
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
                 | "clip" | "clip.image" | "kvm.take" | "window.handoff.offer"
-                | "window.handoff.return"
+                | "window.handoff.return" | "gamepad.event"
                 if !*authenticated.read() =>
             {
                 log::warn!(
@@ -1247,6 +1247,10 @@ impl MeshServer {
                         let _ = win.hide();
                     }
                 }
+            }
+            "gamepad.event" => {
+                log::info!("[Gamepad] Inbound gamepad event from {}: button={:?}, pressed={:?}", peer_addr, pkt.k, pkt.b);
+                let _ = app.emit("gamepad-event", &pkt);
             }
             _ => {}
         }
@@ -1952,6 +1956,7 @@ impl NetworkManager {
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
                 | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
+                | "gamepad.event"
         );
 
         let guard = self.active_clients.read();
@@ -1992,6 +1997,7 @@ impl NetworkManager {
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
                 | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
+                | "gamepad.event"
         );
 
         let senders: Vec<mpsc::Sender<WireMessage>> = {
