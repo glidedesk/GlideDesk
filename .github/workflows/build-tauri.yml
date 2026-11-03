@@ -88,7 +88,9 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml -- --nocapture
 
       - name: Run JS Protocol Test Suites
-        run: node scripts/test-all.js --js
+        run: |
+          node scripts/test-all.js --js
+          node scripts/e2e/simulate-features.js
 
       - name: Build Tauri Package (Linux)
         if: matrix.platform == 'ubuntu-22.04'
