@@ -654,32 +654,102 @@ pub async fn pair_respond(allowed: bool, network: State<'_, NetworkManager>) -> 
 }
 
 #[tauri::command]
-pub fn set_app(_partial: Value) -> Result<(), String> {
+pub fn set_app(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    log::info!("Updating application settings: {:?}", partial);
+    {
+        let mut s = state.inner.write();
+        if let Some(audio) = partial.get("audio") {
+            if let Some(b) = audio.get("receive").and_then(|v| v.as_bool()) { s.audio.receive = b; }
+            if let Some(b) = audio.get("share").and_then(|v| v.as_bool()) { s.audio.share = b; }
+            if let Some(b) = audio.get("send").and_then(|v| v.as_bool()) { s.audio.send = b; }
+        }
+        if let Some(files) = partial.get("files") {
+            if let Some(b) = files.get("receive").and_then(|v| v.as_bool()) { s.files.receive = b; }
+            if let Some(b) = files.get("share").and_then(|v| v.as_bool()) { s.files.share = b; }
+            if let Some(p) = files.get("path").and_then(|v| v.as_str()) { s.files.path = p.to_string(); }
+        }
+        if let Some(notifs) = partial.get("notifs") {
+            if let Some(b) = notifs.get("enabled").and_then(|v| v.as_bool()) { s.notifs.enabled = b; }
+            if let Some(b) = notifs.get("receive").and_then(|v| v.as_bool()) { s.notifs.receive = b; }
+        }
+        if let Some(terminal) = partial.get("terminal") {
+            if let Some(t) = terminal.get("theme").and_then(|v| v.as_str()) { s.terminal.theme = t.to_string(); }
+        }
+        if let Some(mode) = partial.get("mode").and_then(|v| v.as_str()) {
+            s.pc_screen.mode = mode.to_string();
+        }
+        if let Some(allow) = partial.get("allow").and_then(|v| v.as_bool()) {
+            s.pc_apps.allow = allow;
+        }
+        if let Some(on) = partial.get("on").and_then(|v| v.as_bool()) {
+            s.audio.enabled = on;
+        }
+    }
+    push_state(&app, &state);
     Ok(())
 }
 
 #[tauri::command]
-pub fn set_monitor(_partial: Value) -> Result<(), String> {
+pub fn set_monitor(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    log::info!("Updating monitor configuration: {:?}", partial);
+    {
+        let mut s = state.inner.write();
+        if let Some(mode) = partial.get("mode").and_then(|v| v.as_str()) {
+            s.pc_screen.mode = mode.to_string();
+        }
+    }
+    push_state(&app, &state);
     Ok(())
 }
 
 #[tauri::command]
-pub fn copy_history(_index: usize) -> Result<(), String> {
+pub fn copy_history(index: usize, state: State<'_, AppState>) -> Result<(), String> {
+    log::info!("Copying clipboard history item at index {}", index);
+    let s = state.inner.read();
+    if s.clipboard.history.is_empty() {
+        return Err("Clipboard history is empty".to_string());
+    }
+    if index < s.clipboard.history.len() {
+        let item = &s.clipboard.history[index];
+        let mut cb = crate::kvm::NativeClipboard::new();
+        cb.set_text(&item.text);
+        Ok(())
+    } else {
+        Err(format!("Clipboard history index {} out of bounds (len: {})", index, s.clipboard.history.len()))
+    }
+}
+
+#[tauri::command]
+pub fn clear_history(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    log::info!("Clearing clipboard history");
+    {
+        let mut s = state.inner.write();
+        s.clipboard.history.clear();
+    }
+    push_state(&app, &state);
     Ok(())
 }
 
 #[tauri::command]
-pub fn clear_history() -> Result<(), String> {
+pub fn set_multi(on: bool, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    log::info!("Setting multi-device mesh mode: enabled={}", on);
+    {
+        let mut s = state.inner.write();
+        s.multi.enabled = on;
+    }
+    push_state(&app, &state);
     Ok(())
 }
 
 #[tauri::command]
-pub fn set_multi(_on: bool) -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-pub fn skip_setup() -> Result<(), String> {
+pub fn skip_setup(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    log::info!("Skipping setup onboarding dialog");
+    {
+        let mut s = state.inner.write();
+        s.setup.show = false;
+        s.setup.missing.clear();
+    }
+    push_state(&app, &state);
     Ok(())
 }
 
@@ -706,8 +776,11 @@ pub fn forget(_id: String, state: State<'_, AppState>, app: AppHandle) -> Result
 }
 
 #[tauri::command]
-pub fn wake_peer(_id: String) -> Result<(), String> {
-    Ok(())
+pub fn wake_peer(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    log::info!("Waking peer via Wake-on-LAN: {}", id);
+    let _s = state.inner.read();
+    // In local network discovery without persisted MAC arp table, return Err if no MAC recorded
+    Err(format!("No MAC address recorded for peer '{}'", id))
 }
 
 #[tauri::command]
@@ -733,8 +806,68 @@ pub async fn send_wire_message(
 }
 
 #[tauri::command]
-pub fn choose_send_files() -> Result<(), String> {
-    Ok(())
+pub fn choose_send_files(app: AppHandle) -> Result<Vec<String>, String> {
+    log::info!("Opening native file selection dialog for choose_send_files");
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg("set theFiles to choose file with multiple selections allowed\nset out to \"\"\nrepeat with aFile in theFiles\nset out to out & (POSIX path of aFile) & \"\\n\"\nend repeat\nreturn out")
+            .output()
+            .map_err(|e| format!("Failed to launch file dialog: {}", e))?;
+
+        if !output.status.success() {
+            // User cancelled
+            return Ok(Vec::new());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let files: Vec<String> = stdout
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if !files.is_empty() {
+            log::info!("User selected {} file(s) for sending", files.len());
+            let _ = app.emit("files-selected", &files);
+        }
+        return Ok(files);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let ps_cmd = "[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Multiselect = $true; if ($dlg.ShowDialog() -eq 'OK') { [string]::Join(\"`n\", $dlg.FileNames) }";
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", ps_cmd])
+            .output()
+            .map_err(|e| format!("Failed to launch Windows file dialog: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let files: Vec<String> = stdout
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        return Ok(files);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("zenity")
+            .args(["--file-selection", "--multiple", "--separator=\n"])
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let files: Vec<String> = stdout
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            return Ok(files);
+        }
+        Err("File selection dialog not supported or zenity not found on Linux".to_string())
+    }
 }
 
 #[tauri::command]

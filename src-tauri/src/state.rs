@@ -190,6 +190,12 @@ impl Default for StreamState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClipboardItem {
+    pub text: String,
+    pub timestamp: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureToggleState {
     pub receive: bool,
@@ -198,6 +204,8 @@ pub struct FeatureToggleState {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub send: bool,
+    #[serde(default)]
+    pub history: Vec<ClipboardItem>,
 }
 
 impl Default for FeatureToggleState {
@@ -207,6 +215,7 @@ impl Default for FeatureToggleState {
             share: true,
             enabled: true,
             send: true,
+            history: Vec::new(),
         }
     }
 }
@@ -217,6 +226,12 @@ pub struct FilesState {
     pub mount_mac: bool,
     #[serde(rename = "shareMac")]
     pub share_mac: bool,
+    #[serde(default)]
+    pub receive: bool,
+    #[serde(default)]
+    pub share: bool,
+    #[serde(default)]
+    pub path: String,
 }
 
 impl Default for FilesState {
@@ -224,6 +239,9 @@ impl Default for FilesState {
         Self {
             mount_mac: false,
             share_mac: false,
+            receive: true,
+            share: true,
+            path: String::new(),
         }
     }
 }
@@ -380,11 +398,13 @@ pub struct TerminalState {
     #[serde(rename = "allowMac")]
     pub allow_mac: bool,
     pub enabled: bool,
+    #[serde(default)]
+    pub theme: String,
 }
 
 impl Default for TerminalState {
     fn default() -> Self {
-        Self { allow_mac: true, enabled: true }
+        Self { allow_mac: true, enabled: true, theme: String::new() }
     }
 }
 
@@ -476,6 +496,22 @@ impl Default for SetupState {
         Self {
             show: false,
             missing: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiState {
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: String,
+}
+
+impl Default for MultiState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "mesh".to_string(),
         }
     }
 }
@@ -700,6 +736,8 @@ pub struct FullState {
     #[serde(default)]
     pub setup: SetupState,
     #[serde(default)]
+    pub multi: MultiState,
+    #[serde(default)]
     pub camera: CameraState,
 }
 
@@ -775,6 +813,7 @@ impl AppState {
             mac_apps: MacAppsState::default(),
             mount: MountState::default(),
             setup: SetupState::default(),
+            multi: MultiState::default(),
             camera: CameraState::default(),
         };
 
