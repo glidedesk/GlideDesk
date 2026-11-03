@@ -26,6 +26,8 @@ pub struct PairedPeer {
     pub address: Option<String>,
     #[serde(default, skip_serializing)]
     pub token: Option<String>,
+    #[serde(rename = "tlsFingerprint", default)]
+    pub tls_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +163,8 @@ pub struct NetState {
     pub transport: String,
     pub state: String,
     pub rtt: Option<u32>,
+    #[serde(rename = "allowPlaintext", default)]
+    pub allow_plaintext: bool,
 }
 
 impl Default for NetState {
@@ -171,6 +175,9 @@ impl Default for NetState {
             transport: "wifi".to_string(),
             state: "idle".to_string(),
             rtt: None,
+            allow_plaintext: std::env::var("GLIDEDESK_ALLOW_PLAINTEXT")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         }
     }
 }
@@ -1076,6 +1083,8 @@ pub struct FullState {
     pub rezume_shelf: RezumeState,
     #[serde(rename = "nowPlaying", default)]
     pub now_playing: Option<NowPlayingState>,
+    #[serde(rename = "peerFingerprints", default)]
+    pub peer_fingerprints: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -1159,6 +1168,7 @@ impl AppState {
             rezume: RezumeSettings::default(),
             rezume_shelf: RezumeState::default(),
             now_playing: None,
+            peer_fingerprints: std::collections::HashMap::new(),
         };
 
         Self {
@@ -1244,12 +1254,14 @@ impl AppState {
         s.client = client.clone();
         if let Some(c) = client {
             s.peer = Some(c.clone());
+            let fp = s.peer_fingerprints.get(&c.id).cloned();
             s.paired = Some(PairedPeer {
                 mac_id: c.id.clone(),
                 mac_name: c.name.clone(),
                 os: c.os.clone(),
                 address: c.address.clone(),
                 token: None,
+                tls_fingerprint: fp,
             });
             s.link.state = "connected".to_string();
             s.link.mac_name = Some(c.name.clone());
@@ -1312,6 +1324,40 @@ impl AppState {
                 }
             }
         }
+    }
+
+    pub fn get_peer_fingerprint(&self, peer_id: &str) -> Option<String> {
+        let s = self.inner.read();
+        if let Some(ref p) = s.paired {
+            if p.mac_id.eq_ignore_ascii_case(peer_id) {
+                if let Some(ref fp) = p.tls_fingerprint {
+                    return Some(fp.clone());
+                }
+            }
+        }
+        s.peer_fingerprints.get(peer_id).cloned()
+    }
+
+    pub fn record_peer_fingerprint(&self, peer_id: &str, fingerprint: &str) -> Result<(), String> {
+        let mut s = self.inner.write();
+        let clean_new = fingerprint.replace(':', "").to_uppercase();
+        if let Some(existing) = s.peer_fingerprints.get(peer_id) {
+            let clean_existing = existing.replace(':', "").to_uppercase();
+            if clean_existing != clean_new {
+                return Err(format!(
+                    "certificate fingerprint changed for peer {}; possible MITM — re-pair to trust",
+                    peer_id
+                ));
+            }
+        } else {
+            s.peer_fingerprints.insert(peer_id.to_string(), fingerprint.to_string());
+        }
+        if let Some(ref mut p) = s.paired {
+            if p.mac_id.eq_ignore_ascii_case(peer_id) {
+                p.tls_fingerprint = Some(fingerprint.to_string());
+            }
+        }
+        Ok(())
     }
 }
 

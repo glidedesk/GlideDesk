@@ -3,6 +3,7 @@
 
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use parking_lot::Mutex;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::client::danger::{ServerCertVerifier, HandshakeSignatureValid, ServerCertVerified};
 use rustls::{DigitallySignedStruct, Error, SignatureScheme, ServerConfig, ClientConfig};
@@ -57,9 +58,21 @@ impl LocalTlsIdentity {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PinnedCertVerifier {
     pub expected_fingerprint_hex: String,
+    pub peer_id: Option<String>,
+    pub captured_fingerprint: Arc<Mutex<Option<String>>>,
+}
+
+impl PinnedCertVerifier {
+    pub fn new(expected_fingerprint: &str, peer_id: Option<&str>) -> Self {
+        Self {
+            expected_fingerprint_hex: expected_fingerprint.to_string(),
+            peer_id: peer_id.map(|s| s.to_string()),
+            captured_fingerprint: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 impl ServerCertVerifier for PinnedCertVerifier {
@@ -78,63 +91,151 @@ impl ServerCertVerifier for PinnedCertVerifier {
             .collect::<Vec<_>>()
             .join(":");
 
+        *self.captured_fingerprint.lock() = Some(actual_hex.clone());
+
         let clean_expected = self.expected_fingerprint_hex.replace(':', "").to_uppercase();
         let clean_actual = actual_hex.replace(':', "").to_uppercase();
+
+        if clean_expected.is_empty() {
+            log::info!("[TLS Pinning] Pin on first use: captured peer certificate fingerprint {}", actual_hex);
+            return Ok(ServerCertVerified::assertion());
+        }
 
         if clean_expected == clean_actual {
             log::info!("[TLS Pinning] Peer certificate fingerprint matched: {}", actual_hex);
             Ok(ServerCertVerified::assertion())
         } else {
-            log::error!(
-                "[TLS Pinning] Fingerprint mismatch! Expected {}, got {}",
-                self.expected_fingerprint_hex, actual_hex
-            );
-            Err(Error::General(format!(
-                "Peer certificate fingerprint mismatch! Expected {}, got {}",
-                self.expected_fingerprint_hex, actual_hex
-            )))
+            let err_msg = if let Some(ref pid) = self.peer_id {
+                format!(
+                    "certificate fingerprint changed for peer {}; possible MITM — re-pair to trust",
+                    pid
+                )
+            } else {
+                format!(
+                    "Peer certificate fingerprint mismatch! Expected {}, got {}",
+                    self.expected_fingerprint_hex, actual_hex
+                )
+            };
+            log::error!("[TLS Pinning] {}", err_msg);
+            Err(Error::General(err_msg))
         }
     }
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ED25519,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA256,
-        ]
+        rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
 pub fn create_pinned_client_config(expected_fingerprint: &str) -> ClientConfig {
+    create_pinned_client_config_with_peer(expected_fingerprint, None, None)
+}
+
+pub fn create_pinned_client_config_with_peer(
+    expected_fingerprint: &str,
+    peer_id: Option<&str>,
+    captured: Option<Arc<Mutex<Option<String>>>>,
+) -> ClientConfig {
     ensure_crypto_provider();
     let verifier = Arc::new(PinnedCertVerifier {
         expected_fingerprint_hex: expected_fingerprint.to_string(),
+        peer_id: peer_id.map(|s| s.to_string()),
+        captured_fingerprint: captured.unwrap_or_else(|| Arc::new(Mutex::new(None))),
     });
 
     ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientTransportDecision {
+    Tls {
+        wss_url: String,
+        host: String,
+        port: u16,
+        expected_fingerprint: Option<String>,
+    },
+    Plaintext {
+        ws_url: String,
+        host: String,
+        port: u16,
+    },
+}
+
+pub fn decide_client_transport(
+    target_addr: &str,
+    pinned_fingerprint: Option<&str>,
+    allow_plaintext: bool,
+) -> Result<ClientTransportDecision, String> {
+    let clean_addr = target_addr.trim();
+    let is_explicit_ws = clean_addr.starts_with("ws://");
+
+    if is_explicit_ws && !allow_plaintext {
+        return Err("peer does not support encrypted transport; refusing plaintext".to_string());
+    }
+
+    let addr_without_scheme = clean_addr
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .trim_end_matches('/');
+
+    let (host, port) = if let Some(idx) = addr_without_scheme.rfind(':') {
+        let (h, p) = addr_without_scheme.split_at(idx);
+        let port_num = p[1..].parse::<u16>().unwrap_or(47800);
+        (h.to_string(), port_num)
+    } else {
+        (addr_without_scheme.to_string(), 47800)
+    };
+
+    if is_explicit_ws && allow_plaintext {
+        log::warn!(
+            "[TLS Transport] INSECURE: Connecting via unencrypted plaintext to ws://{}:{} (allow_plaintext=true)",
+            host, port
+        );
+        return Ok(ClientTransportDecision::Plaintext {
+            ws_url: format!("ws://{}:{}", host, port),
+            host,
+            port,
+        });
+    }
+
+    Ok(ClientTransportDecision::Tls {
+        wss_url: format!("wss://{}:{}", host, port),
+        host,
+        port,
+        expected_fingerprint: pinned_fingerprint.map(|s| s.to_string()),
+    })
 }
 
 pub fn format_beam_auth_token(pairing_token: &str, fingerprint_sha256: &str) -> String {
@@ -175,9 +276,7 @@ mod tests {
         let cert_der = CertificateDer::from(identity.cert_der.clone());
 
         // 1. Correct fingerprint passes
-        let verifier = PinnedCertVerifier {
-            expected_fingerprint_hex: identity.fingerprint_sha256.clone(),
-        };
+        let verifier = PinnedCertVerifier::new(&identity.fingerprint_sha256, None);
         let dummy_name = ServerName::try_from("localhost").unwrap();
         let verify_ok = verifier.verify_server_cert(
             &cert_der,
@@ -189,9 +288,10 @@ mod tests {
         assert!(verify_ok.is_ok());
 
         // 2. Mismatched fingerprint fails
-        let wrong_verifier = PinnedCertVerifier {
-            expected_fingerprint_hex: "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF".to_string(),
-        };
+        let wrong_verifier = PinnedCertVerifier::new(
+            "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF",
+            None,
+        );
         let verify_err = wrong_verifier.verify_server_cert(
             &cert_der,
             &[],
@@ -200,6 +300,150 @@ mod tests {
             UnixTime::now(),
         );
         assert!(verify_err.is_err());
+    }
+
+    #[test]
+    fn test_pinned_cert_verifier_changed_fingerprint_refusal() {
+        let identity = LocalTlsIdentity::generate().expect("generate cert");
+        let cert_der = CertificateDer::from(identity.cert_der.clone());
+
+        let peer_id = "peer_mac_alpha";
+        let wrong_fp = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99";
+        let verifier = PinnedCertVerifier::new(wrong_fp, Some(peer_id));
+        let dummy_name = ServerName::try_from("localhost").unwrap();
+
+        let res = verifier.verify_server_cert(
+            &cert_der,
+            &[],
+            &dummy_name,
+            &[],
+            UnixTime::now(),
+        );
+
+        assert!(res.is_err());
+        let err_str = format!("{:?}", res.err().unwrap());
+        assert!(
+            err_str.contains("certificate fingerprint changed for peer peer_mac_alpha; possible MITM — re-pair to trust"),
+            "Expected MITM error message but got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_pinned_cert_verifier_rejects_forged_handshake_signature() {
+        use rustls::internal::msgs::codec::{Codec, Reader};
+        ensure_crypto_provider();
+        let identity = LocalTlsIdentity::generate().expect("generate cert");
+        let cert_der = CertificateDer::from(identity.cert_der.clone());
+        let verifier = PinnedCertVerifier::new(&identity.fingerprint_sha256, None);
+
+        // Construct wire-encoded forged signature:
+        // scheme ECDSA_NISTP256_SHA256 = 0x0403 (big-endian), len = 6, bytes = 0xAA, 0xBB, ...
+        let wire_bytes = vec![0x04, 0x03, 0x00, 0x06, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
+        let mut reader = Reader::init(&wire_bytes);
+        let forged_dss = DigitallySignedStruct::read(&mut reader).expect("decode DigitallySignedStruct");
+
+        // Handshake verification MUST reject forged signature
+        let verify_res = verifier.verify_tls13_signature(
+            b"handshake transcript data to authenticate",
+            &cert_der,
+            &forged_dss,
+        );
+        assert!(verify_res.is_err(), "Forged signature must be rejected by real cryptographic verification");
+    }
+
+    #[test]
+    fn test_plaintext_only_peer_refused_by_default() {
+        // Plaintext URL refused when allow_plaintext is false
+        let decision_default = decide_client_transport("ws://192.168.1.100:47800", None, false);
+        assert!(decision_default.is_err());
+        assert_eq!(
+            decision_default.err().unwrap(),
+            "peer does not support encrypted transport; refusing plaintext"
+        );
+
+        // Default host:port string targets encrypted wss transport
+        let decision_tls = decide_client_transport("192.168.1.100:47800", Some("AA:BB:CC"), false).unwrap();
+        match decision_tls {
+            ClientTransportDecision::Tls { wss_url, host, port, expected_fingerprint } => {
+                assert_eq!(wss_url, "wss://192.168.1.100:47800");
+                assert_eq!(host, "192.168.1.100");
+                assert_eq!(port, 47800);
+                assert_eq!(expected_fingerprint.as_deref(), Some("AA:BB:CC"));
+            }
+            ClientTransportDecision::Plaintext { .. } => panic!("Expected TLS decision"),
+        }
+
+        // Opt-out config flag explicitly allows plaintext
+        let decision_opt_out = decide_client_transport("ws://192.168.1.100:47800", None, true).unwrap();
+        match decision_opt_out {
+            ClientTransportDecision::Plaintext { ws_url, host, port } => {
+                assert_eq!(ws_url, "ws://192.168.1.100:47800");
+                assert_eq!(host, "192.168.1.100");
+                assert_eq!(port, 47800);
+            }
+            ClientTransportDecision::Tls { .. } => panic!("Expected Plaintext decision"),
+        }
+    }
+
+    #[test]
+    fn test_tls_handshake_pinned_match_and_changed_refusal() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            ensure_crypto_provider();
+
+            // 1. Server identity
+            let server_identity = LocalTlsIdentity::generate().expect("server identity");
+            let server_cfg = Arc::new(server_identity.server_config().expect("server config"));
+            let acceptor = tokio_rustls::TlsAcceptor::from(server_cfg);
+
+            // Bind ephemeral loopback port
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind listener");
+            let server_addr = listener.local_addr().expect("local addr");
+
+            // Spawn server accept task
+            let srv_handle = tokio::spawn(async move {
+                let mut accepted_count = 0;
+                while accepted_count < 2 {
+                    if let Ok((stream, _)) = listener.accept().await {
+                        accepted_count += 1;
+                        let acc = acceptor.clone();
+                        tokio::spawn(async move {
+                            let _ = acc.accept(stream).await;
+                        });
+                    }
+                }
+            });
+
+            // 2. Client 1 with matching pinned fingerprint connects
+            let client_cfg_ok = Arc::new(create_pinned_client_config(&server_identity.fingerprint_sha256));
+            let connector_ok = tokio_rustls::TlsConnector::from(client_cfg_ok);
+            let stream_ok = tokio::net::TcpStream::connect(server_addr).await.expect("connect stream");
+            let server_name = ServerName::try_from("localhost").unwrap();
+            let tls_client_ok = connector_ok.connect(server_name.clone(), stream_ok).await;
+            assert!(tls_client_ok.is_ok(), "TLS handshake with matching pinned cert must succeed");
+
+            // 3. Client 2 with changed fingerprint (MITM) connects and MUST be rejected
+            let captured = Arc::new(Mutex::new(None));
+            let changed_fp = "FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF";
+            let client_cfg_mitm = Arc::new(create_pinned_client_config_with_peer(
+                changed_fp,
+                Some("host_peer_01"),
+                Some(captured),
+            ));
+            let connector_mitm = tokio_rustls::TlsConnector::from(client_cfg_mitm);
+            let stream_mitm = tokio::net::TcpStream::connect(server_addr).await.expect("connect stream");
+            let tls_client_mitm = connector_mitm.connect(server_name, stream_mitm).await;
+
+            assert!(tls_client_mitm.is_err(), "TLS handshake with changed fingerprint must be rejected");
+            let err_text = tls_client_mitm.err().unwrap().to_string();
+            assert!(
+                err_text.contains("certificate fingerprint changed for peer host_peer_01; possible MITM — re-pair to trust"),
+                "Error text must indicate MITM / changed fingerprint: {}",
+                err_text
+            );
+
+            let _ = srv_handle.await;
+        });
     }
 
     #[test]

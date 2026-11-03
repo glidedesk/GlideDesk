@@ -15,7 +15,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{accept_async, connect_async};
+use tokio_tungstenite::accept_async;
 
 pub const DEFAULT_PORT: u16 = 47800;
 pub const DISCOVERY_PORT: u16 = 47801;
@@ -81,6 +81,132 @@ impl tokio::io::AsyncWrite for ServerStream {
         match self.get_mut() {
             ServerStream::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
             ServerStream::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+pub enum ClientStream {
+    Plain(TcpStream),
+    Tls(tokio_rustls::client::TlsStream<TcpStream>),
+}
+
+impl tokio::io::AsyncRead for ClientStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ClientStream::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            ClientStream::Tls(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for ClientStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ClientStream::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            ClientStream::Tls(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ClientStream::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            ClientStream::Tls(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ClientStream::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            ClientStream::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+pub async fn dial_peer_client(
+    target_addr: &str,
+    expected_fingerprint: Option<&str>,
+    peer_id: Option<&str>,
+    allow_plaintext: bool,
+) -> Result<(tokio_tungstenite::WebSocketStream<ClientStream>, Option<String>), String> {
+    let decision = crate::transport::tls::decide_client_transport(
+        target_addr,
+        expected_fingerprint,
+        allow_plaintext,
+    )?;
+
+    match decision {
+        crate::transport::tls::ClientTransportDecision::Tls { wss_url, host, port, expected_fingerprint } => {
+            let tcp_stream = TcpStream::connect((host.as_str(), port))
+                .await
+                .map_err(|e| format!("Failed to connect to {}:{}: {}", host, port, e))?;
+            tcp_stream.set_nodelay(true).ok();
+
+            let captured = Arc::new(parking_lot::Mutex::new(None));
+            let client_config = crate::transport::tls::create_pinned_client_config_with_peer(
+                expected_fingerprint.as_deref().unwrap_or(""),
+                peer_id,
+                Some(Arc::clone(&captured)),
+            );
+
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+            let server_name = rustls::pki_types::ServerName::try_from("glidedesk.local")
+                .map_err(|e| format!("Invalid TLS server name: {}", e))?;
+
+            let tls_stream = match connector.connect(server_name, tcp_stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if err_msg.contains("certificate fingerprint changed") {
+                        return Err(err_msg);
+                    }
+                    if !allow_plaintext {
+                        return Err("peer does not support encrypted transport; refusing plaintext".to_string());
+                    }
+                    log::warn!(
+                        "[NetworkManager] TLS handshake failed ({}); falling back to plaintext because allow_plaintext=true",
+                        e
+                    );
+                    let plain_tcp = TcpStream::connect((host.as_str(), port)).await
+                        .map_err(|pe| format!("Plaintext fallback connect failed: {}", pe))?;
+                    plain_tcp.set_nodelay(true).ok();
+                    let ws_url = format!("ws://{}:{}", host, port);
+                    let (ws, _) = tokio_tungstenite::client_async(ws_url, ClientStream::Plain(plain_tcp))
+                        .await
+                        .map_err(|we| format!("Plaintext WebSocket handshake failed: {}", we))?;
+                    return Ok((ws, None));
+                }
+            };
+
+            let (ws, _) = tokio_tungstenite::client_async(wss_url, ClientStream::Tls(tls_stream))
+                .await
+                .map_err(|e| format!("WebSocket handshake over TLS failed: {}", e))?;
+
+            let established_fp = captured.lock().clone();
+            Ok((ws, established_fp))
+        }
+        crate::transport::tls::ClientTransportDecision::Plaintext { ws_url, host, port } => {
+            let tcp_stream = TcpStream::connect((host.as_str(), port))
+                .await
+                .map_err(|e| format!("Failed to connect to {}:{}: {}", host, port, e))?;
+            tcp_stream.set_nodelay(true).ok();
+            let (ws, _) = tokio_tungstenite::client_async(ws_url, ClientStream::Plain(tcp_stream))
+                .await
+                .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
+            Ok((ws, None))
         }
     }
 }
@@ -627,6 +753,7 @@ impl MeshServer {
             false
         };
 
+        let allow_plaintext = state.inner.read().net.allow_plaintext;
         let server_stream = if is_tls {
             if let Ok(srv_cfg) = tls_identity.server_config() {
                 let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(srv_cfg));
@@ -641,10 +768,20 @@ impl MeshServer {
                     }
                 }
             } else {
-                ServerStream::Plain(stream)
+                return Err("Failed to create TLS server config".into());
             }
-        } else {
+        } else if allow_plaintext {
+            log::warn!(
+                "[MeshServer] INSECURE: Accepting unencrypted plaintext session from {} (allow_plaintext=true)",
+                peer_addr
+            );
             ServerStream::Plain(stream)
+        } else {
+            log::error!(
+                "[MeshServer] Downgrade refused for {}: peer does not support encrypted transport; refusing plaintext",
+                peer_addr
+            );
+            return Err("peer does not support encrypted transport; refusing plaintext".into());
         };
 
         let ws = accept_async(server_stream).await?;
@@ -842,12 +979,14 @@ impl MeshServer {
                 if !s.guests.iter().any(|g| g.id == sess.peer_id) {
                     s.guests.push(peer.clone());
                 }
+                let fp = s.peer_fingerprints.get(&sess.peer_id).cloned();
                 s.paired = Some(crate::state::PairedPeer {
                     mac_id: sess.peer_id.clone(),
                     mac_name: sess.peer_name.clone(),
                     os: sess.peer_os.clone(),
                     address: None,
                     token: Some(token.clone()),
+                    tls_fingerprint: fp,
                 });
                 s.peer = Some(peer.clone());
                 s.client = Some(peer);
@@ -1089,12 +1228,14 @@ impl MeshServer {
                     };
                     s.peer = Some(p_info.clone());
                     s.client = Some(p_info);
+                    let fp = s.peer_fingerprints.get(&host_id).cloned();
                     s.paired = Some(crate::state::PairedPeer {
                         mac_id: host_id.clone(),
                         mac_name: host_name.clone(),
                         os: host_os.clone(),
                         address: Some(peer_addr.ip().to_string()),
                         token: host_token.clone(),
+                        tls_fingerprint: fp,
                     });
                 }
                 *authenticated.write() = true;
@@ -1679,16 +1820,27 @@ impl NetworkManager {
             }
         }
 
-        let url = if target_addr.starts_with("ws://") || target_addr.starts_with("wss://") {
-            target_addr.to_string()
-        } else if target_addr.contains(':') {
-            format!("ws://{}", target_addr)
-        } else {
-            format!("ws://{}:{}", target_addr, DEFAULT_PORT)
+        let (stored_fp, target_peer_id) = {
+            let guard = self.state.inner.read();
+            let pid = guard.paired.as_ref().map(|p| p.mac_id.clone());
+            let fp = self.state.get_peer_fingerprint(target_addr)
+                .or_else(|| self.state.get_peer_fingerprint(target_ip))
+                .or_else(|| guard.paired.as_ref().and_then(|p| p.tls_fingerprint.clone()));
+            (fp, pid)
         };
 
-        log::info!("[NetworkManager] Connecting to {}", url);
-        let (ws, _) = connect_async(&url).await.map_err(|e| format!("Failed to connect: {}", e))?;
+        let allow_plaintext = self.state.inner.read().net.allow_plaintext;
+        let (ws, established_fp) = dial_peer_client(
+            target_addr,
+            stored_fp.as_deref(),
+            target_peer_id.as_deref(),
+            allow_plaintext,
+        ).await?;
+
+        if let (Some(ref pid), Some(ref fp)) = (&target_peer_id, &established_fp) {
+            let _ = self.state.record_peer_fingerprint(pid, fp);
+        }
+
         let (mut write, mut read) = ws.split();
 
         let resolved_addr: SocketAddr = target_addr
@@ -1890,16 +2042,27 @@ impl NetworkManager {
             }
         }
 
-        let url = if target_addr.starts_with("ws://") || target_addr.starts_with("wss://") {
-            target_addr.to_string()
-        } else if target_addr.contains(':') {
-            format!("ws://{}", target_addr)
-        } else {
-            format!("ws://{}:{}", target_addr, DEFAULT_PORT)
+        let (stored_fp, target_peer_id) = {
+            let guard = self.state.inner.read();
+            let pid = guard.paired.as_ref().map(|p| p.mac_id.clone());
+            let fp = self.state.get_peer_fingerprint(target_addr)
+                .or_else(|| self.state.get_peer_fingerprint(target_ip))
+                .or_else(|| guard.paired.as_ref().and_then(|p| p.tls_fingerprint.clone()));
+            (fp, pid)
         };
 
-        log::info!("[NetworkManager] Pairing with {}", url);
-        let (ws, _) = connect_async(&url).await.map_err(|e| format!("Failed to connect: {}", e))?;
+        let allow_plaintext = self.state.inner.read().net.allow_plaintext;
+        let (ws, established_fp) = dial_peer_client(
+            target_addr,
+            stored_fp.as_deref(),
+            target_peer_id.as_deref(),
+            allow_plaintext,
+        ).await?;
+
+        if let (Some(ref pid), Some(ref fp)) = (&target_peer_id, &established_fp) {
+            let _ = self.state.record_peer_fingerprint(pid, fp);
+        }
+
         let (mut write, mut read) = ws.split();
 
         let resolved_addr: SocketAddr = target_addr
