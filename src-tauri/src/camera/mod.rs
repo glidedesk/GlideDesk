@@ -321,18 +321,23 @@ pub fn vcam_preview(preview: Vec<u8>, app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+pub fn process_vcam_frame(frame: &[u8], is_active: bool) -> Result<(), String> {
+    if frame.is_empty() {
+        return Err("vcam_frame: frame buffer is empty".to_string());
+    }
+    if !is_active {
+        return Err("Virtual camera sink is not available or not running".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn vcam_frame(
     frame: Vec<u8>,
     cam_mgr: State<'_, CameraManager>,
     app: AppHandle,
 ) -> Result<(), String> {
-    if frame.is_empty() {
-        return Err("vcam_frame: frame buffer is empty".to_string());
-    }
-    if !cam_mgr.vcam_active.load(Ordering::SeqCst) {
-        return Err("Virtual camera sink is not available or not running".to_string());
-    }
+    process_vcam_frame(&frame, cam_mgr.vcam_active.load(Ordering::SeqCst))?;
     let _ = app.emit("vcam-frame-sink", &frame);
     Ok(())
 }

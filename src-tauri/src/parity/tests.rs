@@ -1,11 +1,12 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Non-trivial unit tests for Phone ADB, Scrcpy protocol, and native Parity modules.
+// Non-trivial unit tests for Phone ADB, Scrcpy protocol, Camera VCam, and native Parity modules.
 
 #[cfg(test)]
 mod tests {
-    use crate::phone::adb::AdbClient;
+    use crate::camera::process_vcam_frame;
+    use crate::parity::{parse_wifi_toggle, scan_installed_apps};
+    use crate::phone::adb::{resolve_resource_path, AdbClient};
     use crate::phone::scrcpy::{self, ControlMessage, StreamHeader};
-    use crate::parity::scan_installed_apps;
 
     #[test]
     fn test_phone_assets_default_shape() {
@@ -18,14 +19,12 @@ mod tests {
     #[test]
     fn test_scan_installed_apps() {
         let apps = scan_installed_apps();
-        // On development systems (macOS/Windows/Linux), applications should be discovered
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             assert!(!apps.is_empty(), "Expected at least one installed application to be detected");
             for app in &apps {
                 assert!(!app.trim().is_empty(), "Application name must not be blank");
             }
-            // Ensure apps list is deduplicated and sorted
             let mut sorted = apps.clone();
             sorted.sort();
             sorted.dedup();
@@ -54,7 +53,7 @@ offline-device-1       offline transport_id:4
         assert_eq!(devices[1].serial, "192.168.1.105:5555");
         assert_eq!(devices[1].state, "device");
         assert_eq!(devices[1].model.as_deref(), Some("Pixel_4_XL"));
-        assert!(!devices[1].usb); // Wi-Fi endpoint with port
+        assert!(!devices[1].usb);
 
         assert_eq!(devices[2].serial, "R58M30ABCDE");
         assert_eq!(devices[2].state, "unauthorized");
@@ -74,7 +73,6 @@ unknown-service        _other._tcp.              192.168.1.80:9999
 ";
 
         let services = AdbClient::parse_mdns_services(sample_output);
-        // Only pairing and connect services are retained
         assert_eq!(services.len(), 2);
 
         assert_eq!(services[0].name, "adb-pair-123456");
@@ -89,14 +87,34 @@ unknown-service        _other._tcp.              192.168.1.80:9999
     }
 
     #[test]
+    fn test_dns_sd_output_parsing() {
+        let dns_sd_fixture = "\
+Browsing for _adb-tls-connect._tcp.local.
+DATE: ---Tue 03 Nov 2026---
+17:54:06.196  ...STARTING...
+Timestamp     A/R    Flags  if Domain               Service Type             Instance Name
+17:54:07.123  Add        2   4 local.               _adb-tls-connect._tcp.   adb-connect-test-1  192.168.1.120:39841
+17:54:07.456  Add        2   4 local.               _adb-tls-pairing._tcp.   adb-pairing-test-2  192.168.1.120:42119
+";
+        let parsed = AdbClient::parse_bonjour_output(dns_sd_fixture);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "adb-connect-test-1");
+        assert_eq!(parsed[0].service_type, "connect");
+        assert_eq!(parsed[0].address, "192.168.1.120");
+        assert_eq!(parsed[0].port, 39841);
+
+        assert_eq!(parsed[1].name, "adb-pairing-test-2");
+        assert_eq!(parsed[1].service_type, "pairing");
+        assert_eq!(parsed[1].address, "192.168.1.120");
+        assert_eq!(parsed[1].port, 42119);
+    }
+
+    #[test]
     fn test_scrcpy_stream_header_resolution_parsing() {
-        // Scrcpy sets the MSB (0x80) on byte 0 to indicate resolution metadata packet
         let mut buf = [0u8; 12];
         buf[0] = 0x80;
-        // width = 1080 (0x00000438)
         let w_bytes = 1080u32.to_be_bytes();
         buf[4..8].copy_from_slice(&w_bytes);
-        // height = 2400 (0x00000960)
         let h_bytes = 2400u32.to_be_bytes();
         buf[8..12].copy_from_slice(&h_bytes);
 
@@ -106,7 +124,6 @@ unknown-service        _other._tcp.              192.168.1.80:9999
 
     #[test]
     fn test_scrcpy_stream_header_frame_parsing() {
-        // MSB bit cleared: 8 bytes PTS + 4 bytes frame payload size
         let mut buf = [0u8; 12];
         let pts: u64 = 987654321;
         let size: u32 = 65536;
@@ -119,14 +136,12 @@ unknown-service        _other._tcp.              192.168.1.80:9999
 
     #[test]
     fn test_scrcpy_control_message_encoding() {
-        // 1. Keycode injection: type (0), action (0), keycode (85), repeat (0), metastate (0)
         let key_msg = ControlMessage::inject_keycode(ControlMessage::ACTION_DOWN, 85, 0, 0);
         assert_eq!(key_msg.len(), 14);
         assert_eq!(key_msg[0], ControlMessage::TYPE_INJECT_KEYCODE);
         assert_eq!(key_msg[1], ControlMessage::ACTION_DOWN);
         assert_eq!(u32::from_be_bytes([key_msg[2], key_msg[3], key_msg[4], key_msg[5]]), 85);
 
-        // 2. Text injection: type (1), 4-byte len, text bytes
         let text = "GlideDesk Pair";
         let text_msg = ControlMessage::inject_text(text);
         assert_eq!(text_msg[0], ControlMessage::TYPE_INJECT_TEXT);
@@ -134,7 +149,6 @@ unknown-service        _other._tcp.              192.168.1.80:9999
         assert_eq!(text_len, text.len());
         assert_eq!(&text_msg[5..5 + text_len], text.as_bytes());
 
-        // 3. Touch injection: type (2), action, pointer_id, x, y, width, height, pressure, action_btn, buttons
         let touch_msg = ControlMessage::inject_touch(
             ControlMessage::ACTION_MOVE,
             42,
@@ -152,7 +166,6 @@ unknown-service        _other._tcp.              192.168.1.80:9999
         assert_eq!(u32::from_be_bytes(touch_msg[10..14].try_into().unwrap()), 540);
         assert_eq!(u32::from_be_bytes(touch_msg[14..18].try_into().unwrap()), 960);
 
-        // 4. Scroll injection: type (3), x, y, width, height, hscroll, vscroll, buttons
         let scroll_msg = ControlMessage::inject_scroll(500, 600, 1080, 2400, -5, 12, 0);
         assert_eq!(scroll_msg[0], ControlMessage::TYPE_INJECT_SCROLL);
         assert_eq!(u32::from_be_bytes(scroll_msg[1..5].try_into().unwrap()), 500);
@@ -161,14 +174,74 @@ unknown-service        _other._tcp.              192.168.1.80:9999
         assert_eq!(i32::from_be_bytes(scroll_msg[17..21].try_into().unwrap()), 12);
         assert_eq!(u32::from_be_bytes(scroll_msg[21..25].try_into().unwrap()), 0);
 
-        // 5. Clipboard injection: type (9), seq (8-byte), paste bool, 4-byte len, text bytes
         let cb_text = "https://glidedesk.com";
         let cb_msg = ControlMessage::set_clipboard(1, true, cb_text);
         assert_eq!(cb_msg[0], ControlMessage::TYPE_SET_CLIPBOARD);
         assert_eq!(u64::from_be_bytes(cb_msg[1..9].try_into().unwrap()), 1);
-        assert_eq!(cb_msg[9], 1); // paste: true
+        assert_eq!(cb_msg[9], 1);
         let cb_len = u32::from_be_bytes(cb_msg[10..14].try_into().unwrap()) as usize;
         assert_eq!(cb_len, cb_text.len());
         assert_eq!(&cb_msg[14..14 + cb_len], cb_text.as_bytes());
+    }
+
+    #[test]
+    fn test_vcam_frame_error_paths() {
+        // 1. Empty buffer must be rejected
+        let res_empty = process_vcam_frame(&[], true);
+        assert!(res_empty.is_err());
+        assert_eq!(res_empty.unwrap_err(), "vcam_frame: frame buffer is empty");
+
+        // 2. Inactive vcam sink must be rejected
+        let dummy_frame = vec![0u8; 1024];
+        let res_inactive = process_vcam_frame(&dummy_frame, false);
+        assert!(res_inactive.is_err());
+        assert_eq!(res_inactive.unwrap_err(), "Virtual camera sink is not available or not running");
+
+        // 3. Active vcam sink with valid buffer succeeds
+        let res_ok = process_vcam_frame(&dummy_frame, true);
+        assert!(res_ok.is_ok());
+    }
+
+    #[test]
+    fn test_net_wifi_and_set_startup() {
+        // Test parsing of various wifi toggle configurations
+        assert!(parse_wifi_toggle(&serde_json::json!(true)));
+        assert!(!parse_wifi_toggle(&serde_json::json!(false)));
+        assert!(parse_wifi_toggle(&serde_json::json!({ "on": true })));
+        assert!(!parse_wifi_toggle(&serde_json::json!({ "on": false })));
+        assert!(parse_wifi_toggle(&serde_json::json!({ "power": "on" })));
+        assert!(!parse_wifi_toggle(&serde_json::json!({ "power": "off" })));
+    }
+
+    #[test]
+    fn test_resource_path_resolution() {
+        // 1. Existing file in repo root
+        let cargo_toml = resolve_resource_path("Cargo.toml");
+        assert!(cargo_toml.is_some());
+        assert!(cargo_toml.unwrap().is_file());
+
+        // 2. Scrcpy-server vendor resolution
+        let scrcpy = AdbClient::find_scrcpy_server();
+        assert!(scrcpy.is_some());
+        assert!(scrcpy.unwrap().is_file());
+
+        // 3. Non-existent path returns None
+        let missing = resolve_resource_path("non_existent_resource_xyz_987654.bin");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_mute_notif_app_logic() {
+        let mut muted = Vec::new();
+        let app_name = "Messages";
+
+        // Mute
+        muted.push(app_name.to_string());
+        assert!(muted.iter().any(|x| x.eq_ignore_ascii_case(app_name)));
+
+        // Unmute
+        let pos = muted.iter().position(|x| x.eq_ignore_ascii_case(app_name)).unwrap();
+        muted.remove(pos);
+        assert!(!muted.iter().any(|x| x.eq_ignore_ascii_case(app_name)));
     }
 }

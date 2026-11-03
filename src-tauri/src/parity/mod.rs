@@ -645,10 +645,8 @@ pub fn execute_set_startup(on: bool) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub fn net_wifi(arg: serde_json::Value) -> Result<(), String> {
-    log::info!("[Network] net_wifi toggle: {:?}", arg);
-    let on = if let Some(b) = arg.as_bool() {
+pub fn parse_wifi_toggle(arg: &serde_json::Value) -> bool {
+    if let Some(b) = arg.as_bool() {
         b
     } else if let Some(b) = arg.get("on").and_then(|v| v.as_bool()) {
         b
@@ -656,7 +654,13 @@ pub fn net_wifi(arg: serde_json::Value) -> Result<(), String> {
         s.eq_ignore_ascii_case("on")
     } else {
         true
-    };
+    }
+}
+
+#[tauri::command]
+pub fn net_wifi(arg: serde_json::Value) -> Result<(), String> {
+    log::info!("[Network] net_wifi toggle: {:?}", arg);
+    let on = parse_wifi_toggle(&arg);
     execute_net_wifi(on)
 }
 
