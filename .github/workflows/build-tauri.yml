@@ -35,7 +35,7 @@ jobs:
             os: 'Windows'
             artifact_name: 'glidedesk-windows'
             rust_targets: ''
-          - platform: 'macos-latest'
+          - platform: 'macos-13'
             os: 'macOS'
             artifact_name: 'glidedesk-macos'
             rust_targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
