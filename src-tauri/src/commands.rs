@@ -5,6 +5,7 @@ use crate::network::NetworkManager;
 use crate::state::{AppState, FullState, UpdateDownload};
 use serde::Deserialize;
 use serde_json::Value;
+use base64::Engine;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_shell::ShellExt;
 
@@ -798,21 +799,64 @@ pub async fn send_files(
         files.len()
     );
 
-    // 2. Build transfer batch and insert into TransferManager
-    let batch_id = format!("batch_{}", chrono::Utc::now().timestamp_millis());
+    // 2. Pre-compute SHA-256 and metadata for each file without whole-file memory loading
     let mut file_tuples = Vec::new();
-    for path_str in &files {
+    let mut wire_items = Vec::new();
+    let mut total_bytes = 0u64;
+
+    for (idx, path_str) in files.iter().enumerate() {
         let p = std::path::Path::new(path_str);
+        if !p.exists() {
+            return Err(format!("File '{}' not found", path_str));
+        }
         let name = p
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path_str.clone());
-        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(1024);
-        file_tuples.push((name, size));
+        let (size, sha256) = crate::transport::transfer::compute_file_sha256(p)
+            .map_err(|e| format!("Failed to read file '{}': {}", path_str, e))?;
+        let file_id = format!("file_{}_{}", idx, name);
+        total_bytes += size;
+        file_tuples.push((name.clone(), size, sha256.clone(), Some(path_str.clone())));
+        wire_items.push(crate::network::WireFileItem {
+            file_id,
+            name,
+            size,
+            sha256,
+        });
     }
 
-    let mut batch =
-        crate::transport::transfer::TransferBatch::new(batch_id.clone(), file_tuples);
+    // 3. Check for existing batch for resume
+    let target_id = target.as_deref().unwrap_or("default");
+    let existing_batch_info = {
+        let batches = transfer_mgr.batches.read();
+        batches.values().find(|b| {
+            b.peer_id.as_deref() == Some(target_id)
+                && b.items.len() == wire_items.len()
+                && b.items.iter().all(|it| {
+                    wire_items.iter().any(|wi| wi.name == it.filename && it.checksum_sha256.as_ref() == Some(&wi.sha256))
+                })
+        }).cloned()
+    };
+
+    let batch_id = existing_batch_info
+        .as_ref()
+        .map(|b| b.batch_id.clone())
+        .unwrap_or_else(|| format!("batch_{}", chrono::Utc::now().timestamp_millis()));
+
+    let batch = if let Some(mut existing) = existing_batch_info {
+        log::info!("[SendFiles] Resuming existing transfer batch {}", existing.batch_id);
+        existing.phase = crate::transport::transfer::TransferPhase::Transferring;
+        existing
+    } else {
+        let mut b = crate::transport::transfer::TransferBatch::new_with_checksums(batch_id.clone(), file_tuples);
+        b.peer_id = Some(target_id.to_string());
+        b
+    };
+
+    let cancel_flag = transfer_mgr.get_cancel_flag(&batch_id);
+    cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+
     {
         let mut batches = transfer_mgr.batches.write();
         batches.insert(batch_id.clone(), batch.clone());
@@ -828,41 +872,175 @@ pub async fn send_files(
         }),
     );
 
-    // 3. Drive transfer progress and checksum verification
-    for (idx, path_str) in files.iter().enumerate() {
-        if idx < batch.items.len() {
-            let file_id = batch.items[idx].file_id.clone();
-            let _ = batch.start_file(&file_id);
-
-            let content = std::fs::read(path_str).unwrap_or_default();
-            let chunk_size = content.len() as u64;
-            let _ = batch.update_progress(&file_id, chunk_size);
-
-            let mut hasher = sha2::Sha256::new();
-            use sha2::Digest;
-            hasher.update(&content);
-            let expected_checksum = format!("{:x}", hasher.finalize());
-
-            let _ = batch.verify_and_complete_file(&file_id, &content, &expected_checksum);
-        }
-    }
-
-    // Update final batch in TransferManager
-    {
-        let mut batches = transfer_mgr.batches.write();
-        batches.insert(batch_id.clone(), batch.clone());
-    }
-
-    // 4. Broadcast batch announcement to network peers
-    let msg = crate::network::WireMessage {
+    // 4. Send files.batch header to peer
+    let batch_pkt = crate::network::WireMessage {
         t: "files.batch".to_string(),
         v: Some(1),
         id: Some(batch_id.clone()),
-        files: Some(files),
-        target,
+        batch_id: Some(batch_id.clone()),
+        batch_files: Some(wire_items.clone()),
+        total_bytes: Some(total_bytes),
+        files: Some(files.clone()),
+        target: target.clone(),
         ..Default::default()
     };
-    network.send_packet(msg).await;
+    network.send_packet(batch_pkt).await;
+
+    // 5. Stream chunks and await acks
+    const CHUNK_SIZE: usize = crate::transport::transfer::CHUNK_SIZE;
+    use std::io::{Read, Seek, SeekFrom};
+
+    for wi in &wire_items {
+        let (file_size, file_sha256, local_path, completed, start_offset) = {
+            let batches = transfer_mgr.batches.read();
+            let b = batches.get(&batch_id).ok_or("Batch not found")?;
+            let item = b.items.iter().find(|it| it.file_id == wi.file_id).ok_or("Item not found")?;
+            (item.total_bytes, wi.sha256.clone(), item.local_path.clone().unwrap(), item.completed, item.transferred_bytes)
+        };
+
+        if completed {
+            log::info!("[SendFiles] File {} already completed in resumed batch; skipping", wi.name);
+            continue;
+        }
+
+        let mut file = std::fs::File::open(&local_path)
+            .map_err(|e| format!("Failed to open file {:?}: {}", local_path, e))?;
+
+        if start_offset > 0 {
+            log::info!("[SendFiles] Resuming file {} from offset {}", wi.name, start_offset);
+            file.seek(SeekFrom::Start(start_offset))
+                .map_err(|e| format!("Failed to seek to resume offset {}: {}", start_offset, e))?;
+        }
+
+        let mut current_offset = start_offset;
+        let mut ack_rx = transfer_mgr.ack_tx.subscribe();
+
+        while current_offset < file_size {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                log::warn!("[SendFiles] Transfer cancelled by user mid-chunk at offset {}", current_offset);
+                let _ = transfer_mgr.cancel_batch(&batch_id);
+                return Err("Transfer cancelled by user".to_string());
+            }
+
+            let chunk_len = ((file_size - current_offset) as usize).min(CHUNK_SIZE);
+            let mut chunk_buf = vec![0u8; chunk_len];
+            file.read_exact(&mut chunk_buf)
+                .map_err(|e| format!("Failed to read chunk at offset {}: {}", current_offset, e))?;
+
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&chunk_buf);
+            let chunk_hash = format!("{:x}", hasher.finalize());
+
+            let data_b64 = base64::engine::general_purpose::STANDARD.encode(&chunk_buf);
+
+            let chunk_pkt = crate::network::WireMessage {
+                t: "files.chunk".to_string(),
+                v: Some(1),
+                batch_id: Some(batch_id.clone()),
+                file_id: Some(wi.file_id.clone()),
+                offset: Some(current_offset),
+                len: Some(chunk_len as u64),
+                data: Some(data_b64),
+                sha256_chunk: Some(chunk_hash),
+                target: target.clone(),
+                ..Default::default()
+            };
+            network.send_packet(chunk_pkt.clone()).await;
+
+            let target_ack_offset = current_offset + chunk_len as u64;
+            let mut acked = false;
+
+            // Bounded retry with timeout
+            for retry in 0..3 {
+                if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = transfer_mgr.cancel_batch(&batch_id);
+                    return Err("Transfer cancelled by user".to_string());
+                }
+
+                let wait_timeout = tokio::time::Duration::from_millis(5000);
+                let wait_res = tokio::time::timeout(wait_timeout, async {
+                    loop {
+                        match ack_rx.recv().await {
+                            Ok(ack) => {
+                                if ack.batch_id == batch_id && ack.file_id == wi.file_id && ack.offset >= target_ack_offset {
+                                    return Ok(());
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(e) => return Err(e.to_string()),
+                        }
+                    }
+                }).await;
+
+                match wait_res {
+                    Ok(Ok(())) => {
+                        acked = true;
+                        break;
+                    }
+                    _ => {
+                        log::warn!("[SendFiles] Ack timeout at offset {}, retry {}/3", current_offset, retry + 1);
+                        network.send_packet(chunk_pkt.clone()).await;
+                    }
+                }
+            }
+
+            if !acked {
+                return Err(format!("Peer timed out acknowledging chunk at offset {}", current_offset));
+            }
+
+            current_offset = target_ack_offset;
+
+            // Monotonically advance batch progress
+            {
+                let mut batches = transfer_mgr.batches.write();
+                if let Some(b) = batches.get_mut(&batch_id) {
+                    let _ = b.set_file_offset(&wi.file_id, current_offset);
+                }
+            }
+
+            let _ = app.emit(
+                "transfer-progress",
+                &serde_json::json!({
+                    "batch_id": batch_id,
+                    "file_id": wi.file_id,
+                    "offset": current_offset,
+                    "total": file_size,
+                }),
+            );
+        }
+
+        // Send files.done with SENDER-SUPPLIED total sha256
+        let done_pkt = crate::network::WireMessage {
+            t: "files.done".to_string(),
+            v: Some(1),
+            batch_id: Some(batch_id.clone()),
+            file_id: Some(wi.file_id.clone()),
+            sha256_total: Some(file_sha256.clone()),
+            target: target.clone(),
+            ..Default::default()
+        };
+        network.send_packet(done_pkt).await;
+
+        {
+            let mut batches = transfer_mgr.batches.write();
+            if let Some(b) = batches.get_mut(&batch_id) {
+                if let Some(item) = b.items.iter_mut().find(|it| it.file_id == wi.file_id) {
+                    item.completed = true;
+                    item.checksum_sha256 = Some(file_sha256.clone());
+                    item.transferred_bytes = file_size;
+                }
+            }
+        }
+    }
+
+    // 6. Complete batch
+    {
+        let mut batches = transfer_mgr.batches.write();
+        if let Some(b) = batches.get_mut(&batch_id) {
+            b.phase = crate::transport::transfer::TransferPhase::BatchDone;
+        }
+    }
 
     let _ = app.emit(
         "transfer-completed",

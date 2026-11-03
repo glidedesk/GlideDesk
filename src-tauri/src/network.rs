@@ -3,6 +3,7 @@
 // Replaces Node.js WebSocket with native async Tokio + Tungstenite (zero-GC latency, bounded backpressure).
 
 use crate::state::{AppState, PeerInfo};
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use parking_lot::{Mutex, RwLock};
@@ -273,6 +274,14 @@ pub struct PendingPairSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireFileItem {
+    pub file_id: String,
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireMessage {
     pub t: String,
     #[serde(default)]
@@ -372,9 +381,27 @@ pub struct WireMessage {
     #[serde(default)]
     pub fingerprint: Option<String>,
 
-    // File transfer batch broadcast
+    // File transfer protocol fields
     #[serde(default)]
     pub files: Option<Vec<String>>,
+    #[serde(rename = "batchId", default)]
+    pub batch_id: Option<String>,
+    #[serde(rename = "fileId", default)]
+    pub file_id: Option<String>,
+    #[serde(rename = "batchFiles", default)]
+    pub batch_files: Option<Vec<WireFileItem>>,
+    #[serde(rename = "totalBytes", default)]
+    pub total_bytes: Option<u64>,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub len: Option<u64>,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(rename = "sha256Chunk", default)]
+    pub sha256_chunk: Option<String>,
+    #[serde(rename = "sha256Total", default)]
+    pub sha256_total: Option<String>,
 
     // Media & Screen streaming fields
     #[serde(default)]
@@ -446,6 +473,15 @@ impl Default for WireMessage {
             rezume_item: None,
             fingerprint: None,
             files: None,
+            batch_id: None,
+            file_id: None,
+            batch_files: None,
+            total_bytes: None,
+            offset: None,
+            len: None,
+            data: None,
+            sha256_chunk: None,
+            sha256_total: None,
             commit: None,
             nonce: None,
             token: None,
@@ -1421,6 +1457,7 @@ impl MeshServer {
                 | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
                 | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
                 | "rz.offer" | "rz.take" | "files.batch" | "files.chunk"
+                | "files.done" | "files.ack" | "files.cancel"
                 if !*authenticated.read() =>
             {
                 log::warn!(
@@ -1647,28 +1684,269 @@ impl MeshServer {
                 let _ = app.emit("state-change", &snap);
             }
             "files.batch" => {
-                log::info!("[Files] Inbound files.batch from {}: {:?}", peer_addr, pkt.files);
-                if let Some(ref files) = pkt.files {
-                    let batch_id = pkt
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| format!("batch_{}", chrono::Utc::now().timestamp_millis()));
-                    let transfer_mgr = app.state::<crate::transport::transfer::TransferManager>();
-                    let file_tuples: Vec<(String, u64)> =
-                        files.iter().map(|f| (f.clone(), 1024)).collect();
-                    let batch = crate::transport::transfer::TransferBatch::new(
+                log::info!("[Files] Inbound files.batch from {}: batch_id={:?}", peer_addr, pkt.batch_id);
+                let batch_id = pkt.batch_id.clone().or(pkt.id.clone())
+                    .unwrap_or_else(|| format!("batch_{}", chrono::Utc::now().timestamp_millis()));
+                let transfer_mgr = app.state::<crate::transport::transfer::TransferManager>();
+
+                let batch = if let Some(ref bfiles) = pkt.batch_files {
+                    let file_tuples: Vec<(String, u64, String, Option<String>)> = bfiles.iter().map(|f| {
+                        (f.name.clone(), f.size, f.sha256.clone(), None)
+                    }).collect();
+                    let mut b = crate::transport::transfer::TransferBatch::new_with_checksums(
                         batch_id.clone(),
                         file_tuples,
                     );
-                    transfer_mgr.batches.write().insert(batch_id.clone(), batch);
-                    let _ = app.emit(
-                        "files-received",
-                        &serde_json::json!({
-                            "batch_id": batch_id,
-                            "files": files,
-                            "sender": pkt.name.clone().unwrap_or_else(|| peer_addr.to_string()),
-                        }),
+                    let temp_dir = crate::transport::transfer::default_temp_dir();
+                    for it in &mut b.items {
+                        it.temp_path = Some(temp_dir.join(format!("{}_{}.part", batch_id, it.file_id)).to_string_lossy().to_string());
+                    }
+                    b
+                } else if let Some(ref files) = pkt.files {
+                    let file_tuples: Vec<(String, u64)> = files.iter().map(|f| (f.clone(), 1024)).collect();
+                    crate::transport::transfer::TransferBatch::new(batch_id.clone(), file_tuples)
+                } else {
+                    crate::transport::transfer::TransferBatch::new(batch_id.clone(), Vec::new())
+                };
+
+                transfer_mgr.batches.write().insert(batch_id.clone(), batch);
+                let _ = app.emit(
+                    "files-batch-started",
+                    &serde_json::json!({
+                        "batch_id": batch_id,
+                        "sender": pkt.name.clone().unwrap_or_else(|| peer_addr.to_string()),
+                    }),
+                );
+            }
+            "files.chunk" => {
+                let batch_id = match pkt.batch_id.as_deref().or(pkt.id.as_deref()) {
+                    Some(b) => b.to_string(),
+                    None => return,
+                };
+                let file_id = match pkt.file_id.as_deref() {
+                    Some(f) => f.to_string(),
+                    None => return,
+                };
+                let offset = pkt.offset.unwrap_or(0);
+                let chunk_len = pkt.len.unwrap_or(0);
+                let data_b64 = match pkt.data.as_deref() {
+                    Some(d) => d,
+                    None => return,
+                };
+                let expected_chunk_hash = match pkt.sha256_chunk.as_deref() {
+                    Some(h) => h.to_lowercase(),
+                    None => return,
+                };
+
+                // 1. Decode base64
+                let chunk_bytes = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::error!("[Files] Failed to decode chunk base64: {}", e);
+                        return;
+                    }
+                };
+
+                if chunk_bytes.len() as u64 != chunk_len {
+                    log::error!("[Files] Chunk len mismatch: expected {}, decoded {}", chunk_len, chunk_bytes.len());
+                    return;
+                }
+
+                // 2. Cryptographic checksum verification
+                use sha2::Digest;
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(&chunk_bytes);
+                let computed_hash = format!("{:x}", hasher.finalize());
+                if computed_hash != expected_chunk_hash {
+                    log::error!(
+                        "[Files] Chunk sha256 mismatch! Expected {}, got {}",
+                        expected_chunk_hash, computed_hash
                     );
+                    return; // Corrupted chunk rejected; do not write to disk, do not ack
+                }
+
+                // 3. Write chunk into temp file at offset
+                let transfer_mgr = app.state::<crate::transport::transfer::TransferManager>();
+                let temp_path = {
+                    let batches = transfer_mgr.batches.read();
+                    batches.get(&batch_id).and_then(|b| {
+                        b.items.iter().find(|it| it.file_id == file_id).and_then(|it| it.temp_path.clone())
+                    })
+                };
+
+                let temp_path_buf = temp_path
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        crate::transport::transfer::default_temp_dir()
+                            .join(format!("{}_{}.part", batch_id, file_id))
+                    });
+
+                use std::io::{Seek, SeekFrom, Write};
+                let write_res = std::fs::OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(&temp_path_buf)
+                    .and_then(|mut f| {
+                        f.seek(SeekFrom::Start(offset))?;
+                        f.write_all(&chunk_bytes)?;
+                        f.flush()
+                    });
+
+                if let Err(e) = write_res {
+                    log::error!("[Files] Failed to write chunk to {:?}: {}", temp_path_buf, e);
+                    return;
+                }
+
+                // 4. Update progress
+                let new_offset = offset + chunk_len;
+                {
+                    let mut batches = transfer_mgr.batches.write();
+                    if let Some(b) = batches.get_mut(&batch_id) {
+                        let _ = b.set_file_offset(&file_id, new_offset);
+                    }
+                }
+
+                // 5. Reply files.ack
+                let ack_pkt = WireMessage {
+                    t: "files.ack".to_string(),
+                    v: Some(1),
+                    batch_id: Some(batch_id.clone()),
+                    file_id: Some(file_id.clone()),
+                    offset: Some(new_offset),
+                    target: pkt.o.clone(),
+                    ..Default::default()
+                };
+                let _ = out_tx.send(ack_pkt).await;
+
+                let _ = app.emit(
+                    "transfer-progress",
+                    &serde_json::json!({
+                        "batch_id": batch_id,
+                        "file_id": file_id,
+                        "offset": new_offset,
+                    }),
+                );
+            }
+            "files.done" => {
+                let batch_id = match pkt.batch_id.as_deref().or(pkt.id.as_deref()) {
+                    Some(b) => b.to_string(),
+                    None => return,
+                };
+                let file_id = match pkt.file_id.as_deref() {
+                    Some(f) => f.to_string(),
+                    None => return,
+                };
+                let sender_total_hash = match pkt.sha256_total.as_deref() {
+                    Some(h) => h.to_lowercase(),
+                    None => return,
+                };
+
+                let transfer_mgr = app.state::<crate::transport::transfer::TransferManager>();
+                let (filename, temp_path) = {
+                    let batches = transfer_mgr.batches.read();
+                    if let Some(b) = batches.get(&batch_id) {
+                        if let Some(it) = b.items.iter().find(|i| i.file_id == file_id) {
+                            (it.filename.clone(), it.temp_path.clone())
+                        } else {
+                            (file_id.clone(), None)
+                        }
+                    } else {
+                        (file_id.clone(), None)
+                    }
+                };
+
+                let temp_path_buf = temp_path
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        crate::transport::transfer::default_temp_dir()
+                            .join(format!("{}_{}.part", batch_id, file_id))
+                    });
+
+                let computed_res = crate::transport::transfer::compute_file_sha256(&temp_path_buf);
+                match computed_res {
+                    Ok((_size, actual_total_hash)) => {
+                        if actual_total_hash.to_lowercase() == sender_total_hash {
+                            let dl_dir = crate::transport::transfer::default_download_dir();
+                            let dest_path = dl_dir.join(&filename);
+                            let _ = std::fs::rename(&temp_path_buf, &dest_path)
+                                .or_else(|_| {
+                                    std::fs::copy(&temp_path_buf, &dest_path)
+                                        .and_then(|_| std::fs::remove_file(&temp_path_buf))
+                                });
+
+                            {
+                                let mut batches = transfer_mgr.batches.write();
+                                if let Some(b) = batches.get_mut(&batch_id) {
+                                    let _ = b.verify_and_complete_file_path(
+                                        &file_id,
+                                        &dest_path,
+                                        &sender_total_hash,
+                                    );
+                                }
+                            }
+
+                            let _ = app.emit(
+                                "file-completed",
+                                &serde_json::json!({
+                                    "batch_id": batch_id,
+                                    "file_id": file_id,
+                                    "path": dest_path.to_string_lossy(),
+                                    "checksum": sender_total_hash,
+                                }),
+                            );
+                        } else {
+                            log::error!(
+                                "[Files] Total checksum mismatch for batch {} file {}! Sender hash: {}, computed: {}",
+                                batch_id, file_id, sender_total_hash, actual_total_hash
+                            );
+                            let _ = std::fs::remove_file(&temp_path_buf);
+                            {
+                                let mut batches = transfer_mgr.batches.write();
+                                if let Some(b) = batches.get_mut(&batch_id) {
+                                    b.phase = crate::transport::transfer::TransferPhase::Failed;
+                                }
+                            }
+                            let _ = app.emit(
+                                "transfer-failed",
+                                &serde_json::json!({
+                                    "batch_id": batch_id,
+                                    "file_id": file_id,
+                                    "error": "Total checksum mismatch against sender-supplied hash",
+                                }),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("[Files] Failed to compute total checksum: {}", e);
+                        let _ = std::fs::remove_file(&temp_path_buf);
+                    }
+                }
+            }
+            "files.ack" => {
+                if let (Some(ref b_id), Some(ref f_id), Some(ack_offset)) =
+                    (&pkt.batch_id, &pkt.file_id, pkt.offset)
+                {
+                    let transfer_mgr = app.state::<crate::transport::transfer::TransferManager>();
+                    let _ = transfer_mgr.ack_tx.send(crate::transport::transfer::AckNotification {
+                        batch_id: b_id.clone(),
+                        file_id: f_id.clone(),
+                        offset: ack_offset,
+                    });
+
+                    {
+                        let mut batches = transfer_mgr.batches.write();
+                        if let Some(b) = batches.get_mut(b_id) {
+                            let _ = b.set_file_offset(f_id, ack_offset);
+                        }
+                    }
+                }
+            }
+            "files.cancel" => {
+                if let Some(ref b_id) = pkt.batch_id {
+                    let transfer_mgr = app.state::<crate::transport::transfer::TransferManager>();
+                    transfer_mgr.cancel_batch(b_id);
+                    let _ = app.emit("transfer-cancelled", &serde_json::json!({ "batch_id": b_id }));
                 }
             }
             "wol.info" => {
@@ -2442,7 +2720,7 @@ impl NetworkManager {
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
-                | "files.batch" | "files.chunk"
+                | "files.batch" | "files.chunk" | "files.done" | "files.ack" | "files.cancel"
         );
 
         let guard = self.active_clients.read();
@@ -2485,7 +2763,7 @@ impl NetworkManager {
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
-                | "files.batch" | "files.chunk"
+                | "files.batch" | "files.chunk" | "files.done" | "files.ack" | "files.cancel"
         );
 
         let senders: Vec<mpsc::Sender<WireMessage>> = {
