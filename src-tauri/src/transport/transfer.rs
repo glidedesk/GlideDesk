@@ -325,12 +325,17 @@ pub async fn cancel_transfer_task(
     app: AppHandle,
 ) -> Result<(), String> {
     log::info!("[Transfer] Cancelling transfer task: {}", batch_id);
+    let peer_dest = {
+        let batches = mgr.batches.read();
+        batches.get(&batch_id).and_then(|b| b.peer_id.clone())
+    };
     let found = mgr.cancel_batch(&batch_id);
     if found {
         let cancel_msg = crate::network::WireMessage {
             t: "files.cancel".to_string(),
             v: Some(1),
             batch_id: Some(batch_id.clone()),
+            d: peer_dest.map(|p| vec![p]),
             ..Default::default()
         };
         network.send_packet(cancel_msg).await;

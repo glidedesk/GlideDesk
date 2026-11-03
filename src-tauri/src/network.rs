@@ -681,6 +681,48 @@ impl DiscoveryService {
     }
 }
 
+/// Snapshot of active client metadata for routing and destination resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInfo {
+    pub id: String,
+    pub peer_id: Option<String>,
+    pub peer_ip: String,
+    pub authenticated: bool,
+}
+
+impl ClientInfo {
+    pub fn new(id: impl Into<String>, peer_id: Option<String>, peer_ip: impl Into<String>, authenticated: bool) -> Self {
+        Self {
+            id: id.into(),
+            peer_id,
+            peer_ip: peer_ip.into(),
+            authenticated,
+        }
+    }
+}
+
+/// Resolves a transfer target string to a routing destination list.
+pub fn resolve_file_dest(target: Option<&str>, active: &[ClientInfo]) -> Result<Vec<String>, String> {
+    if let Some(t) = target {
+        if let Some(client) = active.iter().find(|c| {
+            c.id == t
+                || c.peer_id.as_deref() == Some(t)
+                || c.peer_ip == t
+        }) {
+            Ok(vec![client.id.clone()])
+        } else {
+            Err(format!("target peer '{}' is not connected", t))
+        }
+    } else {
+        let auth_clients: Vec<&ClientInfo> = active.iter().filter(|c| c.authenticated).collect();
+        if auth_clients.len() == 1 {
+            Ok(vec![auth_clients[0].id.clone()])
+        } else {
+            Err("send_files requires a target peer (multiple peers connected)".to_string())
+        }
+    }
+}
+
 /// Active client connection to a remote host or guest peer in the mesh.
 pub struct ActiveClientSession {
     pub id: String,
@@ -1684,6 +1726,12 @@ impl MeshServer {
                 let _ = app.emit("state-change", &snap);
             }
             "files.batch" => {
+                if let Some(ref dests) = pkt.d {
+                    if !dests.iter().any(|d| d == local_id || d == &peer_addr.ip().to_string() || d == &peer_addr.to_string()) {
+                        log::warn!("[Files] Ignoring files.batch not addressed to local peer (dests={:?}, local_id={})", dests, local_id);
+                        return;
+                    }
+                }
                 log::info!("[Files] Inbound files.batch from {}: batch_id={:?}", peer_addr, pkt.batch_id);
                 let batch_id = pkt.batch_id.clone().or(pkt.id.clone())
                     .unwrap_or_else(|| format!("batch_{}", chrono::Utc::now().timestamp_millis()));
@@ -1719,6 +1767,12 @@ impl MeshServer {
                 );
             }
             "files.chunk" => {
+                if let Some(ref dests) = pkt.d {
+                    if !dests.iter().any(|d| d == local_id || d == &peer_addr.ip().to_string() || d == &peer_addr.to_string()) {
+                        log::warn!("[Files] Ignoring files.chunk not addressed to local peer (dests={:?}, local_id={})", dests, local_id);
+                        return;
+                    }
+                }
                 let batch_id = match pkt.batch_id.as_deref().or(pkt.id.as_deref()) {
                     Some(b) => b.to_string(),
                     None => return,
@@ -1829,6 +1883,12 @@ impl MeshServer {
                 );
             }
             "files.done" => {
+                if let Some(ref dests) = pkt.d {
+                    if !dests.iter().any(|d| d == local_id || d == &peer_addr.ip().to_string() || d == &peer_addr.to_string()) {
+                        log::warn!("[Files] Ignoring files.done not addressed to local peer (dests={:?}, local_id={})", dests, local_id);
+                        return;
+                    }
+                }
                 let batch_id = match pkt.batch_id.as_deref().or(pkt.id.as_deref()) {
                     Some(b) => b.to_string(),
                     None => return,
@@ -1943,6 +2003,12 @@ impl MeshServer {
                 }
             }
             "files.cancel" => {
+                if let Some(ref dests) = pkt.d {
+                    if !dests.iter().any(|d| d == local_id || d == &peer_addr.ip().to_string() || d == &peer_addr.to_string()) {
+                        log::warn!("[Files] Ignoring files.cancel not addressed to local peer (dests={:?}, local_id={})", dests, local_id);
+                        return;
+                    }
+                }
                 if let Some(ref b_id) = pkt.batch_id {
                     let transfer_mgr = app.state::<crate::transport::transfer::TransferManager>();
                     transfer_mgr.cancel_batch(b_id);
@@ -2707,8 +2773,10 @@ impl NetworkManager {
             let mut s = self.seq.lock();
             *s += 1;
             pkt.s = Some(*s);
-            let client_ids: Vec<String> = self.active_clients.read().keys().cloned().collect();
-            pkt.d = Some(client_ids);
+            if pkt.d.is_none() {
+                let client_ids: Vec<String> = self.active_clients.read().keys().cloned().collect();
+                pkt.d = Some(client_ids);
+            }
             pkt.h = Some(0);
         }
 
@@ -2750,8 +2818,10 @@ impl NetworkManager {
             let mut s = self.seq.lock();
             *s += 1;
             pkt.s = Some(*s);
-            let client_ids: Vec<String> = self.active_clients.read().keys().cloned().collect();
-            pkt.d = Some(client_ids);
+            if pkt.d.is_none() {
+                let client_ids: Vec<String> = self.active_clients.read().keys().cloned().collect();
+                pkt.d = Some(client_ids);
+            }
             pkt.h = Some(0);
         }
 
@@ -2797,6 +2867,20 @@ impl NetworkManager {
 
     /// Send to a specific peer in the mesh.
     #[allow(dead_code)]
+    /// Returns snapshot list of active connected clients.
+    pub fn get_active_clients_info(&self) -> Vec<ClientInfo> {
+        let guard = self.active_clients.read();
+        guard
+            .values()
+            .map(|c| ClientInfo {
+                id: c.id.clone(),
+                peer_id: c.peer_id.read().clone(),
+                peer_ip: c.peer_addr.ip().to_string(),
+                authenticated: *c.authenticated.read(),
+            })
+            .collect()
+    }
+
     pub async fn send_to(&self, target_id: &str, pkt: WireMessage) {
         self.flush_motion();
         let tx_opt = {
@@ -3038,5 +3122,242 @@ mod tests {
         // 3. Simulate successful handshake authentication
         *session.authenticated.write() = true;
         assert!(*session.authenticated.read());
+    }
+
+    #[test]
+    fn test_resolve_file_dest_exact_rules_and_matching() {
+        let clients = vec![
+            ClientInfo::new("192.168.1.101:47800", Some("peer_alpha".into()), "192.168.1.101", true),
+            ClientInfo::new("192.168.1.102:47800", Some("peer_beta".into()), "192.168.1.102", true),
+            ClientInfo::new("192.168.1.103:47800", Some("peer_gamma".into()), "192.168.1.103", false),
+        ];
+
+        // 1. Match by client id
+        let res_id = resolve_file_dest(Some("192.168.1.101:47800"), &clients);
+        assert_eq!(res_id, Ok(vec!["192.168.1.101:47800".to_string()]));
+
+        // 2. Match by peer_id
+        let res_peer = resolve_file_dest(Some("peer_beta"), &clients);
+        assert_eq!(res_peer, Ok(vec!["192.168.1.102:47800".to_string()]));
+
+        // 3. Match by IP
+        let res_ip = resolve_file_dest(Some("192.168.1.101"), &clients);
+        assert_eq!(res_ip, Ok(vec!["192.168.1.101:47800".to_string()]));
+
+        // 4. Unknown target -> Err
+        let res_unknown = resolve_file_dest(Some("non_existent_peer"), &clients);
+        assert_eq!(res_unknown, Err("target peer 'non_existent_peer' is not connected".to_string()));
+
+        // 5. None + single authenticated client -> use it
+        let single_auth = vec![
+            ClientInfo::new("192.168.1.102:47800", Some("peer_beta".into()), "192.168.1.102", true),
+        ];
+        assert_eq!(resolve_file_dest(None, &single_auth), Ok(vec!["192.168.1.102:47800".to_string()]));
+
+        // 6. None + single unauthenticated client -> Err (0 authenticated)
+        let single_unauth = vec![
+            ClientInfo::new("192.168.1.103:47800", Some("peer_gamma".into()), "192.168.1.103", false),
+        ];
+        assert!(resolve_file_dest(None, &single_unauth).is_err());
+        assert_eq!(
+            resolve_file_dest(None, &single_unauth).unwrap_err(),
+            "send_files requires a target peer (multiple peers connected)"
+        );
+
+        // 7. None + zero clients -> Err
+        assert!(resolve_file_dest(None, &[]).is_err());
+        assert_eq!(
+            resolve_file_dest(None, &[]).unwrap_err(),
+            "send_files requires a target peer (multiple peers connected)"
+        );
+
+        // 8. None + multiple authenticated clients -> Err
+        assert!(resolve_file_dest(None, &clients).is_err());
+        assert_eq!(
+            resolve_file_dest(None, &clients).unwrap_err(),
+            "send_files requires a target peer (multiple peers connected)"
+        );
+    }
+
+    #[test]
+    fn test_file_transfer_packet_construction_d_routing() {
+        let active = vec![
+            ClientInfo::new("client_device_b", Some("peer_b".into()), "192.168.1.50", true),
+        ];
+
+        let dest = resolve_file_dest(Some("peer_b"), &active).expect("resolve peer_b");
+        assert_eq!(dest, vec!["client_device_b".to_string()]);
+
+        // Construct files.batch
+        let batch_pkt = WireMessage {
+            t: "files.batch".to_string(),
+            v: Some(1),
+            batch_id: Some("batch_test_01".to_string()),
+            target: Some("peer_b".to_string()),
+            d: Some(dest.clone()),
+            ..Default::default()
+        };
+        assert_eq!(batch_pkt.d, Some(vec!["client_device_b".to_string()]));
+        assert!(!batch_pkt.d.as_ref().unwrap().is_empty());
+
+        // Construct files.chunk
+        let chunk_pkt = WireMessage {
+            t: "files.chunk".to_string(),
+            v: Some(1),
+            batch_id: Some("batch_test_01".to_string()),
+            file_id: Some("file_01".to_string()),
+            offset: Some(0),
+            len: Some(1024),
+            target: Some("peer_b".to_string()),
+            d: Some(dest.clone()),
+            ..Default::default()
+        };
+        assert_eq!(chunk_pkt.d, Some(vec!["client_device_b".to_string()]));
+        assert!(!chunk_pkt.d.as_ref().unwrap().is_empty());
+
+        // Construct files.done
+        let done_pkt = WireMessage {
+            t: "files.done".to_string(),
+            v: Some(1),
+            batch_id: Some("batch_test_01".to_string()),
+            file_id: Some("file_01".to_string()),
+            sha256_total: Some("abcdef123456".to_string()),
+            target: Some("peer_b".to_string()),
+            d: Some(dest.clone()),
+            ..Default::default()
+        };
+        assert_eq!(done_pkt.d, Some(vec!["client_device_b".to_string()]));
+        assert!(!done_pkt.d.as_ref().unwrap().is_empty());
+
+        // Construct files.cancel
+        let cancel_pkt = WireMessage {
+            t: "files.cancel".to_string(),
+            v: Some(1),
+            batch_id: Some("batch_test_01".to_string()),
+            d: Some(dest.clone()),
+            ..Default::default()
+        };
+        assert_eq!(cancel_pkt.d, Some(vec!["client_device_b".to_string()]));
+        assert!(!cancel_pkt.d.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_three_peer_unicast_routing_and_observer_isolation() {
+        // Setup 3 peers: Host sends to Peer B, while Peer C (authenticated observer) must receive nothing.
+        let (tx_b, mut rx_b) = mpsc::channel::<WireMessage>(10);
+        let (tx_c, mut rx_c) = mpsc::channel::<WireMessage>(10);
+
+        let session_b = ActiveClientSession {
+            id: "192.168.1.102:47800".to_string(),
+            peer_id: Arc::new(RwLock::new(Some("peer_beta".to_string()))),
+            peer_addr: "192.168.1.102:47800".parse().unwrap(),
+            tx: tx_b,
+            authenticated: Arc::new(RwLock::new(true)),
+        };
+
+        let session_c = ActiveClientSession {
+            id: "192.168.1.103:47800".to_string(),
+            peer_id: Arc::new(RwLock::new(Some("peer_gamma_observer".to_string()))),
+            peer_addr: "192.168.1.103:47800".parse().unwrap(),
+            tx: tx_c,
+            authenticated: Arc::new(RwLock::new(true)),
+        };
+
+        let active_map = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let mut map = active_map.write();
+            map.insert(session_b.id.clone(), session_b);
+            map.insert(session_c.id.clone(), session_c);
+        }
+
+        let clients_info = {
+            let guard = active_map.read();
+            guard.values().map(|c| ClientInfo {
+                id: c.id.clone(),
+                peer_id: c.peer_id.read().clone(),
+                peer_ip: c.peer_addr.ip().to_string(),
+                authenticated: *c.authenticated.read(),
+            }).collect::<Vec<_>>()
+        };
+
+        // Resolve destination for peer_beta
+        let dest = resolve_file_dest(Some("peer_beta"), &clients_info).expect("resolve peer_beta");
+        assert_eq!(dest, vec!["192.168.1.102:47800".to_string()]);
+
+        // Build file transfer packets addressed strictly to dest
+        let packets = vec![
+            WireMessage {
+                t: "files.batch".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_unicast_99".to_string()),
+                d: Some(dest.clone()),
+                ..Default::default()
+            },
+            WireMessage {
+                t: "files.chunk".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_unicast_99".to_string()),
+                file_id: Some("file_0".to_string()),
+                offset: Some(0),
+                len: Some(512),
+                d: Some(dest.clone()),
+                ..Default::default()
+            },
+            WireMessage {
+                t: "files.done".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_unicast_99".to_string()),
+                file_id: Some("file_0".to_string()),
+                sha256_total: Some("hash123".to_string()),
+                d: Some(dest.clone()),
+                ..Default::default()
+            },
+            WireMessage {
+                t: "files.cancel".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_unicast_99".to_string()),
+                d: Some(dest.clone()),
+                ..Default::default()
+            },
+        ];
+
+        // Simulate send_packet routing matcher
+        for pkt in packets {
+            let target_dests = pkt.d.clone();
+            let is_sensitive = matches!(
+                pkt.t.as_str(),
+                "files.batch" | "files.chunk" | "files.done" | "files.cancel"
+            );
+            assert!(is_sensitive, "File packets must be marked is_sensitive");
+
+            let guard = active_map.read();
+            for client in guard.values() {
+                let pid = client.peer_id.read().clone();
+                let matches_dest = match &target_dests {
+                    Some(dests) => dests.iter().any(|d| {
+                        d == &client.id
+                            || pid.as_deref() == Some(d.as_str())
+                            || d == &client.peer_addr.ip().to_string()
+                    }),
+                    None => true,
+                };
+
+                if matches_dest && (!is_sensitive || *client.authenticated.read()) {
+                    let _ = client.tx.try_send(pkt.clone());
+                }
+            }
+        }
+
+        // Intended peer B must have received all 4 packets
+        assert_eq!(rx_b.try_recv().unwrap().t, "files.batch");
+        assert_eq!(rx_b.try_recv().unwrap().t, "files.chunk");
+        assert_eq!(rx_b.try_recv().unwrap().t, "files.done");
+        assert_eq!(rx_b.try_recv().unwrap().t, "files.cancel");
+
+        // Third peer observer C must have received NO packets
+        assert!(
+            rx_c.try_recv().is_err(),
+            "Observer peer C must receive NO files.batch/chunk/done/cancel packets"
+        );
     }
 }

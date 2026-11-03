@@ -2,6 +2,8 @@
 // Tauri v2 + Rust Proof-of-Concept: IPC commands matching window.macshare contract.
 
 use crate::network::NetworkManager;
+#[allow(unused_imports)]
+pub use crate::network::{ClientInfo, resolve_file_dest};
 use crate::state::{AppState, FullState, UpdateDownload};
 use serde::Deserialize;
 use serde_json::Value;
@@ -790,6 +792,10 @@ pub async fn send_files(
         return Err("No files specified for transfer".to_string());
     }
 
+    let target_str = target.as_deref().filter(|s| !s.trim().is_empty());
+    let dest = resolve_file_dest(target_str, &network.get_active_clients_info())?;
+    log::info!("[SendFiles] dest={:?}", dest);
+
     // 1. Select optimal transfer route from real state inputs
     let route = crate::transport::route::select_route_for_peer(target.as_deref(), &state, &phone_mgr);
     log::info!(
@@ -827,11 +833,11 @@ pub async fn send_files(
     }
 
     // 3. Check for existing batch for resume
-    let target_id = target.as_deref().unwrap_or("default");
+    let target_id = target.as_deref().unwrap_or(&dest[0]);
     let existing_batch_info = {
         let batches = transfer_mgr.batches.read();
         batches.values().find(|b| {
-            b.peer_id.as_deref() == Some(target_id)
+            (b.peer_id.as_deref() == Some(target_id) || b.peer_id.as_deref() == Some(&dest[0]))
                 && b.items.len() == wire_items.len()
                 && b.items.iter().all(|it| {
                     wire_items.iter().any(|wi| wi.name == it.filename && it.checksum_sha256.as_ref() == Some(&wi.sha256))
@@ -850,7 +856,7 @@ pub async fn send_files(
         existing
     } else {
         let mut b = crate::transport::transfer::TransferBatch::new_with_checksums(batch_id.clone(), file_tuples);
-        b.peer_id = Some(target_id.to_string());
+        b.peer_id = Some(dest[0].clone());
         b
     };
 
@@ -882,6 +888,7 @@ pub async fn send_files(
         total_bytes: Some(total_bytes),
         files: Some(files.clone()),
         target: target.clone(),
+        d: Some(dest.clone()),
         ..Default::default()
     };
     network.send_packet(batch_pkt).await;
@@ -944,6 +951,7 @@ pub async fn send_files(
                 data: Some(data_b64),
                 sha256_chunk: Some(chunk_hash),
                 target: target.clone(),
+                d: Some(dest.clone()),
                 ..Default::default()
             };
             network.send_packet(chunk_pkt.clone()).await;
@@ -1018,6 +1026,7 @@ pub async fn send_files(
             file_id: Some(wi.file_id.clone()),
             sha256_total: Some(file_sha256.clone()),
             target: target.clone(),
+            d: Some(dest.clone()),
             ..Default::default()
         };
         network.send_packet(done_pkt).await;
