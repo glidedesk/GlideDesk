@@ -368,14 +368,14 @@ pub fn phone_install_full(
     let guard = phone_mgr.session.read();
     let serial = guard.as_ref().map(|s| s.serial.clone()).ok_or_else(|| "No active phone connected".to_string())?;
 
-    // Look for APK
-    let candidates = [
-        "dist/GlideDesk-1.1.1-full.apk",
-        "dist/GlideDesk-1.1.1.apk",
-        "/Volumes/External/bensonmac/Documents/BensonProject/GlideDesk/dist/GlideDesk-1.1.1-full.apk",
-    ];
-    let apk_path = candidates.iter().map(std::path::PathBuf::from).find(|p| p.is_file())
-        .ok_or_else(|| "Full Android companion APK not found in dist/".to_string())?;
+    // Resolve APK via bundled resource dir with relative dev fallbacks
+    let apk_path = app.path().resource_dir().ok().and_then(|r| {
+        let p = r.join("dist/GlideDesk-1.1.1-full.apk");
+        if p.is_file() { Some(p) } else { None }
+    })
+    .or_else(|| crate::phone::adb::resolve_resource_path("dist/GlideDesk-1.1.1-full.apk"))
+    .or_else(|| crate::phone::adb::resolve_resource_path("dist/GlideDesk-1.1.1.apk"))
+    .ok_or_else(|| "Full Android companion APK not found in dist/ or resource bundle".to_string())?;
 
     let apk_str = apk_path.to_str().unwrap();
     let _ = phone_mgr.adb.shell(&serial, &format!("pm install -r {}", apk_str));

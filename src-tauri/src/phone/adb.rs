@@ -27,6 +27,30 @@ pub struct AdbClient {
     server_jar: Option<PathBuf>,
 }
 
+pub fn resolve_resource_path(relative: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    // 1. Current executable directory / bundle Resources
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(relative));
+            candidates.push(dir.join("resources").join(relative));
+            candidates.push(dir.join("../Resources").join(relative));
+            if let Some(filename) = Path::new(relative).file_name() {
+                candidates.push(dir.join(filename));
+                candidates.push(dir.join("../Resources").join(filename));
+            }
+        }
+    }
+
+    // 2. Relative development directory fallbacks
+    candidates.push(PathBuf::from(relative));
+    candidates.push(PathBuf::from("src-tauri").join(relative));
+    candidates.push(PathBuf::from("..").join(relative));
+
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 impl AdbClient {
     pub fn new() -> Self {
         Self {
@@ -104,25 +128,8 @@ impl AdbClient {
     }
 
     pub fn find_scrcpy_server() -> Option<PathBuf> {
-        let mut candidates = Vec::new();
-
-        // 1. Current executable directory vendor / resources
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.push(dir.join("scrcpy-server"));
-                candidates.push(dir.join("resources/scrcpy-server"));
-                candidates.push(dir.join("../Resources/scrcpy-server"));
-                candidates.push(dir.join("vendor/scrcpy-server"));
-            }
-        }
-
-        // 2. Relative to working directory
-        candidates.push(PathBuf::from("src-tauri/vendor/scrcpy-server"));
-        candidates.push(PathBuf::from("vendor/scrcpy-server"));
-        candidates.push(PathBuf::from("/Volumes/External/bensonmac/Documents/BensonProject/GlideDesk/src-tauri/vendor/scrcpy-server"));
-        candidates.push(PathBuf::from("/Volumes/External/bensonmac/Documents/BensonProject/TwinDesk/mac/vendor/scrcpy-server"));
-
-        candidates.into_iter().find(|p| p.is_file())
+        resolve_resource_path("vendor/scrcpy-server")
+            .or_else(|| resolve_resource_path("scrcpy-server"))
     }
 
     fn run_adb(&self, args: &[&str]) -> Result<String, String> {
