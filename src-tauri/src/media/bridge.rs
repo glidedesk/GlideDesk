@@ -2,8 +2,10 @@
 // Pure Rust Native OS Bridge Commands (Virtual Display, Audio Capture, Gamepad Emulation)
 
 use crate::media::{AudioEngine, ScreenEngine};
-use tauri::State;
+use crate::network::WireMessage;
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
+use std::sync::Arc;
 
 pub struct NativeBridgeManager {
     pub audio_engine: AudioEngine,
@@ -12,13 +14,11 @@ pub struct NativeBridgeManager {
     screen_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>>,
 }
 
-use std::sync::Arc;
-
 impl NativeBridgeManager {
     pub fn new() -> Self {
         let (audio_engine, audio_rx) = AudioEngine::new();
         let (screen_engine, screen_rx) = ScreenEngine::new();
-        
+
         let bridge = Self {
             audio_engine,
             screen_engine,
@@ -26,31 +26,44 @@ impl NativeBridgeManager {
             screen_rx: Arc::new(tokio::sync::Mutex::new(screen_rx)),
         };
 
-        bridge.start_consumer_loops();
         bridge
     }
 
-    fn start_consumer_loops(&self) {
+    pub fn start_broadcasting(&self, app: AppHandle) {
         let audio_rx = self.audio_rx.clone();
+        let app_audio = app.clone();
         tokio::spawn(async move {
             let mut rx = audio_rx.lock().await;
             while let Some(bytes) = rx.recv().await {
-                log::trace!("[AudioStream] Consumed {} bytes of real audio PCM sample data", bytes.len());
+                let msg = WireMessage {
+                    t: "media.audio".to_string(),
+                    audio_bytes: Some(bytes),
+                    ..Default::default()
+                };
+                let _ = app_audio.emit("media-audio-stream", &msg);
             }
         });
 
         let screen_rx = self.screen_rx.clone();
+        let app_screen = app.clone();
         tokio::spawn(async move {
             let mut rx = screen_rx.lock().await;
             while let Some(frame) = rx.recv().await {
-                log::trace!("[ScreenStream] Consumed {} bytes of real screen frame buffer data", frame.len());
+                let msg = WireMessage {
+                    t: "media.screen".to_string(),
+                    frame_png: Some(frame),
+                    fps: Some(30),
+                    ..Default::default()
+                };
+                let _ = app_screen.emit("media-screen-stream", &msg);
             }
         });
     }
 }
 
 #[tauri::command]
-pub fn start_audio_capture(bridge: State<'_, NativeBridgeManager>) -> Result<(), String> {
+pub fn start_audio_capture(bridge: State<'_, NativeBridgeManager>, app: AppHandle) -> Result<(), String> {
+    bridge.start_broadcasting(app);
     bridge.audio_engine.start_capture()
 }
 
@@ -60,7 +73,8 @@ pub fn stop_audio_capture(bridge: State<'_, NativeBridgeManager>) {
 }
 
 #[tauri::command]
-pub fn start_screen_streaming(fps: u32, bridge: State<'_, NativeBridgeManager>) -> Result<(), String> {
+pub fn start_screen_streaming(fps: u32, bridge: State<'_, NativeBridgeManager>, app: AppHandle) -> Result<(), String> {
+    bridge.start_broadcasting(app);
     bridge.screen_engine.start_streaming(fps)
 }
 
