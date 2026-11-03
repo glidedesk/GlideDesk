@@ -15,6 +15,8 @@ mod state;
 mod tray;
 pub mod window_manager;
 
+use media::NativeBridgeManager;
+
 use network::NetworkManager;
 use state::AppState;
 use window_manager::ParkedWindowRegistry;
@@ -38,6 +40,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(state.clone())
         .manage(window_reg.clone())
+        .manage(NativeBridgeManager::new())
         .setup(move |app| {
             let handle = app.handle().clone();
             let network = NetworkManager::new(handle.clone(), setup_state);

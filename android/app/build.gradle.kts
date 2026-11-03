@@ -31,10 +31,14 @@ android {
             buildConfigField("boolean", "ACCESSIBILITY", "true")
         }
     }
+    signingConfigs {
+        getByName("debug") {
+            // Use standard debug keystore for CI builds if none provided
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Sideloaded from GitHub releases: signed with this machine's debug key until a release key exists.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
