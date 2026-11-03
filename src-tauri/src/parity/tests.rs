@@ -13,7 +13,8 @@ mod tests {
     #[test]
     fn test_parity_list_apps() {
         let apps = crate::parity::list_apps().unwrap();
-        assert!(apps.is_empty());
+        // macOS should detect at least system or user applications
+        assert!(!apps.is_empty());
     }
 
     #[test]

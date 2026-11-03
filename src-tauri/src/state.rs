@@ -388,15 +388,11 @@ impl Default for TerminalState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppsState {
     pub open: u32,
-}
-
-impl Default for AppsState {
-    fn default() -> Self {
-        Self { open: 0 }
-    }
+    #[serde(default)]
+    pub pinned: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

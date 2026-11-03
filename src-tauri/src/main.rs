@@ -185,6 +185,12 @@ fn main() {
             parity::setup_sshd,
             parity::phone_mount,
             parity::phone_unmount,
+            parity::fix_firewall,
+            parity::net_wifi,
+            parity::net_location,
+            parity::net_join_hotspot,
+            parity::net_cancel,
+            parity::set_remote,
         ])
         .build(tauri::generate_context!())
         .expect("error while building GlideDesk application")
