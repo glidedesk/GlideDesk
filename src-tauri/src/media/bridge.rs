@@ -3,17 +3,24 @@
 
 use crate::media::{AudioEngine, ScreenEngine};
 use tauri::State;
+use tokio::sync::mpsc;
 
 pub struct NativeBridgeManager {
     audio_engine: AudioEngine,
     screen_engine: ScreenEngine,
+    _audio_rx: mpsc::Receiver<Vec<u8>>,
+    _screen_rx: mpsc::Receiver<Vec<u8>>,
 }
 
 impl NativeBridgeManager {
     pub fn new() -> Self {
+        let (audio_engine, audio_rx) = AudioEngine::new();
+        let (screen_engine, screen_rx) = ScreenEngine::new();
         Self {
-            audio_engine: AudioEngine::new(),
-            screen_engine: ScreenEngine::new(),
+            audio_engine,
+            screen_engine,
+            _audio_rx: audio_rx,
+            _screen_rx: screen_rx,
         }
     }
 }
