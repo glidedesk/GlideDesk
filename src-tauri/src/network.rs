@@ -1208,8 +1208,18 @@ impl MeshServer {
                 };
 
                 if is_auth {
-                    state.add_client(info);
+                    state.add_client(info.clone());
                     state.set_pairing(None);
+                    if let Some(ref macs) = pkt.macs {
+                        crate::wol::record_peer_wol_info(
+                            state,
+                            &info.id,
+                            &info.name,
+                            &info.os,
+                            macs.clone(),
+                            info.address.as_deref(),
+                        );
+                    }
                 } else {
                     log::warn!("[Auth] Unauthenticated hello/welcome from {} ({:?}) - not adding client", peer_addr, pkt.id);
                 }
@@ -1519,6 +1529,29 @@ impl MeshServer {
                         }),
                     );
                 }
+            }
+            "wol.info" => {
+                log::info!("[WoL] Inbound wol.info packet from {}", peer_addr);
+                let sender_id = pkt
+                    .id
+                    .clone()
+                    .or_else(|| peer_id_holder.read().clone())
+                    .unwrap_or_else(|| peer_addr.ip().to_string());
+                let sender_name = pkt.name.clone().unwrap_or_else(|| "Remote Peer".to_string());
+                let sender_os = pkt.os.clone().unwrap_or_else(|| "unknown".to_string());
+                let macs = pkt.macs.clone().unwrap_or_default();
+                let address = pkt.address.clone().unwrap_or_else(|| peer_addr.ip().to_string());
+
+                crate::wol::record_peer_wol_info(
+                    state,
+                    &sender_id,
+                    &sender_name,
+                    &sender_os,
+                    macs,
+                    Some(&address),
+                );
+                let snap = state.snapshot();
+                let _ = app.emit("state-change", &snap);
             }
             _ => {}
         }

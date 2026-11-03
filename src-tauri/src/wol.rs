@@ -86,16 +86,116 @@ pub fn send_wol_magic_packet(mac_str: &str, target_ip: Option<&str>) -> Result<(
     }
 }
 
-#[tauri::command]
-pub fn wake_peer(
-    id: String,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
-    log::info!("[WoL] Requesting wake for peer: {}", id);
+/// Pure builder for OS-specific Wake-on-LAN system configuration commands.
+pub fn build_wake_config_command(
+    os: &str,
+    on: bool,
+    iface: Option<&str>,
+) -> Result<(String, Vec<String>), String> {
+    match os.to_lowercase().as_str() {
+        "macos" | "mac" | "darwin" => {
+            let arg = if on { "1" } else { "0" };
+            Ok(("pmset".to_string(), vec!["-a".to_string(), "womp".to_string(), arg.to_string()]))
+        }
+        "windows" | "win" => {
+            let action = if on { "/deviceenablewake" } else { "/devicedisablewake" };
+            let dev = iface.unwrap_or("Ethernet");
+            Ok(("powercfg".to_string(), vec![action.to_string(), dev.to_string()]))
+        }
+        "linux" => {
+            let dev = iface.unwrap_or("eth0");
+            let flag = if on { "g" } else { "d" };
+            Ok(("ethtool".to_string(), vec!["-s".to_string(), dev.to_string(), "wol".to_string(), flag.to_string()]))
+        }
+        _ => Err(format!("Unsupported OS for Wake-on-LAN configuration: '{}'", os)),
+    }
+}
+
+/// Retrieve local network interface MAC addresses for advertising in wol.info.
+pub fn get_local_macs() -> Vec<String> {
+    let mut macs = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("ifconfig").output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("ether ") {
+                    if let Some(mac) = trimmed.strip_prefix("ether ") {
+                        let clean_mac = mac.trim().split_whitespace().next().unwrap_or("");
+                        if parse_mac(clean_mac).is_ok() && clean_mac != "00:00:00:00:00:00" {
+                            macs.push(clean_mac.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("ip").args(["link"]).output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("link/ether ") {
+                    if let Some(mac) = trimmed.strip_prefix("link/ether ") {
+                        let clean_mac = mac.trim().split_whitespace().next().unwrap_or("");
+                        if parse_mac(clean_mac).is_ok() && clean_mac != "00:00:00:00:00:00" {
+                            macs.push(clean_mac.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("getmac").args(["/fo", "csv", "/nh"]).output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split(',').collect();
+                if let Some(raw) = parts.first() {
+                    let clean = raw.trim_matches('"').trim();
+                    if parse_mac(clean).is_ok() {
+                        macs.push(clean.replace('-', ":").to_lowercase());
+                    }
+                }
+            }
+        }
+    }
+    macs
+}
+
+/// Record peer WoL MAC addresses and last-known IP into app state.
+pub fn record_peer_wol_info(
+    state: &AppState,
+    peer_id: &str,
+    name: &str,
+    os: &str,
+    macs: Vec<String>,
+    address: Option<&str>,
+) {
+    if macs.is_empty() {
+        return;
+    }
+    let mut s = state.inner.write();
+    s.wake.peers.insert(
+        peer_id.to_string(),
+        serde_json::json!({
+            "name": name,
+            "os": os,
+            "macs": macs,
+            "address": address.unwrap_or(""),
+            "at": chrono::Utc::now().timestamp_millis()
+        }),
+    );
+}
+
+/// Internal testable WoL peer awakening logic.
+pub fn wake_peer_internal(id: &str, state: &AppState) -> Result<Vec<String>, String> {
     let (target_macs, target_address) = {
         let s = state.inner.read();
-        if let Some(entry) = s.wake.peers.get(&id) {
+        if let Some(entry) = s.wake.peers.get(id) {
             let mut macs = Vec::new();
             if let Some(arr) = entry.get("macs").and_then(|v| v.as_array()) {
                 for m in arr {
@@ -141,10 +241,21 @@ pub fn wake_peer(
 
     {
         let mut s = state.inner.write();
-        s.wake.waking = Some(id);
+        s.wake.waking = Some(id.to_string());
     }
-    push_state(&app, &state);
 
+    Ok(target_macs)
+}
+
+#[tauri::command]
+pub fn wake_peer(
+    id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    log::info!("[WoL] Requesting wake for peer: {}", id);
+    wake_peer_internal(&id, &state)?;
+    push_state(&app, &state);
     Ok(())
 }
 
@@ -155,13 +266,9 @@ pub fn set_wake(
     app: AppHandle,
 ) -> Result<(), String> {
     log::info!("[WoL] Setting Wake-on-LAN: {}", on);
-    #[cfg(target_os = "macos")]
-    {
-        // On macOS, try to toggle system womp (wake on magic packet) via pmset if possible
-        let arg = if on { "1" } else { "0" };
-        let _ = std::process::Command::new("pmset")
-            .args(["-a", "womp", arg])
-            .output();
+    let os = crate::network::current_os();
+    if let Ok((cmd, args)) = build_wake_config_command(os, on, None) {
+        let _ = std::process::Command::new(&cmd).args(&args).output();
     }
 
     {
@@ -227,5 +334,83 @@ mod tests {
         let s = app_state.inner.read();
         let peer_entry = s.wake.peers.get("non_existent_peer");
         assert!(peer_entry.is_none());
+
+        // wake_peer_internal returns explicit error naming missing peer MAC
+        let res = wake_peer_internal("non_existent_peer", &app_state);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("No MAC address recorded for peer 'non_existent_peer'"));
+    }
+
+    #[test]
+    fn test_build_wake_config_command_all_os() {
+        // macOS
+        let (cmd, args) = build_wake_config_command("macos", true, None).expect("mac on");
+        assert_eq!(cmd, "pmset");
+        assert_eq!(args, vec!["-a", "womp", "1"]);
+
+        let (cmd, args) = build_wake_config_command("darwin", false, None).expect("mac off");
+        assert_eq!(cmd, "pmset");
+        assert_eq!(args, vec!["-a", "womp", "0"]);
+
+        // Windows
+        let (cmd, args) = build_wake_config_command("windows", true, Some("Wi-Fi")).expect("win on");
+        assert_eq!(cmd, "powercfg");
+        assert_eq!(args, vec!["/deviceenablewake", "Wi-Fi"]);
+
+        let (cmd, args) = build_wake_config_command("win", false, None).expect("win off default");
+        assert_eq!(cmd, "powercfg");
+        assert_eq!(args, vec!["/devicedisablewake", "Ethernet"]);
+
+        // Linux
+        let (cmd, args) = build_wake_config_command("linux", true, Some("wlan0")).expect("linux on");
+        assert_eq!(cmd, "ethtool");
+        assert_eq!(args, vec!["-s", "wlan0", "wol", "g"]);
+
+        let (cmd, args) = build_wake_config_command("linux", false, None).expect("linux off default");
+        assert_eq!(cmd, "ethtool");
+        assert_eq!(args, vec!["-s", "eth0", "wol", "d"]);
+
+        // Unsupported OS
+        assert!(build_wake_config_command("freebsd", true, None).is_err());
+    }
+
+    #[test]
+    fn test_record_peer_wol_info_and_wake_peer_flow() {
+        let app_state = AppState::new();
+
+        // 1. Initially no peer MAC -> wake fails
+        assert!(wake_peer_internal("peer_macbook", &app_state).is_err());
+
+        // 2. Record peer WoL info
+        record_peer_wol_info(
+            &app_state,
+            "peer_macbook",
+            "Benson MacBook",
+            "macos",
+            vec!["12:34:56:78:9A:BC".to_string(), "FE:DC:BA:98:76:54".to_string()],
+            Some("192.168.1.120"),
+        );
+
+        // 3. Verify state peer map populated
+        {
+            let s = app_state.inner.read();
+            let entry = s.wake.peers.get("peer_macbook").expect("peer exists in wake map");
+            assert_eq!(entry.get("name").unwrap(), "Benson MacBook");
+            assert_eq!(entry.get("os").unwrap(), "macos");
+            assert_eq!(entry.get("address").unwrap(), "192.168.1.120");
+            let macs = entry.get("macs").and_then(|v| v.as_array()).unwrap();
+            assert_eq!(macs.len(), 2);
+        }
+
+        // 4. Wake peer succeeds and sets waking flag
+        let res = wake_peer_internal("peer_macbook", &app_state);
+        assert!(res.is_ok());
+        let macs = res.unwrap();
+        assert_eq!(macs.len(), 2);
+
+        {
+            let s = app_state.inner.read();
+            assert_eq!(s.wake.waking.as_deref(), Some("peer_macbook"));
+        }
     }
 }
