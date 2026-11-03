@@ -163,6 +163,14 @@ pub struct WireMessage {
     #[serde(default)]
     pub files: Option<Vec<String>>,
 
+    // Media & Screen streaming fields
+    #[serde(default)]
+    pub audio_bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    pub frame_png: Option<Vec<u8>>,
+    #[serde(default)]
+    pub fps: Option<u32>,
+
     // Pairing & Layout fields
     #[serde(default)]
     pub commit: Option<String>,
@@ -219,6 +227,9 @@ impl Default for WireMessage {
             mac_name: None,
             side: None,
             pc_side: None,
+            audio_bytes: None,
+            frame_png: None,
+            fps: None,
         }
     }
 }
