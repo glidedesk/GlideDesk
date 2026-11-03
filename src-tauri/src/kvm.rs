@@ -364,6 +364,476 @@ pub mod keycodes {
     }
 }
 
+pub trait InputBackend: Send + Sync {
+    fn key(&self, vk: u16, is_down: bool, extended: bool) -> Result<(), String>;
+    fn button(&self, button: MouseButton, is_down: bool) -> Result<(), String>;
+    fn wheel(&self, dx: i32, dy: i32) -> Result<(), String>;
+    fn move_relative(&self, dx: i32, dy: i32) -> Result<(), String>;
+    fn warp(&self, x: i32, y: i32) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordedInputEvent {
+    Key { vk: u16, is_down: bool, extended: bool, timestamp_ms: u64 },
+    Button { button: MouseButton, is_down: bool, timestamp_ms: u64 },
+    Wheel { dx: i32, dy: i32, timestamp_ms: u64 },
+    MoveRelative { dx: i32, dy: i32, timestamp_ms: u64 },
+    Warp { x: i32, y: i32, timestamp_ms: u64 },
+}
+
+pub struct RecordingBackend {
+    events: std::sync::Mutex<Vec<RecordedInputEvent>>,
+}
+
+impl RecordingBackend {
+    pub fn new() -> Self {
+        Self {
+            events: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn events(&self) -> Vec<RecordedInputEvent> {
+        self.events.lock().unwrap().clone()
+    }
+
+    pub fn clear(&self) {
+        self.events.lock().unwrap().clear();
+    }
+}
+
+impl Default for RecordingBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InputBackend for RecordingBackend {
+    fn key(&self, vk: u16, is_down: bool, extended: bool) -> Result<(), String> {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.events.lock().unwrap().push(RecordedInputEvent::Key {
+            vk,
+            is_down,
+            extended,
+            timestamp_ms,
+        });
+        Ok(())
+    }
+
+    fn button(&self, button: MouseButton, is_down: bool) -> Result<(), String> {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.events.lock().unwrap().push(RecordedInputEvent::Button {
+            button,
+            is_down,
+            timestamp_ms,
+        });
+        Ok(())
+    }
+
+    fn wheel(&self, dx: i32, dy: i32) -> Result<(), String> {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.events.lock().unwrap().push(RecordedInputEvent::Wheel {
+            dx,
+            dy,
+            timestamp_ms,
+        });
+        Ok(())
+    }
+
+    fn move_relative(&self, dx: i32, dy: i32) -> Result<(), String> {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.events.lock().unwrap().push(RecordedInputEvent::MoveRelative {
+            dx,
+            dy,
+            timestamp_ms,
+        });
+        Ok(())
+    }
+
+    fn warp(&self, x: i32, y: i32) -> Result<(), String> {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.events.lock().unwrap().push(RecordedInputEvent::Warp {
+            x,
+            y,
+            timestamp_ms,
+        });
+        Ok(())
+    }
+}
+
+pub fn probe_display_available(display: Option<&str>) -> Result<(), String> {
+    match display {
+        Some(d) if !d.trim().is_empty() => Ok(()),
+        _ => Err("input injection unavailable: DISPLAY not set".to_string()),
+    }
+}
+
+pub fn vk_to_x_keysym_name(vk: u16) -> Option<&'static str> {
+    match vk {
+        0x08 => Some("BackSpace"),
+        0x09 => Some("Tab"),
+        0x0D => Some("Return"),
+        0x10 => Some("Shift_L"),
+        0x11 => Some("Control_L"),
+        0x12 => Some("Alt_L"),
+        0x14 => Some("Caps_Lock"),
+        0x1B => Some("Escape"),
+        0x20 => Some("space"),
+        0x21 => Some("Page_Up"),
+        0x22 => Some("Page_Down"),
+        0x23 => Some("End"),
+        0x24 => Some("Home"),
+        0x25 => Some("Left"),
+        0x26 => Some("Up"),
+        0x27 => Some("Right"),
+        0x28 => Some("Down"),
+        0x2D => Some("Insert"),
+        0x2E => Some("Delete"),
+        // Digits 0-9
+        0x30 => Some("0"),
+        0x31 => Some("1"),
+        0x32 => Some("2"),
+        0x33 => Some("3"),
+        0x34 => Some("4"),
+        0x35 => Some("5"),
+        0x36 => Some("6"),
+        0x37 => Some("7"),
+        0x38 => Some("8"),
+        0x39 => Some("9"),
+        // Letters A-Z
+        0x41 => Some("a"),
+        0x42 => Some("b"),
+        0x43 => Some("c"),
+        0x44 => Some("d"),
+        0x45 => Some("e"),
+        0x46 => Some("f"),
+        0x47 => Some("g"),
+        0x48 => Some("h"),
+        0x49 => Some("i"),
+        0x4A => Some("j"),
+        0x4B => Some("k"),
+        0x4C => Some("l"),
+        0x4D => Some("m"),
+        0x4E => Some("n"),
+        0x4F => Some("o"),
+        0x50 => Some("p"),
+        0x51 => Some("q"),
+        0x52 => Some("r"),
+        0x53 => Some("s"),
+        0x54 => Some("t"),
+        0x55 => Some("u"),
+        0x56 => Some("v"),
+        0x57 => Some("w"),
+        0x58 => Some("x"),
+        0x59 => Some("y"),
+        0x5A => Some("z"),
+        // Windows keys / Super
+        0x5B => Some("Super_L"),
+        0x5C => Some("Super_R"),
+        // Function keys F1-F12
+        0x70 => Some("F1"),
+        0x71 => Some("F2"),
+        0x72 => Some("F3"),
+        0x73 => Some("F4"),
+        0x74 => Some("F5"),
+        0x75 => Some("F6"),
+        0x76 => Some("F7"),
+        0x77 => Some("F8"),
+        0x78 => Some("F9"),
+        0x79 => Some("F10"),
+        0x7A => Some("F11"),
+        0x7B => Some("F12"),
+        // Modifiers specific
+        0xA0 => Some("Shift_L"),
+        0xA1 => Some("Shift_R"),
+        0xA2 => Some("Control_L"),
+        0xA3 => Some("Control_R"),
+        0xA4 => Some("Alt_L"),
+        0xA5 => Some("Alt_R"),
+        // OEM Punctuation
+        0xBA => Some("semicolon"),
+        0xBB => Some("equal"),
+        0xBC => Some("comma"),
+        0xBD => Some("minus"),
+        0xBE => Some("period"),
+        0xBF => Some("slash"),
+        0xC0 => Some("grave"),
+        0xDB => Some("bracketleft"),
+        0xDC => Some("backslash"),
+        0xDD => Some("bracketright"),
+        0xDE => Some("apostrophe"),
+        _ => None,
+    }
+}
+
+static CUSTOM_BACKEND: parking_lot::RwLock<Option<std::sync::Arc<dyn InputBackend>>> =
+    parking_lot::RwLock::new(None);
+
+pub fn set_input_backend(backend: Option<std::sync::Arc<dyn InputBackend>>) {
+    *CUSTOM_BACKEND.write() = backend;
+}
+
+pub fn get_custom_backend() -> Option<std::sync::Arc<dyn InputBackend>> {
+    CUSTOM_BACKEND.read().clone()
+}
+
+static KVM_APP_STATE: parking_lot::RwLock<Option<AppState>> = parking_lot::RwLock::new(None);
+
+pub fn set_kvm_app_state(state: AppState) {
+    *KVM_APP_STATE.write() = Some(state);
+}
+
+pub fn update_kvm_runtime_state(helper: &str, message: &str) {
+    if let Some(state) = KVM_APP_STATE.read().as_ref() {
+        let mut inner = state.inner.write();
+        inner.kvm_state.helper = helper.to_string();
+        inner.kvm_state.message = message.to_string();
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub mod xdo_ffi {
+    use std::os::raw::{c_char, c_int, c_uint, c_ulong};
+
+    pub type Window = c_ulong;
+    pub type UsecondsT = c_ulong;
+    pub const CURRENTWINDOW: Window = 0;
+
+    #[repr(C)]
+    pub struct Xdo {
+        _unused: [u8; 0],
+    }
+
+    #[link(name = "xdo")]
+    extern "C" {
+        pub fn xdo_new(display_name: *const c_char) -> *mut Xdo;
+        pub fn xdo_free(xdo: *mut Xdo);
+        pub fn xdo_move_mouse_relative(xdo: *const Xdo, x: c_int, y: c_int) -> c_int;
+        pub fn xdo_move_mouse(xdo: *const Xdo, x: c_int, y: c_int, screen: c_int) -> c_int;
+        pub fn xdo_mouse_down(xdo: *const Xdo, window: Window, button: c_int) -> c_int;
+        pub fn xdo_mouse_up(xdo: *const Xdo, window: Window, button: c_int) -> c_int;
+        pub fn xdo_send_keysequence_window_down(
+            xdo: *const Xdo,
+            window: Window,
+            keysequence: *const c_char,
+            delay: UsecondsT,
+        ) -> c_int;
+        pub fn xdo_send_keysequence_window_up(
+            xdo: *const Xdo,
+            window: Window,
+            keysequence: *const c_char,
+            delay: UsecondsT,
+        ) -> c_int;
+        pub fn xdo_get_viewport_dimensions(
+            xdo: *const Xdo,
+            width: *mut c_uint,
+            height: *mut c_uint,
+            screen: c_int,
+        ) -> c_int;
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub struct XdoBackend {
+    handle: parking_lot::Mutex<*mut xdo_ffi::Xdo>,
+}
+
+#[cfg(target_os = "linux")]
+unsafe impl Send for XdoBackend {}
+#[cfg(target_os = "linux")]
+unsafe impl Sync for XdoBackend {}
+
+#[cfg(target_os = "linux")]
+impl Drop for XdoBackend {
+    fn drop(&mut self) {
+        let ptr = *self.handle.lock();
+        if !ptr.is_null() {
+            unsafe { xdo_ffi::xdo_free(ptr) };
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl XdoBackend {
+    pub fn new() -> Result<Self, String> {
+        let display = std::env::var("DISPLAY").ok();
+        probe_display_available(display.as_deref())?;
+
+        let c_display = display.as_ref().and_then(|d| std::ffi::CString::new(d.as_str()).ok());
+        let dpy_ptr = c_display.as_ref().map(|s| s.as_ptr()).unwrap_or(std::ptr::null());
+        let handle = unsafe { xdo_ffi::xdo_new(dpy_ptr) };
+        if handle.is_null() {
+            let err = "input injection unavailable: DISPLAY not set or failed to open X display".to_string();
+            update_kvm_runtime_state("libxdo", &err);
+            return Err(err);
+        }
+        Ok(Self {
+            handle: parking_lot::Mutex::new(handle),
+        })
+    }
+
+    pub fn get_viewport_dimensions(&self) -> Result<(u32, u32), String> {
+        let guard = self.handle.lock();
+        if guard.is_null() {
+            return Err("xdo handle is null".to_string());
+        }
+        let mut width: std::os::raw::c_uint = 0;
+        let mut height: std::os::raw::c_uint = 0;
+        let ret = unsafe {
+            xdo_ffi::xdo_get_viewport_dimensions(*guard, &mut width, &mut height, 0)
+        };
+        if ret != 0 {
+            return Err("failed to get viewport dimensions".to_string());
+        }
+        Ok((width as u32, height as u32))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl InputBackend for XdoBackend {
+    fn key(&self, vk: u16, is_down: bool, _extended: bool) -> Result<(), String> {
+        let sym_name = vk_to_x_keysym_name(vk)
+            .ok_or_else(|| format!("unmapped virtual key: 0x{:02X}", vk))?;
+        let c_sym = std::ffi::CString::new(sym_name)
+            .map_err(|e| format!("invalid keysym string: {}", e))?;
+        let guard = self.handle.lock();
+        if guard.is_null() {
+            return Err("xdo handle is null".to_string());
+        }
+        let ret = unsafe {
+            if is_down {
+                xdo_ffi::xdo_send_keysequence_window_down(*guard, xdo_ffi::CURRENTWINDOW, c_sym.as_ptr(), 0)
+            } else {
+                xdo_ffi::xdo_send_keysequence_window_up(*guard, xdo_ffi::CURRENTWINDOW, c_sym.as_ptr(), 0)
+            }
+        };
+        if ret != 0 {
+            return Err(format!("xdo keysequence failed for {}", sym_name));
+        }
+        Ok(())
+    }
+
+    fn button(&self, button: MouseButton, is_down: bool) -> Result<(), String> {
+        let btn = match button {
+            MouseButton::Left => 1,
+            MouseButton::Middle => 2,
+            MouseButton::Right => 3,
+        };
+        let guard = self.handle.lock();
+        if guard.is_null() {
+            return Err("xdo handle is null".to_string());
+        }
+        let ret = unsafe {
+            if is_down {
+                xdo_ffi::xdo_mouse_down(*guard, xdo_ffi::CURRENTWINDOW, btn)
+            } else {
+                xdo_ffi::xdo_mouse_up(*guard, xdo_ffi::CURRENTWINDOW, btn)
+            }
+        };
+        if ret != 0 {
+            return Err(format!("xdo mouse button failed for {:?}", button));
+        }
+        Ok(())
+    }
+
+    fn wheel(&self, dx: i32, dy: i32) -> Result<(), String> {
+        let guard = self.handle.lock();
+        if guard.is_null() {
+            return Err("xdo handle is null".to_string());
+        }
+        if dy != 0 {
+            let btn = if dy > 0 { 4 } else { 5 };
+            let count = dy.abs().min(10);
+            for _ in 0..count {
+                unsafe {
+                    xdo_ffi::xdo_mouse_down(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    xdo_ffi::xdo_mouse_up(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                }
+            }
+        }
+        if dx != 0 {
+            let btn = if dx > 0 { 7 } else { 6 };
+            let count = dx.abs().min(10);
+            for _ in 0..count {
+                unsafe {
+                    xdo_ffi::xdo_mouse_down(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    xdo_ffi::xdo_mouse_up(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn move_relative(&self, dx: i32, dy: i32) -> Result<(), String> {
+        let guard = self.handle.lock();
+        if guard.is_null() {
+            return Err("xdo handle is null".to_string());
+        }
+        let ret = unsafe {
+            xdo_ffi::xdo_move_mouse_relative(*guard, dx, dy)
+        };
+        if ret != 0 {
+            return Err(format!("xdo move_relative failed for ({}, {})", dx, dy));
+        }
+        Ok(())
+    }
+
+    fn warp(&self, x: i32, y: i32) -> Result<(), String> {
+        let guard = self.handle.lock();
+        if guard.is_null() {
+            return Err("xdo handle is null".to_string());
+        }
+        let ret = unsafe {
+            xdo_ffi::xdo_move_mouse(*guard, x, y, 0)
+        };
+        if ret != 0 {
+            return Err(format!("xdo warp failed for ({}, {})", x, y));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+static LINUX_BACKEND: parking_lot::RwLock<Option<Result<std::sync::Arc<XdoBackend>, String>>> =
+    parking_lot::RwLock::new(None);
+
+#[cfg(target_os = "linux")]
+pub fn get_linux_backend() -> Result<std::sync::Arc<XdoBackend>, String> {
+    {
+        let guard = LINUX_BACKEND.read();
+        if let Some(ref res) = *guard {
+            return res.clone();
+        }
+    }
+    let mut guard = LINUX_BACKEND.write();
+    if let Some(ref res) = *guard {
+        return res.clone();
+    }
+    let res = match XdoBackend::new() {
+        Ok(b) => Ok(std::sync::Arc::new(b)),
+        Err(e) => {
+            update_kvm_runtime_state("libxdo", &e);
+            Err(e)
+        }
+    };
+    *guard = Some(res.clone());
+    res
+}
+
 static HELD_KEYS: parking_lot::Mutex<Option<std::collections::HashSet<u16>>> = parking_lot::Mutex::new(None);
 static HELD_BUTTONS: parking_lot::Mutex<Option<std::collections::HashSet<u8>>> = parking_lot::Mutex::new(None);
 
@@ -449,15 +919,35 @@ impl NativeInputInjector {
 
     #[cfg(any(windows, target_os = "macos"))]
     pub fn recenter_local_cursor() {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.warp(960, 540);
+            return;
+        }
         let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
         Self::recenter_cursor(vx, vy, vw, vh);
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    pub fn recenter_local_cursor() {}
+    pub fn recenter_local_cursor() {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.warp(960, 540);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(backend) = get_linux_backend() {
+                let (w, h) = backend.get_viewport_dimensions().unwrap_or((1920, 1080));
+                let _ = backend.warp((w / 2) as i32, (h / 2) as i32);
+            }
+        }
+    }
 
     #[cfg(windows)]
     pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.warp(vx + vw / 2, vy + vh / 2);
+            return;
+        }
         use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
         unsafe {
             let _ = SetCursorPos(vx + vw / 2, vy + vh / 2);
@@ -466,6 +956,10 @@ impl NativeInputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.warp(vx + vw / 2, vy + vh / 2);
+            return;
+        }
         use macos_ffi::*;
         let center_pt = CGPoint {
             x: (vx + vw / 2) as f64,
@@ -477,7 +971,18 @@ impl NativeInputInjector {
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    pub fn recenter_cursor(_vx: i32, _vy: i32, _vw: i32, _vh: i32) {}
+    pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.warp(vx + vw / 2, vy + vh / 2);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(backend) = get_linux_backend() {
+                let _ = backend.warp(vx + vw / 2, vy + vh / 2);
+            }
+        }
+    }
     #[cfg(windows)]
     pub fn sync_input_desktop() {
         use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -507,6 +1012,10 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn move_cursor_relative(dx: i32, dy: i32) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.move_relative(dx, dy);
+            return;
+        }
         Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
@@ -533,6 +1042,10 @@ impl NativeInputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn move_cursor_relative(dx: i32, dy: i32) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.move_relative(dx, dy);
+            return;
+        }
         use macos_ffi::*;
         unsafe {
             let dummy = CGEventCreate(std::ptr::null_mut());
@@ -559,12 +1072,25 @@ impl NativeInputInjector {
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    pub fn move_cursor_relative(_dx: i32, _dy: i32) {
-        // Platform specific implementation for Linux (evdev)
+    pub fn move_cursor_relative(dx: i32, dy: i32) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.move_relative(dx, dy);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(backend) = get_linux_backend() {
+                let _ = backend.move_relative(dx, dy);
+            }
+        }
     }
 
     #[cfg(windows)]
     pub fn platform_mouse_button(button: MouseButton, is_down: bool) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.button(button, is_down);
+            return;
+        }
         Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
@@ -602,6 +1128,10 @@ impl NativeInputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn platform_mouse_button(button: MouseButton, is_down: bool) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.button(button, is_down);
+            return;
+        }
         use macos_ffi::*;
         unsafe {
             let dummy = CGEventCreate(std::ptr::null_mut());
@@ -631,10 +1161,25 @@ impl NativeInputInjector {
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    pub fn platform_mouse_button(_button: MouseButton, _is_down: bool) {}
+    pub fn platform_mouse_button(button: MouseButton, is_down: bool) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.button(button, is_down);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(backend) = get_linux_backend() {
+                let _ = backend.button(button, is_down);
+            }
+        }
+    }
 
     #[cfg(windows)]
     pub fn mouse_wheel(dx: i32, dy: i32) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.wheel(dx, dy);
+            return;
+        }
         Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL,
@@ -682,6 +1227,10 @@ impl NativeInputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn mouse_wheel(dx: i32, dy: i32) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.wheel(dx, dy);
+            return;
+        }
         use macos_ffi::*;
         unsafe {
             // dy for vertical wheel, dx for horizontal wheel
@@ -701,10 +1250,25 @@ impl NativeInputInjector {
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    pub fn mouse_wheel(_dx: i32, _dy: i32) {}
+    pub fn mouse_wheel(dx: i32, dy: i32) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.wheel(dx, dy);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(backend) = get_linux_backend() {
+                let _ = backend.wheel(dx, dy);
+            }
+        }
+    }
 
     #[cfg(windows)]
     pub fn platform_key_event(vk: u16, is_down: bool, extended: bool) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.key(vk, is_down, extended);
+            return;
+        }
         Self::sync_input_desktop();
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
@@ -739,7 +1303,11 @@ impl NativeInputInjector {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn platform_key_event(vk: u16, is_down: bool, _extended: bool) {
+    pub fn platform_key_event(vk: u16, is_down: bool, extended: bool) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.key(vk, is_down, extended);
+            return;
+        }
         use macos_ffi::*;
         if let Some(mac_code) = keycodes::windows_vk_to_macos_keycode(vk) {
             unsafe {
@@ -753,7 +1321,18 @@ impl NativeInputInjector {
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    pub fn platform_key_event(_vk: u16, _is_down: bool, _extended: bool) {}
+    pub fn platform_key_event(vk: u16, is_down: bool, extended: bool) {
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.key(vk, is_down, extended);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(backend) = get_linux_backend() {
+                let _ = backend.key(vk, is_down, extended);
+            }
+        }
+    }
 }
 
 /// Unified cross-platform clipboard synchronization engine.
@@ -955,6 +1534,7 @@ pub mod hook_engine {
     }
 
     pub fn start_hooks(app: AppHandle, state: AppState, network: NetworkManager) {
+        set_kvm_app_state(state.clone());
         unsafe {
             APP_HANDLE = Some(app);
             APP_STATE = Some(state);
@@ -1335,6 +1915,7 @@ pub mod hook_engine {
     }
 
     pub fn start_hooks(app: AppHandle, state: AppState, network: NetworkManager) {
+        set_kvm_app_state(state.clone());
         unsafe {
             APP_HANDLE = Some(app);
             APP_STATE = Some(state);
@@ -1722,14 +2303,22 @@ pub mod hook_engine {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub mod hook_engine {
     use super::*;
-    pub fn start_hooks(_app: AppHandle, _state: AppState, _network: NetworkManager) {
-        // Safe stub for Linux (uinput / libinput)
+    pub fn start_hooks(_app: AppHandle, state: AppState, _network: NetworkManager) {
+        set_kvm_app_state(state.clone());
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(e) = get_linux_backend() {
+                log::warn!("[KVM] Linux input injection capability check: {}", e);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static TEST_MUTEX: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
     #[cfg(target_os = "macos")]
@@ -1837,6 +2426,7 @@ mod tests {
 
     #[test]
     fn test_native_input_injector_release_all_keys() {
+        let _lock = TEST_MUTEX.lock();
         let test_key = 0x50; // VK_P
         NativeInputInjector::key_event(test_key, true, false);
         NativeInputInjector::mouse_button(MouseButton::Left, true);
@@ -1859,5 +2449,155 @@ mod tests {
             let b_guard = HELD_BUTTONS.lock();
             assert!(b_guard.as_ref().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn test_vk_to_x_keysym_mapping() {
+        // Letters A-Z
+        assert_eq!(vk_to_x_keysym_name(0x41), Some("a"));
+        assert_eq!(vk_to_x_keysym_name(0x4D), Some("m"));
+        assert_eq!(vk_to_x_keysym_name(0x5A), Some("z"));
+
+        // Digits 0-9
+        assert_eq!(vk_to_x_keysym_name(0x30), Some("0"));
+        assert_eq!(vk_to_x_keysym_name(0x35), Some("5"));
+        assert_eq!(vk_to_x_keysym_name(0x39), Some("9"));
+
+        // Arrows
+        assert_eq!(vk_to_x_keysym_name(0x25), Some("Left"));
+        assert_eq!(vk_to_x_keysym_name(0x26), Some("Up"));
+        assert_eq!(vk_to_x_keysym_name(0x27), Some("Right"));
+        assert_eq!(vk_to_x_keysym_name(0x28), Some("Down"));
+
+        // Modifiers
+        assert_eq!(vk_to_x_keysym_name(0x10), Some("Shift_L"));
+        assert_eq!(vk_to_x_keysym_name(0xA0), Some("Shift_L"));
+        assert_eq!(vk_to_x_keysym_name(0xA1), Some("Shift_R"));
+        assert_eq!(vk_to_x_keysym_name(0x11), Some("Control_L"));
+        assert_eq!(vk_to_x_keysym_name(0xA2), Some("Control_L"));
+        assert_eq!(vk_to_x_keysym_name(0xA3), Some("Control_R"));
+        assert_eq!(vk_to_x_keysym_name(0x12), Some("Alt_L"));
+        assert_eq!(vk_to_x_keysym_name(0xA4), Some("Alt_L"));
+        assert_eq!(vk_to_x_keysym_name(0xA5), Some("Alt_R"));
+        assert_eq!(vk_to_x_keysym_name(0x5B), Some("Super_L"));
+        assert_eq!(vk_to_x_keysym_name(0x5C), Some("Super_R"));
+
+        // F-keys F1-F12
+        assert_eq!(vk_to_x_keysym_name(0x70), Some("F1"));
+        assert_eq!(vk_to_x_keysym_name(0x75), Some("F6"));
+        assert_eq!(vk_to_x_keysym_name(0x7B), Some("F12"));
+
+        // Control keys
+        assert_eq!(vk_to_x_keysym_name(0x08), Some("BackSpace"));
+        assert_eq!(vk_to_x_keysym_name(0x09), Some("Tab"));
+        assert_eq!(vk_to_x_keysym_name(0x0D), Some("Return"));
+        assert_eq!(vk_to_x_keysym_name(0x1B), Some("Escape"));
+        assert_eq!(vk_to_x_keysym_name(0x20), Some("space"));
+        assert_eq!(vk_to_x_keysym_name(0x21), Some("Page_Up"));
+        assert_eq!(vk_to_x_keysym_name(0x22), Some("Page_Down"));
+        assert_eq!(vk_to_x_keysym_name(0x23), Some("End"));
+        assert_eq!(vk_to_x_keysym_name(0x24), Some("Home"));
+        assert_eq!(vk_to_x_keysym_name(0x2E), Some("Delete"));
+
+        // Unknown VK returns None
+        assert_eq!(vk_to_x_keysym_name(0x00), None);
+        assert_eq!(vk_to_x_keysym_name(0xFF), None);
+        assert_eq!(vk_to_x_keysym_name(0x1234), None);
+    }
+
+    #[test]
+    fn test_recording_backend_events() {
+        let _lock = TEST_MUTEX.lock();
+        let recording = std::sync::Arc::new(RecordingBackend::new());
+        set_input_backend(Some(recording.clone()));
+
+        // Key events
+        NativeInputInjector::key_event(0x41, true, false);  // 'A' down
+        NativeInputInjector::key_event(0x41, false, false); // 'A' up
+
+        // Mouse button events
+        NativeInputInjector::mouse_button(MouseButton::Left, true);
+        NativeInputInjector::mouse_button(MouseButton::Left, false);
+        NativeInputInjector::mouse_button(MouseButton::Right, true);
+        NativeInputInjector::mouse_button(MouseButton::Right, false);
+        NativeInputInjector::mouse_button(MouseButton::Middle, true);
+        NativeInputInjector::mouse_button(MouseButton::Middle, false);
+
+        // Mouse wheel
+        NativeInputInjector::mouse_wheel(1, -2);
+
+        // Move cursor relative
+        NativeInputInjector::move_cursor_relative(10, -5);
+
+        // Recenter cursor (warp)
+        NativeInputInjector::recenter_cursor(0, 0, 1920, 1080);
+
+        let events = recording.events();
+        assert!(events.iter().any(|e| matches!(e, RecordedInputEvent::Key { vk: 0x41, is_down: true, .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordedInputEvent::Key { vk: 0x41, is_down: false, .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordedInputEvent::Button { button: MouseButton::Left, is_down: true, .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordedInputEvent::Button { button: MouseButton::Left, is_down: false, .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordedInputEvent::Button { button: MouseButton::Right, is_down: true, .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordedInputEvent::Button { button: MouseButton::Middle, is_down: true, .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordedInputEvent::Wheel { dx: 1, dy: -2, .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordedInputEvent::MoveRelative { dx: 10, dy: -5, .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordedInputEvent::Warp { x: 960, y: 540, .. })));
+
+        // Clear and test release_all_keys drainage
+        recording.clear();
+        NativeInputInjector::key_event(0x42, true, false); // 'B' down
+        NativeInputInjector::mouse_button(MouseButton::Left, true);
+
+        {
+            let k = HELD_KEYS.lock();
+            assert!(k.as_ref().unwrap().contains(&0x42));
+            let b = HELD_BUTTONS.lock();
+            assert!(b.as_ref().unwrap().contains(&0));
+        }
+
+        recording.clear();
+        NativeInputInjector::release_all_keys();
+
+        {
+            let k = HELD_KEYS.lock();
+            assert!(!k.as_ref().unwrap().contains(&0x42));
+            let b = HELD_BUTTONS.lock();
+            assert!(b.as_ref().unwrap().is_empty());
+        }
+
+        let release_events = recording.events();
+        assert!(release_events.iter().any(|e| matches!(e, RecordedInputEvent::Key { vk: 0x42, is_down: false, .. })));
+        assert!(release_events.iter().any(|e| matches!(e, RecordedInputEvent::Button { button: MouseButton::Left, is_down: false, .. })));
+
+        set_input_backend(None);
+    }
+
+    #[test]
+    fn test_linux_backend_capability_probe() {
+        assert_eq!(
+            probe_display_available(None),
+            Err("input injection unavailable: DISPLAY not set".to_string())
+        );
+        assert_eq!(
+            probe_display_available(Some("")),
+            Err("input injection unavailable: DISPLAY not set".to_string())
+        );
+        assert_eq!(
+            probe_display_available(Some("   ")),
+            Err("input injection unavailable: DISPLAY not set".to_string())
+        );
+        assert!(probe_display_available(Some(":0")).is_ok());
+        assert!(probe_display_available(Some(":1.0")).is_ok());
+    }
+
+    #[test]
+    fn test_update_kvm_runtime_state() {
+        let _lock = TEST_MUTEX.lock();
+        let state = AppState::new();
+        set_kvm_app_state(state.clone());
+        update_kvm_runtime_state("libxdo", "input injection unavailable: DISPLAY not set");
+        let snap = state.snapshot();
+        assert_eq!(snap.kvm_state.helper, "libxdo");
+        assert_eq!(snap.kvm_state.message, "input injection unavailable: DISPLAY not set");
     }
 }
