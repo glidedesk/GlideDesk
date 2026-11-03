@@ -269,6 +269,7 @@ pub async fn rezume_do(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::RezumeItem;
 
     #[test]
     fn test_rezume_settings_partial_merge() {
