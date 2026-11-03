@@ -240,19 +240,104 @@ impl AdbClient {
         services
     }
 
-    #[cfg(target_os = "macos")]
-    fn query_bonjour_mdns() -> Result<Vec<AdbMdnsService>, String> {
-        // Query local Bonjour services for _adb-tls-connect._tcp
-        let out = Command::new("/usr/bin/dns-sd")
-            .args(["-B", "_adb-tls-connect._tcp", "local."])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
+    pub fn parse_bonjour_output(output: &str) -> Vec<AdbMdnsService> {
+        let mut services = Vec::new();
+        for line in output.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("Browsing") || line.starts_with("DATE:") || line.starts_with("Timestamp") || line.contains("...STARTING...") {
+                continue;
+            }
 
-        if let Ok(mut child) = out {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            let _ = child.kill();
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.iter().any(|p| p.contains("_adb-tls-")) {
+                if let Some(srv_idx) = parts.iter().position(|p| p.contains("_adb-tls-")) {
+                    let service_raw = parts[srv_idx];
+                    let service_type = if service_raw.contains("pairing") {
+                        "pairing"
+                    } else if service_raw.contains("connect") {
+                        "connect"
+                    } else {
+                        continue;
+                    }.to_string();
+
+                    // Look for host:port token (e.g. 192.168.1.50:41235)
+                    let hp_opt = parts.iter().find(|p| {
+                        if let Some((_, port_s)) = p.split_once(':') {
+                            port_s.parse::<u16>().is_ok()
+                        } else {
+                            false
+                        }
+                    });
+
+                    if let Some(hp) = hp_opt {
+                        if let Some((addr, port_str)) = hp.split_once(':') {
+                            if let Ok(port) = port_str.parse::<u16>() {
+                                let name = if srv_idx > 0 && !parts[0].contains(':') {
+                                    parts[0].to_string()
+                                } else if srv_idx + 1 < parts.len() && !parts[srv_idx + 1].contains(':') {
+                                    parts[srv_idx + 1].to_string()
+                                } else {
+                                    format!("adb-{}-{}", service_type, port)
+                                };
+
+                                services.push(AdbMdnsService {
+                                    name,
+                                    service_type,
+                                    address: addr.to_string(),
+                                    port,
+                                });
+                                continue;
+                            }
+                        }
+                    }
+
+                    // dns-sd -B format without inline IP (e.g. Timestamp Add Flags if Domain Service Instance)
+                    let name = if srv_idx + 1 < parts.len() {
+                        parts[srv_idx + 1..].join(" ")
+                    } else {
+                        format!("adb-device-{}", services.len() + 1)
+                    };
+
+                    services.push(AdbMdnsService {
+                        name,
+                        service_type,
+                        address: "127.0.0.1".to_string(),
+                        port: 5555,
+                    });
+                }
+            }
         }
+        services
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn query_bonjour_mdns() -> Result<Vec<AdbMdnsService>, String> {
+        let mut services = Vec::new();
+        for svc_type in ["_adb-tls-connect._tcp", "_adb-tls-pairing._tcp"] {
+            let child_res = Command::new("/usr/bin/dns-sd")
+                .args(["-B", svc_type, "local."])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn();
+
+            if let Ok(mut child) = child_res {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let _ = child.kill();
+                if let Some(mut stdout) = child.stdout.take() {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    if stdout.read_to_string(&mut buf).is_ok() {
+                        let parsed = Self::parse_bonjour_output(&buf);
+                        services.extend(parsed);
+                    }
+                }
+            }
+        }
+        Ok(services)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn query_bonjour_mdns() -> Result<Vec<AdbMdnsService>, String> {
         Ok(vec![])
     }
 
