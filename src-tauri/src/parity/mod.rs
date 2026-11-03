@@ -675,7 +675,42 @@ pub fn net_wifi(arg: serde_json::Value) -> Result<(), String> {
 
 #[tauri::command]
 pub fn net_location() -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({ "status": "authorized" }))
+    log::info!("[Network] net_location requested");
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices")
+            .spawn();
+
+        let out = Command::new("defaults")
+            .args(["read", "/var/db/locationd/Library/Preferences/ByHost/com.apple.locationd.notbackedup", "LocationServicesEnabled"])
+            .output();
+
+        let enabled = match out {
+            Ok(o) if o.status.success() => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.trim() == "1"
+            }
+            _ => false,
+        };
+
+        if enabled {
+            Ok(serde_json::json!({ "status": "authorized", "enabled": true }))
+        } else {
+            Err("Location Services disabled on host system. Please enable Location Services in System Settings to allow Wi-Fi SSID discovery.".to_string())
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd")
+            .args(["/C", "start", "ms-settings:privacy-location"])
+            .spawn();
+        Ok(serde_json::json!({ "status": "prompted", "settings": "ms-settings:privacy-location" }))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Err("Location settings not applicable on Linux".to_string())
+    }
 }
 
 #[tauri::command]
@@ -759,6 +794,113 @@ pub fn set_wake(on: bool, state: State<'_, AppState>, app: AppHandle) -> Result<
     }
     push_state(&app, &state);
     Ok(())
+}
+
+pub fn get_settings_url(kind: &str) -> Option<&'static str> {
+    match kind {
+        "screen" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+        "accessibility" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+        "inputMonitoring" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"),
+        "localNetwork" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"),
+        "fullDisk" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"),
+        "bluetooth" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth"),
+        "location" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices"),
+        "extensions" => Some("x-apple.systempreferences:com.apple.ExtensionsPreferences?Sharing"),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub fn allow_permission(kind: String) -> Result<(), String> {
+    log::info!("[Permissions] allow_permission: {}", kind);
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(url) = get_settings_url(&kind) {
+            Command::new("open")
+                .arg(url)
+                .spawn()
+                .map_err(|e| format!("Failed to open Settings for '{}': {}", kind, e))?;
+            Ok(())
+        } else {
+            Err(format!("Unsupported permission kind: '{}'", kind))
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let setting = match kind.as_str() {
+            "screen" | "display" => "ms-settings:display",
+            "bluetooth" => "ms-settings:bluetooth",
+            "location" => "ms-settings:privacy-location",
+            _ => "ms-settings:",
+        };
+        Command::new("cmd")
+            .args(["/C", "start", setting])
+            .spawn()
+            .map_err(|e| format!("Failed to open Windows settings: {}", e))?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("gnome-control-center")
+            .spawn()
+            .map_err(|e| format!("Failed to open Linux control center: {}", e))?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub fn allow_full_disk() -> Result<(), String> {
+    log::info!("[Permissions] allow_full_disk requested");
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .spawn()
+            .map_err(|e| format!("Failed to open Full Disk Access settings: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Full Disk Access permission is macOS-specific".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn open_settings(kind: Option<String>) -> Result<(), String> {
+    log::info!("[Settings] open_settings: {:?}", kind);
+    #[cfg(target_os = "macos")]
+    {
+        let url = kind
+            .as_deref()
+            .and_then(get_settings_url)
+            .unwrap_or("x-apple.systempreferences:com.apple.preference");
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("Failed to open settings: {}", e))?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "ms-settings:"])
+            .spawn()
+            .map_err(|e| format!("Failed to open Windows settings: {}", e))?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("gnome-control-center")
+            .spawn()
+            .map_err(|e| format!("Failed to open Linux settings: {}", e))?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub fn relaunch(app: AppHandle) -> Result<(), String> {
+    log::info!("[System] Relaunching application via Tauri runtime");
+    app.restart();
 }
 
 #[cfg(test)]

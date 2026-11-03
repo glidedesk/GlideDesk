@@ -250,4 +250,18 @@ Timestamp     A/R    Flags  if Domain               Service Type             Ins
         assert!(!toggle_app_mute(&mut muted, "messages"));
         assert!(muted.is_empty());
     }
+
+    #[test]
+    fn test_get_settings_url() {
+        use crate::parity::get_settings_url;
+        assert!(get_settings_url("screen").is_some());
+        assert!(get_settings_url("accessibility").is_some());
+        assert!(get_settings_url("inputMonitoring").is_some());
+        assert!(get_settings_url("localNetwork").is_some());
+        assert!(get_settings_url("fullDisk").is_some());
+        assert!(get_settings_url("bluetooth").is_some());
+        assert!(get_settings_url("location").is_some());
+        assert!(get_settings_url("extensions").is_some());
+        assert!(get_settings_url("unknownPermission").is_none());
+    }
 }
