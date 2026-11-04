@@ -170,10 +170,96 @@ mod windows_capture {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
+pub fn convert_x11_image_to_rgba(
+    width: u32,
+    height: u32,
+    depth: u8,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "Screen dimensions overflow buffer calculation".to_string())?;
+
+    if data.len() < expected_len {
+        return Err(format!(
+            "X11 ZPixmap data length {} is smaller than expected {} for {}x{} (depth {})",
+            data.len(),
+            expected_len,
+            width,
+            height,
+            depth
+        ));
+    }
+
+    let mut rgba = Vec::with_capacity(expected_len);
+    for chunk in data[..expected_len].chunks_exact(4) {
+        let b = chunk[0];
+        let g = chunk[1];
+        let r = chunk[2];
+        let a = if depth == 32 && chunk[3] > 0 { chunk[3] } else { 255 };
+        rgba.push(r);
+        rgba.push(g);
+        rgba.push(b);
+        rgba.push(a);
+    }
+
+    Ok(rgba)
+}
+
 #[cfg(target_os = "linux")]
 mod linux_capture {
+    use super::convert_x11_image_to_rgba;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{self, ConnectionExt as _};
+
+    /// Captures the primary X11 root window display using x11rb `get_image`.
+    /// Note: Wayland compositors restrict global root window capture without PipeWire or portal permissions.
+    /// Under X11 or XWayland, full desktop frame readback is supported.
     pub fn capture_primary_display() -> Result<(u32, u32, Vec<u8>), String> {
-        Err("Screen capture on Linux is not yet implemented".to_string())
+        let display = std::env::var("DISPLAY").ok();
+        if display.as_deref().map_or(true, |d| d.trim().is_empty()) {
+            return Err("Screen capture unavailable on Linux: headless session (DISPLAY not set)".to_string());
+        }
+
+        if let Ok(session) = std::env::var("XDG_SESSION_TYPE") {
+            if session.eq_ignore_ascii_case("wayland") {
+                log::warn!("[ScreenCapture] Wayland session detected; root-window capture may be blocked by compositor without PipeWire portal");
+            }
+        }
+
+        let (conn, screen_num) = x11rb::connect(display.as_deref())
+            .map_err(|e| format!("Screen capture failed to open X display: {}", e))?;
+
+        let setup = conn.setup();
+        let screen = setup.roots.get(screen_num)
+            .ok_or_else(|| format!("Invalid X screen index {}", screen_num))?;
+
+        let root = screen.root;
+        let width = screen.width_in_pixels;
+        let height = screen.height_in_pixels;
+
+        if width == 0 || height == 0 {
+            return Err("Captured X screen has 0 width or height".to_string());
+        }
+
+        let reply = xproto::get_image(
+            &conn,
+            xproto::ImageFormat::Z_PIXMAP,
+            root,
+            0,
+            0,
+            width,
+            height,
+            !0,
+        )
+        .map_err(|e| format!("X11 get_image request failed: {}", e))?
+        .reply()
+        .map_err(|e| format!("X11 get_image reply failed: {}", e))?;
+
+        let rgba = convert_x11_image_to_rgba(width as u32, height as u32, reply.depth, &reply.data)?;
+        Ok((width as u32, height as u32, rgba))
     }
 }
 
@@ -222,10 +308,15 @@ impl ScreenEngine {
         std::thread::spawn(move || {
             let interval = std::time::Duration::from_millis(1000 / (fps.max(1) as u64));
             let mut logged_error = false;
+            let mut consecutive_failures = 0usize;
+            const MAX_CONSECUTIVE_FAILURES: usize = 5;
+
             while capturing.load(Ordering::SeqCst) {
                 if let Some(ref sender) = tx {
                     match capture_display() {
                         Ok((width, height, rgba_data)) => {
+                            consecutive_failures = 0;
+                            logged_error = false;
                             if let Some(rgba) = image::RgbaImage::from_raw(width, height, rgba_data) {
                                 // Downsample large Retina displays (e.g. >1920px wide) to reduce latency
                                 let dyn_img = if width > 1920 {
@@ -246,9 +337,19 @@ impl ScreenEngine {
                             }
                         }
                         Err(e) => {
+                            consecutive_failures += 1;
                             if !logged_error {
                                 log::warn!("[ScreenCapture] Native display capture error: {}", e);
                                 logged_error = true;
+                            }
+                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                                log::error!(
+                                    "[ScreenCapture] Display capture stopped cleanly after {} consecutive errors: {}",
+                                    consecutive_failures,
+                                    e
+                                );
+                                capturing.store(false, Ordering::SeqCst);
+                                break;
                             }
                         }
                     }
@@ -264,5 +365,38 @@ impl ScreenEngine {
     pub fn stop_streaming(&self) {
         self.is_capturing.store(false, Ordering::SeqCst);
         log::info!("Stopped native screen capture engine");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_x11_image_conversion_to_rgba() {
+        // 2x1 pixel test:
+        // Pixel 0: B=10, G=20, R=30, pad=0
+        // Pixel 1: B=255, G=128, R=64, pad=100
+        let bgr_data = vec![10, 20, 30, 0, 255, 128, 64, 100];
+        let rgba_24 = convert_x11_image_to_rgba(2, 1, 24, &bgr_data).expect("valid conversion");
+        assert_eq!(rgba_24, vec![30, 20, 10, 255, 64, 128, 255, 255]);
+
+        let rgba_32 = convert_x11_image_to_rgba(2, 1, 32, &bgr_data).expect("valid conversion");
+        assert_eq!(rgba_32, vec![30, 20, 10, 255, 64, 128, 255, 100]);
+
+        // Error path: insufficient buffer length
+        let short_data = vec![10, 20, 30];
+        let err = convert_x11_image_to_rgba(2, 1, 24, &short_data);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_linux_capture_handles_headless_gracefully() {
+        if std::env::var("DISPLAY").map_or(true, |d| d.trim().is_empty()) {
+            let res = linux_capture::capture_primary_display();
+            assert!(res.is_err());
+            assert!(res.unwrap_err().contains("headless session"));
+        }
     }
 }

@@ -47,3 +47,14 @@ GlideDesk runs as a persistent background daemon when the primary window is clos
   On X11 environments, hiding the main window sets `set_skip_taskbar(true)`, which translates to setting the `_NET_WM_STATE_SKIP_TASKBAR` property on the client window. Standard window managers (GNOME Shell, KDE KWin, XFCE xfwm4, etc.) omit the window from panel taskbars and pager switchers while the tray icon remains active. When restored from the system tray, `set_skip_taskbar(false)` clears the hint and re-registers the window on the taskbar.
 - **Wayland Compositor Caveat**:
   Under native Wayland sessions (such as GNOME Wayland or Sway), window taskbar presentation is governed entirely by the compositor rather than standard X11 window hints. While Tauri/GTK sets the equivalent surface hints, some Wayland compositors may ignore client-side requests to skip dock/panel listing. Full exclusion from taskbar panels is guaranteed on X11 and XWayland-managed windows.
+
+## Native Screen Frame Capture Architecture
+
+GlideDesk streams primary display frames natively across platforms. On Linux:
+
+- **X11 Protocol Screen Capture via `x11rb`**:
+  Captures display frames directly using standard X11 `xproto::get_image` (`Z_PIXMAP`) against the root window (`screen.root`). The raw pixel buffer is decoded from X11 TrueColor (BGR0 / BGRA 32-bit depth) into standard RGBA for PNG frame encoding in `ScreenEngine`.
+- **Connection Loss & Auto-Shutdown**:
+  If the X server connection fails or drops during active streaming, `ScreenEngine` detects consecutive capture failures (threshold: 5 errors) and halts streaming cleanly without spinning in a failure loop.
+- **Wayland Limitation**:
+  Native Wayland compositors block unprivileged background applications from capturing arbitrary desktop buffers outside their own surface hierarchy. Screen capture is supported on standard X11 sessions and XWayland-hosted environments; native Wayland environments require desktop portal/PipeWire capture. Headless environments without `DISPLAY` report an honest unavailable status.
