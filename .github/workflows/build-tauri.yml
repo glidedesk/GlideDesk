@@ -150,20 +150,23 @@ jobs:
     name: Build Android Companion
     runs-on: ubuntu-22.04
     continue-on-error: true
-    # The Android companion app is preserved in the reference tree but not yet present here.
-    # Gate on present android/gradlew so CI skips the job cleanly without failing.
-    if: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Probe for Android source
+        id: probe
+        run: echo "present=$([ -f android/gradlew ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Java
+        if: steps.probe.outputs.present == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
 
       - name: Build Android APKs
+        if: steps.probe.outputs.present == 'true'
         working-directory: android
         run: |
           chmod +x gradlew
@@ -174,6 +177,7 @@ jobs:
           cp app/build/outputs/apk/full/release/app-full-release.apk "dist/GlideDesk-$v-full.apk"
 
       - name: Upload Android Artifacts
+        if: steps.probe.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: glidedesk-android
