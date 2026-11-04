@@ -535,7 +535,7 @@ pub fn handle_injection_result(kind: InjectionErrorKind, result: Result<(), Stri
             if action == RateLimitAction::Log {
                 log::warn!("[KVM] Linux input injection error ({:?}): {}", kind, err);
                 update_kvm_runtime_state(
-                    "libxdo",
+                    "x11rb",
                     &format!("Linux input injection error: {}", err),
                 );
             }
@@ -588,11 +588,11 @@ pub fn evaluate_linux_session_capability(
 ) -> (&'static str, &'static str) {
     match display {
         None => (
-            "libxdo",
+            "x11rb",
             "Linux input capture: headless session (DISPLAY not set); remote input injection and local capture unavailable",
         ),
         Some(d) if d.trim().is_empty() => (
-            "libxdo",
+            "x11rb",
             "Linux input capture: headless session (DISPLAY not set); remote input injection and local capture unavailable",
         ),
         Some(_) => match session_type {
@@ -604,11 +604,11 @@ pub fn evaluate_linux_session_capability(
                 if capture_running {
                     (
                         "x11",
-                        "Linux input capture: active X11 session (capture engine running; XQueryPointer/libxdo ready)",
+                        "Linux input capture: active X11 session (capture engine running; x11rb ready)",
                     )
                 } else {
                     (
-                        "libxdo",
+                        "x11rb",
                         "Linux input capture: active X11 session detected but capture engine not running; local capture unavailable (injection ready)",
                     )
                 }
@@ -706,102 +706,83 @@ pub fn x_keycode_to_vk(keycode: u8) -> Option<u16> {
     }
 }
 
-pub fn vk_to_x_keysym_name(vk: u16) -> Option<&'static str> {
+pub fn vk_to_x_keysym(vk: u16) -> Option<u32> {
     match vk {
-        0x08 => Some("BackSpace"),
-        0x09 => Some("Tab"),
-        0x0D => Some("Return"),
-        0x10 => Some("Shift_L"),
-        0x11 => Some("Control_L"),
-        0x12 => Some("Alt_L"),
-        0x14 => Some("Caps_Lock"),
-        0x1B => Some("Escape"),
-        0x20 => Some("space"),
-        0x21 => Some("Page_Up"),
-        0x22 => Some("Page_Down"),
-        0x23 => Some("End"),
-        0x24 => Some("Home"),
-        0x25 => Some("Left"),
-        0x26 => Some("Up"),
-        0x27 => Some("Right"),
-        0x28 => Some("Down"),
-        0x2D => Some("Insert"),
-        0x2E => Some("Delete"),
+        0x08 => Some(0xFF08), // BackSpace
+        0x09 => Some(0xFF09), // Tab
+        0x0D => Some(0xFF0D), // Return
+        0x10 => Some(0xFFE1), // Shift_L
+        0x11 => Some(0xFFE3), // Control_L
+        0x12 => Some(0xFFE9), // Alt_L
+        0x14 => Some(0xFFE5), // Caps_Lock
+        0x1B => Some(0xFF1B), // Escape
+        0x20 => Some(0x0020), // space
+        0x21 => Some(0xFF55), // Page_Up
+        0x22 => Some(0xFF56), // Page_Down
+        0x23 => Some(0xFF57), // End
+        0x24 => Some(0xFF50), // Home
+        0x25 => Some(0xFF51), // Left
+        0x26 => Some(0xFF52), // Up
+        0x27 => Some(0xFF53), // Right
+        0x28 => Some(0xFF54), // Down
+        0x2D => Some(0xFF63), // Insert
+        0x2E => Some(0xFFFF), // Delete
         // Digits 0-9
-        0x30 => Some("0"),
-        0x31 => Some("1"),
-        0x32 => Some("2"),
-        0x33 => Some("3"),
-        0x34 => Some("4"),
-        0x35 => Some("5"),
-        0x36 => Some("6"),
-        0x37 => Some("7"),
-        0x38 => Some("8"),
-        0x39 => Some("9"),
-        // Letters A-Z
-        0x41 => Some("a"),
-        0x42 => Some("b"),
-        0x43 => Some("c"),
-        0x44 => Some("d"),
-        0x45 => Some("e"),
-        0x46 => Some("f"),
-        0x47 => Some("g"),
-        0x48 => Some("h"),
-        0x49 => Some("i"),
-        0x4A => Some("j"),
-        0x4B => Some("k"),
-        0x4C => Some("l"),
-        0x4D => Some("m"),
-        0x4E => Some("n"),
-        0x4F => Some("o"),
-        0x50 => Some("p"),
-        0x51 => Some("q"),
-        0x52 => Some("r"),
-        0x53 => Some("s"),
-        0x54 => Some("t"),
-        0x55 => Some("u"),
-        0x56 => Some("v"),
-        0x57 => Some("w"),
-        0x58 => Some("x"),
-        0x59 => Some("y"),
-        0x5A => Some("z"),
+        0x30..=0x39 => Some(vk as u32),
+        // Letters A-Z -> lowercase 'a'-'z' (0x61..=0x7A)
+        0x41..=0x5A => Some((vk - 0x41 + 0x61) as u32),
         // Windows keys / Super
-        0x5B => Some("Super_L"),
-        0x5C => Some("Super_R"),
+        0x5B => Some(0xFFEB), // Super_L
+        0x5C => Some(0xFFEC), // Super_R
         // Function keys F1-F12
-        0x70 => Some("F1"),
-        0x71 => Some("F2"),
-        0x72 => Some("F3"),
-        0x73 => Some("F4"),
-        0x74 => Some("F5"),
-        0x75 => Some("F6"),
-        0x76 => Some("F7"),
-        0x77 => Some("F8"),
-        0x78 => Some("F9"),
-        0x79 => Some("F10"),
-        0x7A => Some("F11"),
-        0x7B => Some("F12"),
+        0x70..=0x7B => Some(0xFFBE + (vk - 0x70) as u32),
         // Modifiers specific
-        0xA0 => Some("Shift_L"),
-        0xA1 => Some("Shift_R"),
-        0xA2 => Some("Control_L"),
-        0xA3 => Some("Control_R"),
-        0xA4 => Some("Alt_L"),
-        0xA5 => Some("Alt_R"),
+        0xA0 => Some(0xFFE1), // Shift_L
+        0xA1 => Some(0xFFE2), // Shift_R
+        0xA2 => Some(0xFFE3), // Control_L
+        0xA3 => Some(0xFFE4), // Control_R
+        0xA4 => Some(0xFFE9), // Alt_L
+        0xA5 => Some(0xFFEA), // Alt_R
         // OEM Punctuation
-        0xBA => Some("semicolon"),
-        0xBB => Some("equal"),
-        0xBC => Some("comma"),
-        0xBD => Some("minus"),
-        0xBE => Some("period"),
-        0xBF => Some("slash"),
-        0xC0 => Some("grave"),
-        0xDB => Some("bracketleft"),
-        0xDC => Some("backslash"),
-        0xDD => Some("bracketright"),
-        0xDE => Some("apostrophe"),
+        0xBA => Some(0x003B), // semicolon
+        0xBB => Some(0x003D), // equal
+        0xBC => Some(0x002C), // comma
+        0xBD => Some(0x002D), // minus
+        0xBE => Some(0x002E), // period
+        0xBF => Some(0x002F), // slash
+        0xC0 => Some(0x0060), // grave
+        0xDB => Some(0x005B), // bracketleft
+        0xDC => Some(0x005C), // backslash
+        0xDD => Some(0x005D), // bracketright
+        0xDE => Some(0x0027), // apostrophe
         _ => None,
     }
+}
+
+pub fn mouse_button_to_x11_button(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Right => 3,
+    }
+}
+
+pub fn mouse_wheel_to_x11_pulses(dx: i32, dy: i32) -> (Option<(u8, usize)>, Option<(u8, usize)>) {
+    let y_pulse = if dy != 0 {
+        let btn = if dy > 0 { 4 } else { 5 };
+        let count = dy.abs().min(10) as usize;
+        Some((btn, count))
+    } else {
+        None
+    };
+    let x_pulse = if dx != 0 {
+        let btn = if dx > 0 { 7 } else { 6 };
+        let count = dx.abs().min(10) as usize;
+        Some((btn, count))
+    } else {
+        None
+    };
+    (x_pulse, y_pulse)
 }
 
 static CUSTOM_BACKEND: parking_lot::RwLock<Option<std::sync::Arc<dyn InputBackend>>> =
@@ -830,272 +811,183 @@ pub fn update_kvm_runtime_state(helper: &str, message: &str) {
 }
 
 #[cfg(target_os = "linux")]
-pub mod xdo_ffi {
-    use std::os::raw::c_ulong;
-
-    pub type Window = c_ulong;
-    pub type UsecondsT = c_ulong;
-    pub const CURRENTWINDOW: Window = 0;
-
-    #[repr(C)]
-    pub struct Xdo {
-        _unused: [u8; 0],
-    }
+pub struct X11RbBackend {
+    conn: x11rb::rust_connection::RustConnection,
+    screen_num: usize,
+    root: x11rb::protocol::xproto::Window,
+    width: u32,
+    height: u32,
+    keysym_to_keycode: std::collections::HashMap<u32, u8>,
 }
 
 #[cfg(target_os = "linux")]
-pub struct XdoSymbols {
-    _lib: libloading::Library,
-    pub xdo_new: unsafe extern "C" fn(display_name: *const std::os::raw::c_char) -> *mut xdo_ffi::Xdo,
-    pub xdo_free: unsafe extern "C" fn(xdo: *mut xdo_ffi::Xdo),
-    pub xdo_move_mouse_relative: unsafe extern "C" fn(xdo: *const xdo_ffi::Xdo, x: std::os::raw::c_int, y: std::os::raw::c_int) -> std::os::raw::c_int,
-    pub xdo_move_mouse: unsafe extern "C" fn(xdo: *const xdo_ffi::Xdo, x: std::os::raw::c_int, y: std::os::raw::c_int, screen: std::os::raw::c_int) -> std::os::raw::c_int,
-    pub xdo_mouse_down: unsafe extern "C" fn(xdo: *const xdo_ffi::Xdo, window: xdo_ffi::Window, button: std::os::raw::c_int) -> std::os::raw::c_int,
-    pub xdo_mouse_up: unsafe extern "C" fn(xdo: *const xdo_ffi::Xdo, window: xdo_ffi::Window, button: std::os::raw::c_int) -> std::os::raw::c_int,
-    pub xdo_send_keysequence_window_down: unsafe extern "C" fn(
-        xdo: *const xdo_ffi::Xdo,
-        window: xdo_ffi::Window,
-        keysequence: *const std::os::raw::c_char,
-        delay: xdo_ffi::UsecondsT,
-    ) -> std::os::raw::c_int,
-    pub xdo_send_keysequence_window_up: unsafe extern "C" fn(
-        xdo: *const xdo_ffi::Xdo,
-        window: xdo_ffi::Window,
-        keysequence: *const std::os::raw::c_char,
-        delay: xdo_ffi::UsecondsT,
-    ) -> std::os::raw::c_int,
-    pub xdo_get_viewport_dimensions: unsafe extern "C" fn(
-        xdo: *const xdo_ffi::Xdo,
-        width: *mut std::os::raw::c_uint,
-        height: *mut std::os::raw::c_uint,
-        screen: std::os::raw::c_int,
-    ) -> std::os::raw::c_int,
-}
+impl X11RbBackend {
+    pub fn new() -> Result<Self, String> {
+        let display = std::env::var("DISPLAY").ok();
+        probe_display_available(display.as_deref())?;
 
-#[cfg(target_os = "linux")]
-impl XdoSymbols {
-    pub fn load() -> Result<Self, String> {
-        let candidates = ["libxdo.so.3", "libxdo.so.4", "libxdo.so"];
-        for name in &candidates {
-            if let Ok(lib) = unsafe { libloading::Library::new(name) } {
-                unsafe {
-                    if let (
-                        Ok(xdo_new),
-                        Ok(xdo_free),
-                        Ok(xdo_move_mouse_relative),
-                        Ok(xdo_move_mouse),
-                        Ok(xdo_mouse_down),
-                        Ok(xdo_mouse_up),
-                        Ok(xdo_send_keysequence_window_down),
-                        Ok(xdo_send_keysequence_window_up),
-                        Ok(xdo_get_viewport_dimensions),
-                    ) = (
-                        get_sym(&lib, b"xdo_new\0"),
-                        get_sym(&lib, b"xdo_free\0"),
-                        get_sym(&lib, b"xdo_move_mouse_relative\0"),
-                        get_sym(&lib, b"xdo_move_mouse\0"),
-                        get_sym(&lib, b"xdo_mouse_down\0"),
-                        get_sym(&lib, b"xdo_mouse_up\0"),
-                        get_sym(&lib, b"xdo_send_keysequence_window_down\0"),
-                        get_sym(&lib, b"xdo_send_keysequence_window_up\0"),
-                        get_sym(&lib, b"xdo_get_viewport_dimensions\0"),
-                    ) {
-                        return Ok(Self {
-                            _lib: lib,
-                            xdo_new,
-                            xdo_free,
-                            xdo_move_mouse_relative,
-                            xdo_move_mouse,
-                            xdo_mouse_down,
-                            xdo_mouse_up,
-                            xdo_send_keysequence_window_down,
-                            xdo_send_keysequence_window_up,
-                            xdo_get_viewport_dimensions,
-                        });
+        let (conn, screen_num) = x11rb::connect(display.as_deref())
+            .map_err(|e| {
+                let err = format!("input injection unavailable: failed to open X display: {}", e);
+                update_kvm_runtime_state("x11rb", &err);
+                err
+            })?;
+
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto;
+
+        let screen = &conn.setup().roots[screen_num];
+        let root = screen.root;
+        let width = screen.width_in_pixels as u32;
+        let height = screen.height_in_pixels as u32;
+
+        let setup = conn.setup();
+        let min_keycode = setup.min_keycode;
+        let max_keycode = setup.max_keycode;
+        let count = max_keycode.saturating_sub(min_keycode).saturating_add(1);
+        let reply = xproto::get_keyboard_mapping(&conn, min_keycode, count)
+            .map_err(|e| format!("failed to request keyboard mapping: {}", e))?
+            .reply()
+            .map_err(|e| format!("failed to get keyboard mapping reply: {}", e))?;
+
+        let mut keysym_to_keycode = std::collections::HashMap::new();
+        let per_keycode = reply.keysyms_per_keycode as usize;
+        if per_keycode > 0 {
+            for (idx, chunk) in reply.keysyms.chunks(per_keycode).enumerate() {
+                let keycode = (min_keycode as usize + idx) as u8;
+                for &sym in chunk {
+                    if sym != 0 {
+                        keysym_to_keycode.entry(sym).or_insert(keycode);
                     }
                 }
             }
         }
-        Err("libxdo not installed; input injection unavailable".to_string())
-    }
-}
 
-#[cfg(target_os = "linux")]
-pub struct XdoBackend {
-    symbols: std::sync::Arc<XdoSymbols>,
-    handle: parking_lot::Mutex<*mut xdo_ffi::Xdo>,
-}
-
-#[cfg(target_os = "linux")]
-unsafe impl Send for XdoBackend {}
-#[cfg(target_os = "linux")]
-unsafe impl Sync for XdoBackend {}
-
-#[cfg(target_os = "linux")]
-impl Drop for XdoBackend {
-    fn drop(&mut self) {
-        let ptr = *self.handle.lock();
-        if !ptr.is_null() {
-            unsafe { (self.symbols.xdo_free)(ptr) };
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl XdoBackend {
-    pub fn new() -> Result<Self, String> {
-        let symbols = std::sync::Arc::new(XdoSymbols::load()?);
-
-        let display = std::env::var("DISPLAY").ok();
-        probe_display_available(display.as_deref())?;
-
-        let c_display = display.as_ref().and_then(|d| std::ffi::CString::new(d.as_str()).ok());
-        let dpy_ptr = c_display.as_ref().map(|s| s.as_ptr()).unwrap_or(std::ptr::null());
-        let handle = unsafe { (symbols.xdo_new)(dpy_ptr) };
-        if handle.is_null() {
-            let err = "input injection unavailable: DISPLAY not set or failed to open X display".to_string();
-            update_kvm_runtime_state("libxdo", &err);
-            return Err(err);
-        }
         Ok(Self {
-            symbols,
-            handle: parking_lot::Mutex::new(handle),
+            conn,
+            screen_num,
+            root,
+            width,
+            height,
+            keysym_to_keycode,
         })
     }
 
     pub fn get_viewport_dimensions(&self) -> Result<(u32, u32), String> {
-        let guard = self.handle.lock();
-        if guard.is_null() {
-            return Err("xdo handle is null".to_string());
-        }
-        let mut width: std::os::raw::c_uint = 0;
-        let mut height: std::os::raw::c_uint = 0;
-        let ret = unsafe {
-            (self.symbols.xdo_get_viewport_dimensions)(*guard, &mut width, &mut height, 0)
-        };
-        if ret != 0 {
-            return Err("failed to get viewport dimensions".to_string());
-        }
-        Ok((width as u32, height as u32))
+        Ok((self.width, self.height))
     }
 }
 
 #[cfg(target_os = "linux")]
-impl InputBackend for XdoBackend {
+impl InputBackend for X11RbBackend {
     fn key(&self, vk: u16, is_down: bool, _extended: bool) -> Result<(), String> {
-        let sym_name = vk_to_x_keysym_name(vk)
+        use x11rb::connection::Connection;
+        use x11rb::protocol::{xproto, xtest};
+
+        let sym = vk_to_x_keysym(vk)
             .ok_or_else(|| format!("unmapped virtual key: 0x{:02X}", vk))?;
-        let c_sym = std::ffi::CString::new(sym_name)
-            .map_err(|e| format!("invalid keysym string: {}", e))?;
-        let guard = self.handle.lock();
-        if guard.is_null() {
-            return Err("xdo handle is null".to_string());
-        }
-        let ret = unsafe {
-            if is_down {
-                (self.symbols.xdo_send_keysequence_window_down)(*guard, xdo_ffi::CURRENTWINDOW, c_sym.as_ptr(), 0)
-            } else {
-                (self.symbols.xdo_send_keysequence_window_up)(*guard, xdo_ffi::CURRENTWINDOW, c_sym.as_ptr(), 0)
-            }
-        };
-        if ret != 0 {
-            return Err(format!("xdo keysequence failed for {}", sym_name));
-        }
+        let keycode = self.keysym_to_keycode.get(&sym).copied()
+            .ok_or_else(|| format!("unmapped keysym: 0x{:04X}", sym))?;
+
+        xtest::fake_input(
+            &self.conn,
+            if is_down { xproto::KEY_PRESS_EVENT } else { xproto::KEY_RELEASE_EVENT },
+            keycode,
+            0,
+            x11rb::NONE,
+            0,
+            0,
+            0,
+        ).map_err(|e| format!("xtest fake_input key failed: {}", e))?;
+        self.conn.flush().map_err(|e| format!("x11 flush failed: {}", e))?;
         Ok(())
     }
 
     fn button(&self, button: MouseButton, is_down: bool) -> Result<(), String> {
-        let btn = match button {
-            MouseButton::Left => 1,
-            MouseButton::Middle => 2,
-            MouseButton::Right => 3,
-        };
-        let guard = self.handle.lock();
-        if guard.is_null() {
-            return Err("xdo handle is null".to_string());
-        }
-        let ret = unsafe {
-            if is_down {
-                (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn)
-            } else {
-                (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn)
-            }
-        };
-        if ret != 0 {
-            return Err(format!("xdo mouse button failed for {:?}", button));
-        }
+        use x11rb::connection::Connection;
+        use x11rb::protocol::{xproto, xtest};
+
+        let btn = mouse_button_to_x11_button(button);
+        xtest::fake_input(
+            &self.conn,
+            if is_down { xproto::BUTTON_PRESS_EVENT } else { xproto::BUTTON_RELEASE_EVENT },
+            btn,
+            0,
+            x11rb::NONE,
+            0,
+            0,
+            0,
+        ).map_err(|e| format!("xtest fake_input button failed: {}", e))?;
+        self.conn.flush().map_err(|e| format!("x11 flush failed: {}", e))?;
         Ok(())
     }
 
     fn wheel(&self, dx: i32, dy: i32) -> Result<(), String> {
-        let guard = self.handle.lock();
-        if guard.is_null() {
-            return Err("xdo handle is null".to_string());
-        }
-        if dy != 0 {
-            let btn = if dy > 0 { 4 } else { 5 };
-            let count = dy.abs().min(10);
+        use x11rb::connection::Connection;
+        use x11rb::protocol::{xproto, xtest};
+
+        let (x_pulse, y_pulse) = mouse_wheel_to_x11_pulses(dx, dy);
+
+        if let Some((btn, count)) = y_pulse {
             for _ in 0..count {
-                unsafe {
-                    let r1 = (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn);
-                    let r2 = (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn);
-                    if r1 != 0 || r2 != 0 {
-                        return Err(format!("xdo wheel scroll {} failed", if dy > 0 { "up" } else { "down" }));
-                    }
-                }
+                xtest::fake_input(&self.conn, xproto::BUTTON_PRESS_EVENT, btn, 0, x11rb::NONE, 0, 0, 0)
+                    .map_err(|e| format!("x11 wheel scroll {} press failed: {}", if dy > 0 { "up" } else { "down" }, e))?;
+                xtest::fake_input(&self.conn, xproto::BUTTON_RELEASE_EVENT, btn, 0, x11rb::NONE, 0, 0, 0)
+                    .map_err(|e| format!("x11 wheel scroll {} release failed: {}", if dy > 0 { "up" } else { "down" }, e))?;
             }
         }
-        if dx != 0 {
-            let btn = if dx > 0 { 7 } else { 6 };
-            let count = dx.abs().min(10);
+
+        if let Some((btn, count)) = x_pulse {
             for _ in 0..count {
-                unsafe {
-                    let r1 = (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn);
-                    let r2 = (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn);
-                    if r1 != 0 || r2 != 0 {
-                        return Err(format!("xdo wheel scroll {} failed", if dx > 0 { "right" } else { "left" }));
-                    }
-                }
+                xtest::fake_input(&self.conn, xproto::BUTTON_PRESS_EVENT, btn, 0, x11rb::NONE, 0, 0, 0)
+                    .map_err(|e| format!("x11 wheel scroll {} press failed: {}", if dx > 0 { "right" } else { "left" }, e))?;
+                xtest::fake_input(&self.conn, xproto::BUTTON_RELEASE_EVENT, btn, 0, x11rb::NONE, 0, 0, 0)
+                    .map_err(|e| format!("x11 wheel scroll {} release failed: {}", if dx > 0 { "right" } else { "left" }, e))?;
             }
         }
+
+        self.conn.flush().map_err(|e| format!("x11 flush failed: {}", e))?;
         Ok(())
     }
 
     fn move_relative(&self, dx: i32, dy: i32) -> Result<(), String> {
-        let guard = self.handle.lock();
-        if guard.is_null() {
-            return Err("xdo handle is null".to_string());
-        }
-        let ret = unsafe {
-            (self.symbols.xdo_move_mouse_relative)(*guard, dx, dy)
-        };
-        if ret != 0 {
-            return Err(format!("xdo move_relative failed for ({}, {})", dx, dy));
-        }
-        Ok(())
+        use x11rb::protocol::xproto;
+
+        let reply = xproto::query_pointer(&self.conn, self.root)
+            .map_err(|e| format!("x11 query_pointer failed: {}", e))?
+            .reply()
+            .map_err(|e| format!("x11 query_pointer reply failed: {}", e))?;
+        let new_x = reply.root_x as i32 + dx;
+        let new_y = reply.root_y as i32 + dy;
+        self.warp(new_x, new_y)
     }
 
     fn warp(&self, x: i32, y: i32) -> Result<(), String> {
-        let guard = self.handle.lock();
-        if guard.is_null() {
-            return Err("xdo handle is null".to_string());
-        }
-        let ret = unsafe {
-            (self.symbols.xdo_move_mouse)(*guard, x, y, 0)
-        };
-        if ret != 0 {
-            return Err(format!("xdo warp failed for ({}, {})", x, y));
-        }
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto;
+
+        xproto::warp_pointer(
+            &self.conn,
+            x11rb::NONE,
+            self.root,
+            0,
+            0,
+            0,
+            0,
+            x as i16,
+            y as i16,
+        ).map_err(|e| format!("x11 warp_pointer failed: {}", e))?;
+        self.conn.flush().map_err(|e| format!("x11 flush failed: {}", e))?;
         Ok(())
     }
 }
 
 #[cfg(target_os = "linux")]
-static LINUX_BACKEND: parking_lot::RwLock<Option<Result<std::sync::Arc<XdoBackend>, String>>> =
+static LINUX_BACKEND: parking_lot::RwLock<Option<Result<std::sync::Arc<X11RbBackend>, String>>> =
     parking_lot::RwLock::new(None);
 
 #[cfg(target_os = "linux")]
-pub fn get_linux_backend() -> Result<std::sync::Arc<XdoBackend>, String> {
+pub fn get_linux_backend() -> Result<std::sync::Arc<X11RbBackend>, String> {
     {
         let guard = LINUX_BACKEND.read();
         if let Some(ref res) = *guard {
@@ -1106,10 +998,10 @@ pub fn get_linux_backend() -> Result<std::sync::Arc<XdoBackend>, String> {
     if let Some(ref res) = *guard {
         return res.clone();
     }
-    let res = match XdoBackend::new() {
+    let res = match X11RbBackend::new() {
         Ok(b) => Ok(std::sync::Arc::new(b)),
         Err(e) => {
-            update_kvm_runtime_state("libxdo", &e);
+            update_kvm_runtime_state("x11rb", &e);
             Err(e)
         }
     };
@@ -2644,118 +2536,6 @@ pub mod hook_engine {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub mod x11_ffi {
-    use std::os::raw::{c_int, c_uint, c_ulong};
-
-    pub type Display = std::ffi::c_void;
-    pub type Window = c_ulong;
-    pub type Bool = c_int;
-
-    pub const BUTTON1_MASK: c_uint = 1 << 8;
-    pub const BUTTON2_MASK: c_uint = 1 << 9;
-    pub const BUTTON3_MASK: c_uint = 1 << 10;
-    pub const BUTTON4_MASK: c_uint = 1 << 11;
-    pub const BUTTON5_MASK: c_uint = 1 << 12;
-    pub const CONTROL_MASK: c_uint = 1 << 2;
-}
-
-#[cfg(target_os = "linux")]
-pub struct X11Lib {
-    _lib: libloading::Library,
-    pub XOpenDisplay: unsafe extern "C" fn(display_name: *const std::os::raw::c_char) -> *mut x11_ffi::Display,
-    pub XCloseDisplay: unsafe extern "C" fn(display: *mut x11_ffi::Display) -> std::os::raw::c_int,
-    pub XDefaultRootWindow: unsafe extern "C" fn(display: *mut x11_ffi::Display) -> x11_ffi::Window,
-    pub XDefaultScreen: unsafe extern "C" fn(display: *mut x11_ffi::Display) -> std::os::raw::c_int,
-    pub XDisplayWidth: unsafe extern "C" fn(display: *mut x11_ffi::Display, screen_number: std::os::raw::c_int) -> std::os::raw::c_int,
-    pub XDisplayHeight: unsafe extern "C" fn(display: *mut x11_ffi::Display, screen_number: std::os::raw::c_int) -> std::os::raw::c_int,
-    pub XQueryPointer: unsafe extern "C" fn(
-        display: *mut x11_ffi::Display,
-        w: x11_ffi::Window,
-        root_return: *mut x11_ffi::Window,
-        child_return: *mut x11_ffi::Window,
-        root_x_return: *mut std::os::raw::c_int,
-        root_y_return: *mut std::os::raw::c_int,
-        win_x_return: *mut std::os::raw::c_int,
-        win_y_return: *mut std::os::raw::c_int,
-        mask_return: *mut std::os::raw::c_uint,
-    ) -> std::os::raw::c_int,
-    pub XWarpPointer: unsafe extern "C" fn(
-        display: *mut x11_ffi::Display,
-        src_w: x11_ffi::Window,
-        dest_w: x11_ffi::Window,
-        src_x: std::os::raw::c_int,
-        src_y: std::os::raw::c_int,
-        src_width: std::os::raw::c_uint,
-        src_height: std::os::raw::c_uint,
-        dest_x: std::os::raw::c_int,
-        dest_y: std::os::raw::c_int,
-    ) -> std::os::raw::c_int,
-    pub XQueryKeymap: unsafe extern "C" fn(
-        display: *mut x11_ffi::Display,
-        keys_return: *mut [std::os::raw::c_char; 32],
-    ) -> std::os::raw::c_int,
-    pub XFlush: unsafe extern "C" fn(display: *mut x11_ffi::Display) -> std::os::raw::c_int,
-}
-
-#[cfg(target_os = "linux")]
-unsafe fn get_sym<T: Copy>(lib: &libloading::Library, name: &[u8]) -> Result<T, String> {
-    let sym: libloading::Symbol<T> = lib
-        .get(name)
-        .map_err(|e| format!("missing symbol {}: {}", String::from_utf8_lossy(name), e))?;
-    Ok(*sym)
-}
-
-#[cfg(target_os = "linux")]
-impl X11Lib {
-    pub fn load() -> Result<Self, String> {
-        let candidates = ["libX11.so.6", "libX11.so"];
-        for name in &candidates {
-            if let Ok(lib) = unsafe { libloading::Library::new(name) } {
-                unsafe {
-                    if let (
-                        Ok(XOpenDisplay),
-                        Ok(XCloseDisplay),
-                        Ok(XDefaultRootWindow),
-                        Ok(XDefaultScreen),
-                        Ok(XDisplayWidth),
-                        Ok(XDisplayHeight),
-                        Ok(XQueryPointer),
-                        Ok(XWarpPointer),
-                        Ok(XQueryKeymap),
-                        Ok(XFlush),
-                    ) = (
-                        get_sym(&lib, b"XOpenDisplay\0"),
-                        get_sym(&lib, b"XCloseDisplay\0"),
-                        get_sym(&lib, b"XDefaultRootWindow\0"),
-                        get_sym(&lib, b"XDefaultScreen\0"),
-                        get_sym(&lib, b"XDisplayWidth\0"),
-                        get_sym(&lib, b"XDisplayHeight\0"),
-                        get_sym(&lib, b"XQueryPointer\0"),
-                        get_sym(&lib, b"XWarpPointer\0"),
-                        get_sym(&lib, b"XQueryKeymap\0"),
-                        get_sym(&lib, b"XFlush\0"),
-                    ) {
-                        return Ok(Self {
-                            _lib: lib,
-                            XOpenDisplay,
-                            XCloseDisplay,
-                            XDefaultRootWindow,
-                            XDefaultScreen,
-                            XDisplayWidth,
-                            XDisplayHeight,
-                            XQueryPointer,
-                            XWarpPointer,
-                            XQueryKeymap,
-                            XFlush,
-                        });
-                    }
-                }
-            }
-        }
-        Err("libX11 library not found".to_string())
-    }
-}
 
 #[cfg(target_os = "linux")]
 fn run_linux_x11_capture_loop(
@@ -2765,26 +2545,28 @@ fn run_linux_x11_capture_loop(
     display: Option<String>,
     session_type: Option<String>,
 ) {
-    let xlib = match X11Lib::load() {
-        Ok(lib) => lib,
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::ConnectionExt;
+
+    let (conn, screen_num) = match x11rb::connect(display.as_deref()) {
+        Ok(res) => res,
         Err(e) => {
             log::warn!("[KVM] Linux X11 input capture unavailable: {}", e);
             return;
         }
     };
 
-    let c_display = display.as_ref().and_then(|d| std::ffi::CString::new(d.as_str()).ok());
-    let dpy_ptr = c_display.as_ref().map(|s| s.as_ptr()).unwrap_or(std::ptr::null());
-    let dpy = unsafe { (xlib.XOpenDisplay)(dpy_ptr) };
-    if dpy.is_null() {
-        log::warn!("[KVM] Linux X11 input capture unavailable: failed to open X display");
-        return;
-    }
-
-    let root = unsafe { (xlib.XDefaultRootWindow)(dpy) };
-    let screen = unsafe { (xlib.XDefaultScreen)(dpy) };
-    let width = unsafe { (xlib.XDisplayWidth)(dpy, screen) };
-    let height = unsafe { (xlib.XDisplayHeight)(dpy, screen) };
+    let setup = conn.setup();
+    let screen = match setup.roots.get(screen_num) {
+        Some(s) => s,
+        None => {
+            log::warn!("[KVM] Linux X11 input capture unavailable: invalid screen index");
+            return;
+        }
+    };
+    let root = screen.root;
+    let width = screen.width_in_pixels as i32;
+    let height = screen.height_in_pixels as i32;
 
     hook_engine::LINUX_CAPTURE_RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
     let (helper, message) = evaluate_linux_session_capability(
@@ -2803,41 +2585,51 @@ fn run_linux_x11_capture_loop(
     let mut last_y = height / 2;
     let mut virtual_remote_x: f64 = 0.0;
     let mut virtual_remote_y: f64 = 0.0;
-    let mut prev_mask: std::os::raw::c_uint = 0;
-    let mut prev_keys: [std::os::raw::c_char; 32] = [0; 32];
+    let mut prev_mask: u16 = 0;
+    let mut prev_keys: [u8; 32] = [0; 32];
+
+    const BUTTON1_MASK: u16 = 1 << 8;
+    const BUTTON2_MASK: u16 = 1 << 9;
+    const BUTTON3_MASK: u16 = 1 << 10;
+    const BUTTON4_MASK: u16 = 1 << 11;
+    const BUTTON5_MASK: u16 = 1 << 12;
+    const CONTROL_MASK: u16 = 1 << 2;
 
     while hook_engine::LINUX_CAPTURE_RUNNING.load(std::sync::atomic::Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(8)); // ~120 Hz polling loop (XQueryPointer / XQueryKeymap)
 
-        let mut root_ret: x11_ffi::Window = 0;
-        let mut child_ret: x11_ffi::Window = 0;
-        let mut root_x: std::os::raw::c_int = 0;
-        let mut root_y: std::os::raw::c_int = 0;
-        let mut win_x: std::os::raw::c_int = 0;
-        let mut win_y: std::os::raw::c_int = 0;
-        let mut mask: std::os::raw::c_uint = 0;
-
-        let query_res = unsafe {
-            (xlib.XQueryPointer)(
-                dpy,
-                root,
-                &mut root_ret,
-                &mut child_ret,
-                &mut root_x,
-                &mut root_y,
-                &mut win_x,
-                &mut win_y,
-                &mut mask,
-            )
+        let query_reply = match conn.query_pointer(root) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("[KVM] XQueryPointer reply failed: {}", e);
+                    continue;
+                }
+            },
+            Err(e) => {
+                log::warn!("[KVM] XQueryPointer failed: {}", e);
+                continue;
+            }
         };
-        if query_res == 0 {
-            continue;
-        }
 
-        let mut keys: [std::os::raw::c_char; 32] = [0; 32];
-        unsafe {
-            (xlib.XQueryKeymap)(dpy, &mut keys);
-        }
+        let root_x = query_reply.root_x as i32;
+        let root_y = query_reply.root_y as i32;
+        let mask = u16::from(query_reply.mask);
+
+        let keymap_reply = match conn.query_keymap() {
+            Ok(cookie) => match cookie.reply() {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("[KVM] XQueryKeymap reply failed: {}", e);
+                    continue;
+                }
+            },
+            Err(e) => {
+                log::warn!("[KVM] XQueryKeymap failed: {}", e);
+                continue;
+            }
+        };
+        let keys = keymap_reply.keys;
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2867,8 +2659,8 @@ fn run_linux_x11_capture_loop(
                 virtual_remote_y = 0.0;
                 log::info!("[KVM] Cursor crossed to peer: side={}, pt=({}, {})", snap.layout.side, root_x, root_y);
 
-                let is_left_down = (mask & x11_ffi::BUTTON1_MASK) != 0;
-                let is_ctrl_down = (mask & x11_ffi::CONTROL_MASK) != 0;
+                let is_left_down = (mask & BUTTON1_MASK) != 0;
+                let is_ctrl_down = (mask & CONTROL_MASK) != 0;
 
                 if is_left_down && is_ctrl_down {
                     let _ = app.emit("window-handoff-trigger", serde_json::json!({
@@ -2899,10 +2691,8 @@ fn run_linux_x11_capture_loop(
                     "bottom" => max_y - 5,
                     _ => root_y,
                 };
-                unsafe {
-                    (xlib.XWarpPointer)(dpy, 0, root, 0, 0, 0, 0, park_x, park_y);
-                    (xlib.XFlush)(dpy);
-                }
+                let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, park_x as i16, park_y as i16);
+                let _ = conn.flush();
                 last_x = park_x;
                 last_y = park_y;
                 prev_mask = mask;
@@ -2949,10 +2739,8 @@ fn run_linux_x11_capture_loop(
                     "bottom" => max_y - 12,
                     _ => root_y,
                 };
-                unsafe {
-                    (xlib.XWarpPointer)(dpy, 0, root, 0, 0, 0, 0, return_x, return_y);
-                    (xlib.XFlush)(dpy);
-                }
+                let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, return_x as i16, return_y as i16);
+                let _ = conn.flush();
                 last_x = return_x;
                 last_y = return_y;
                 prev_mask = mask;
@@ -2975,10 +2763,8 @@ fn run_linux_x11_capture_loop(
                 "bottom" => max_y - 5,
                 _ => root_y.clamp(vy, max_y - 1),
             };
-            unsafe {
-                (xlib.XWarpPointer)(dpy, 0, root, 0, 0, 0, 0, park_x, park_y);
-                (xlib.XFlush)(dpy);
-            }
+            let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, park_x as i16, park_y as i16);
+            let _ = conn.flush();
             last_x = park_x;
             last_y = park_y;
 
@@ -2986,8 +2772,8 @@ fn run_linux_x11_capture_loop(
             let changed_mask = mask ^ prev_mask;
             if changed_mask != 0 {
                 // Button 1 (Left)
-                if (changed_mask & x11_ffi::BUTTON1_MASK) != 0 {
-                    let is_down = (mask & x11_ffi::BUTTON1_MASK) != 0;
+                if (changed_mask & BUTTON1_MASK) != 0 {
+                    let is_down = (mask & BUTTON1_MASK) != 0;
                     network.send_packet_sync(WireMessage {
                         t: if is_down { "k.md".to_string() } else { "k.mu".to_string() },
                         v: Some(1),
@@ -2996,8 +2782,8 @@ fn run_linux_x11_capture_loop(
                     });
                 }
                 // Button 3 (Right)
-                if (changed_mask & x11_ffi::BUTTON3_MASK) != 0 {
-                    let is_down = (mask & x11_ffi::BUTTON3_MASK) != 0;
+                if (changed_mask & BUTTON3_MASK) != 0 {
+                    let is_down = (mask & BUTTON3_MASK) != 0;
                     network.send_packet_sync(WireMessage {
                         t: if is_down { "k.md".to_string() } else { "k.mu".to_string() },
                         v: Some(1),
@@ -3006,8 +2792,8 @@ fn run_linux_x11_capture_loop(
                     });
                 }
                 // Button 2 (Middle)
-                if (changed_mask & x11_ffi::BUTTON2_MASK) != 0 {
-                    let is_down = (mask & x11_ffi::BUTTON2_MASK) != 0;
+                if (changed_mask & BUTTON2_MASK) != 0 {
+                    let is_down = (mask & BUTTON2_MASK) != 0;
                     network.send_packet_sync(WireMessage {
                         t: if is_down { "k.md".to_string() } else { "k.mu".to_string() },
                         v: Some(1),
@@ -3016,7 +2802,7 @@ fn run_linux_x11_capture_loop(
                     });
                 }
                 // Button 4 (Wheel Up)
-                if (changed_mask & x11_ffi::BUTTON4_MASK) != 0 && (mask & x11_ffi::BUTTON4_MASK) != 0 {
+                if (changed_mask & BUTTON4_MASK) != 0 && (mask & BUTTON4_MASK) != 0 {
                     network.send_packet_sync(WireMessage {
                         t: "k.wh".to_string(),
                         v: Some(1),
@@ -3026,7 +2812,7 @@ fn run_linux_x11_capture_loop(
                     });
                 }
                 // Button 5 (Wheel Down)
-                if (changed_mask & x11_ffi::BUTTON5_MASK) != 0 && (mask & x11_ffi::BUTTON5_MASK) != 0 {
+                if (changed_mask & BUTTON5_MASK) != 0 && (mask & BUTTON5_MASK) != 0 {
                     network.send_packet_sync(WireMessage {
                         t: "k.wh".to_string(),
                         v: Some(1),
@@ -3066,9 +2852,7 @@ fn run_linux_x11_capture_loop(
         prev_keys = keys;
     }
 
-    unsafe {
-        (xlib.XCloseDisplay)(dpy);
-    }
+    hook_engine::LINUX_CAPTURE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -3255,56 +3039,56 @@ mod tests {
 
     #[test]
     fn test_vk_to_x_keysym_mapping() {
-        // Letters A-Z
-        assert_eq!(vk_to_x_keysym_name(0x41), Some("a"));
-        assert_eq!(vk_to_x_keysym_name(0x4D), Some("m"));
-        assert_eq!(vk_to_x_keysym_name(0x5A), Some("z"));
+        // Letters A-Z -> lowercase 'a'-'z' (0x61..=0x7A)
+        assert_eq!(vk_to_x_keysym(0x41), Some(0x0061)); // 'a'
+        assert_eq!(vk_to_x_keysym(0x4D), Some(0x006D)); // 'm'
+        assert_eq!(vk_to_x_keysym(0x5A), Some(0x007A)); // 'z'
 
         // Digits 0-9
-        assert_eq!(vk_to_x_keysym_name(0x30), Some("0"));
-        assert_eq!(vk_to_x_keysym_name(0x35), Some("5"));
-        assert_eq!(vk_to_x_keysym_name(0x39), Some("9"));
+        assert_eq!(vk_to_x_keysym(0x30), Some(0x0030)); // '0'
+        assert_eq!(vk_to_x_keysym(0x35), Some(0x0035)); // '5'
+        assert_eq!(vk_to_x_keysym(0x39), Some(0x0039)); // '9'
 
         // Arrows
-        assert_eq!(vk_to_x_keysym_name(0x25), Some("Left"));
-        assert_eq!(vk_to_x_keysym_name(0x26), Some("Up"));
-        assert_eq!(vk_to_x_keysym_name(0x27), Some("Right"));
-        assert_eq!(vk_to_x_keysym_name(0x28), Some("Down"));
+        assert_eq!(vk_to_x_keysym(0x25), Some(0xFF51)); // Left
+        assert_eq!(vk_to_x_keysym(0x26), Some(0xFF52)); // Up
+        assert_eq!(vk_to_x_keysym(0x27), Some(0xFF53)); // Right
+        assert_eq!(vk_to_x_keysym(0x28), Some(0xFF54)); // Down
 
         // Modifiers
-        assert_eq!(vk_to_x_keysym_name(0x10), Some("Shift_L"));
-        assert_eq!(vk_to_x_keysym_name(0xA0), Some("Shift_L"));
-        assert_eq!(vk_to_x_keysym_name(0xA1), Some("Shift_R"));
-        assert_eq!(vk_to_x_keysym_name(0x11), Some("Control_L"));
-        assert_eq!(vk_to_x_keysym_name(0xA2), Some("Control_L"));
-        assert_eq!(vk_to_x_keysym_name(0xA3), Some("Control_R"));
-        assert_eq!(vk_to_x_keysym_name(0x12), Some("Alt_L"));
-        assert_eq!(vk_to_x_keysym_name(0xA4), Some("Alt_L"));
-        assert_eq!(vk_to_x_keysym_name(0xA5), Some("Alt_R"));
-        assert_eq!(vk_to_x_keysym_name(0x5B), Some("Super_L"));
-        assert_eq!(vk_to_x_keysym_name(0x5C), Some("Super_R"));
+        assert_eq!(vk_to_x_keysym(0x10), Some(0xFFE1)); // Shift_L
+        assert_eq!(vk_to_x_keysym(0xA0), Some(0xFFE1)); // Shift_L
+        assert_eq!(vk_to_x_keysym(0xA1), Some(0xFFE2)); // Shift_R
+        assert_eq!(vk_to_x_keysym(0x11), Some(0xFFE3)); // Control_L
+        assert_eq!(vk_to_x_keysym(0xA2), Some(0xFFE3)); // Control_L
+        assert_eq!(vk_to_x_keysym(0xA3), Some(0xFFE4)); // Control_R
+        assert_eq!(vk_to_x_keysym(0x12), Some(0xFFE9)); // Alt_L
+        assert_eq!(vk_to_x_keysym(0xA4), Some(0xFFE9)); // Alt_L
+        assert_eq!(vk_to_x_keysym(0xA5), Some(0xFFEA)); // Alt_R
+        assert_eq!(vk_to_x_keysym(0x5B), Some(0xFFEB)); // Super_L
+        assert_eq!(vk_to_x_keysym(0x5C), Some(0xFFEC)); // Super_R
 
         // F-keys F1-F12
-        assert_eq!(vk_to_x_keysym_name(0x70), Some("F1"));
-        assert_eq!(vk_to_x_keysym_name(0x75), Some("F6"));
-        assert_eq!(vk_to_x_keysym_name(0x7B), Some("F12"));
+        assert_eq!(vk_to_x_keysym(0x70), Some(0xFFBE)); // F1
+        assert_eq!(vk_to_x_keysym(0x75), Some(0xFFC3)); // F6
+        assert_eq!(vk_to_x_keysym(0x7B), Some(0xFFC9)); // F12
 
         // Control keys
-        assert_eq!(vk_to_x_keysym_name(0x08), Some("BackSpace"));
-        assert_eq!(vk_to_x_keysym_name(0x09), Some("Tab"));
-        assert_eq!(vk_to_x_keysym_name(0x0D), Some("Return"));
-        assert_eq!(vk_to_x_keysym_name(0x1B), Some("Escape"));
-        assert_eq!(vk_to_x_keysym_name(0x20), Some("space"));
-        assert_eq!(vk_to_x_keysym_name(0x21), Some("Page_Up"));
-        assert_eq!(vk_to_x_keysym_name(0x22), Some("Page_Down"));
-        assert_eq!(vk_to_x_keysym_name(0x23), Some("End"));
-        assert_eq!(vk_to_x_keysym_name(0x24), Some("Home"));
-        assert_eq!(vk_to_x_keysym_name(0x2E), Some("Delete"));
+        assert_eq!(vk_to_x_keysym(0x08), Some(0xFF08)); // BackSpace
+        assert_eq!(vk_to_x_keysym(0x09), Some(0xFF09)); // Tab
+        assert_eq!(vk_to_x_keysym(0x0D), Some(0xFF0D)); // Return
+        assert_eq!(vk_to_x_keysym(0x1B), Some(0xFF1B)); // Escape
+        assert_eq!(vk_to_x_keysym(0x20), Some(0x0020)); // space
+        assert_eq!(vk_to_x_keysym(0x21), Some(0xFF55)); // Page_Up
+        assert_eq!(vk_to_x_keysym(0x22), Some(0xFF56)); // Page_Down
+        assert_eq!(vk_to_x_keysym(0x23), Some(0xFF57)); // End
+        assert_eq!(vk_to_x_keysym(0x24), Some(0xFF50)); // Home
+        assert_eq!(vk_to_x_keysym(0x2E), Some(0xFFFF)); // Delete
 
         // Unknown VK returns None
-        assert_eq!(vk_to_x_keysym_name(0x00), None);
-        assert_eq!(vk_to_x_keysym_name(0xFF), None);
-        assert_eq!(vk_to_x_keysym_name(0x1234), None);
+        assert_eq!(vk_to_x_keysym(0x00), None);
+        assert_eq!(vk_to_x_keysym(0xFF), None);
+        assert_eq!(vk_to_x_keysym(0x1234), None);
     }
 
     #[test]
@@ -3397,9 +3181,9 @@ mod tests {
         let _lock = TEST_MUTEX.lock();
         let state = AppState::new();
         set_kvm_app_state(state.clone());
-        update_kvm_runtime_state("libxdo", "input injection unavailable: DISPLAY not set");
+        update_kvm_runtime_state("x11rb", "input injection unavailable: DISPLAY not set");
         let snap = state.snapshot();
-        assert_eq!(snap.kvm_state.helper, "libxdo");
+        assert_eq!(snap.kvm_state.helper, "x11rb");
         assert_eq!(snap.kvm_state.message, "input injection unavailable: DISPLAY not set");
     }
 
@@ -3407,11 +3191,11 @@ mod tests {
     fn test_evaluate_linux_session_capability() {
         // Case 1: Headless / DISPLAY unset -> capture unavailable + injection unavailable
         let (helper, msg) = evaluate_linux_session_capability(None, None, false);
-        assert_eq!(helper, "libxdo");
+        assert_eq!(helper, "x11rb");
         assert!(msg.contains("remote input injection and local capture unavailable"));
 
         let (helper, msg) = evaluate_linux_session_capability(Some("   "), None, false);
-        assert_eq!(helper, "libxdo");
+        assert_eq!(helper, "x11rb");
         assert!(msg.contains("remote input injection and local capture unavailable"));
 
         // Case 2: Wayland -> capture unavailable
@@ -3426,12 +3210,26 @@ mod tests {
 
         // Case 4: X11 + capture engine NOT running -> capture unavailable (regression test for DEFECT 2)
         let (helper, msg) = evaluate_linux_session_capability(Some(":0"), Some("x11"), false);
-        assert_eq!(helper, "libxdo");
+        assert_eq!(helper, "x11rb");
         assert!(msg.contains("local capture unavailable"));
 
         let (helper, msg) = evaluate_linux_session_capability(Some(":0"), None, false);
-        assert_eq!(helper, "libxdo");
+        assert_eq!(helper, "x11rb");
         assert!(msg.contains("local capture unavailable"));
+    }
+
+    #[test]
+    fn test_mouse_button_and_wheel_mapping() {
+        assert_eq!(mouse_button_to_x11_button(MouseButton::Left), 1);
+        assert_eq!(mouse_button_to_x11_button(MouseButton::Middle), 2);
+        assert_eq!(mouse_button_to_x11_button(MouseButton::Right), 3);
+
+        assert_eq!(mouse_wheel_to_x11_pulses(0, 5), (None, Some((4, 5)))); // Up
+        assert_eq!(mouse_wheel_to_x11_pulses(0, -3), (None, Some((5, 3)))); // Down
+        assert_eq!(mouse_wheel_to_x11_pulses(2, 0), (Some((7, 2)), None)); // Right
+        assert_eq!(mouse_wheel_to_x11_pulses(-4, 0), (Some((6, 4)), None)); // Left
+        assert_eq!(mouse_wheel_to_x11_pulses(0, 100), (None, Some((4, 10)))); // Clamped
+        assert_eq!(mouse_wheel_to_x11_pulses(0, 0), (None, None));
     }
 
     #[test]

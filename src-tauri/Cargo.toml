@@ -47,7 +47,7 @@ windows = { version = "0.58", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libloading = "0.8"
+x11rb = { version = "0.14", features = ["xtest", "record", "xinput", "xkb"] }
 
 [features]
 default = ["custom-protocol"]
