@@ -24,6 +24,7 @@ pub mod chat;
 pub mod rezume;
 pub mod media_playback;
 pub mod wol;
+pub mod platform;
 
 use media::NativeBridgeManager;
 
@@ -80,19 +81,23 @@ fn main() {
             let is_daemon = std::env::args().any(|a| a == "--daemon" || a == "--headless" || a == "--silent");
             if let Some(window) = app.get_webview_window("main") {
                 let win = window.clone();
+                let handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         let _ = win.hide();
+                        platform::set_window_visible_policy(&handle, false);
                     }
                 });
 
                 if is_daemon {
                     let _ = window.hide();
+                    platform::set_window_visible_policy(app.handle(), false);
                 } else {
                     let _ = window.show();
                     let _ = window.unminimize();
                     let _ = window.set_focus();
+                    platform::set_window_visible_policy(app.handle(), true);
                 }
             }
 
@@ -235,6 +240,7 @@ fn main() {
         .run(|app_handle, event| match event {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
+                platform::set_window_visible_policy(app_handle, true);
                 if let Some(window) = app_handle.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.unminimize();

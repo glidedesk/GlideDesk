@@ -2234,6 +2234,7 @@ pub mod hook_engine {
                         let is_daemon = std::env::args().any(|a| a == "--daemon" || a == "--headless" || a == "--silent");
                         if !is_daemon {
                             if let Some(app) = &APP_HANDLE {
+                                crate::platform::set_window_visible_policy(app, true);
                                 if let Some(window) = app.get_webview_window("main") {
                                     let _ = window.show();
                                     let _ = window.unminimize();

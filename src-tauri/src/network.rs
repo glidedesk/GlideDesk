@@ -1251,6 +1251,7 @@ impl MeshServer {
                     }));
                     let snap = state.snapshot();
                     let _ = app.emit("state-change", &snap);
+                    crate::platform::set_window_visible_policy(&app, true);
                     if let Some(win) = app.get_webview_window("main") {
                         let _ = win.show();
                         let _ = win.unminimize();
@@ -1301,6 +1302,7 @@ impl MeshServer {
                     }));
                     let snap = state.snapshot();
                     let _ = app.emit("state-change", &snap);
+                    crate::platform::set_window_visible_policy(&app, true);
                     if let Some(win) = app.get_webview_window("main") {
                         let _ = win.show();
                         let _ = win.unminimize();
