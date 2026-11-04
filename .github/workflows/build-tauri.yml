@@ -92,6 +92,12 @@ jobs:
           node scripts/test-all.js --js
           node scripts/e2e/simulate-features.js
 
+      - name: Clean stale bundle artifacts
+        shell: bash
+        run: |
+          rm -rf src-tauri/target/release/bundle
+          rm -rf src-tauri/target/*/release/bundle
+
       - name: Build Tauri Package (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         run: npx @tauri-apps/cli build
