@@ -581,6 +581,20 @@ pub fn probe_display_available(display: Option<&str>) -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureHealth {
+    Healthy,
+    Lost,
+}
+
+pub fn classify_capture_health(consecutive_failures: u32, threshold: u32) -> CaptureHealth {
+    if consecutive_failures >= threshold {
+        CaptureHealth::Lost
+    } else {
+        CaptureHealth::Healthy
+    }
+}
+
 pub fn evaluate_linux_session_capability(
     display: Option<&str>,
     session_type: Option<&str>,
@@ -2594,6 +2608,9 @@ fn run_linux_x11_capture_loop(
     const BUTTON4_MASK: u16 = 1 << 11;
     const BUTTON5_MASK: u16 = 1 << 12;
     const CONTROL_MASK: u16 = 1 << 2;
+    const MAX_CONSECUTIVE_CAPTURE_FAILURES: u32 = 10;
+
+    let mut consecutive_failures: u32 = 0;
 
     while hook_engine::LINUX_CAPTURE_RUNNING.load(std::sync::atomic::Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(8)); // ~120 Hz polling loop (XQueryPointer / XQueryKeymap)
@@ -2602,12 +2619,32 @@ fn run_linux_x11_capture_loop(
             Ok(cookie) => match cookie.reply() {
                 Ok(r) => r,
                 Err(e) => {
-                    log::warn!("[KVM] XQueryPointer reply failed: {}", e);
+                    consecutive_failures += 1;
+                    if classify_capture_health(consecutive_failures, MAX_CONSECUTIVE_CAPTURE_FAILURES) == CaptureHealth::Lost {
+                        log::error!("[KVM] Linux input capture stopped: X server connection lost ({})", e);
+                        update_kvm_runtime_state(
+                            "x11rb",
+                            "Linux input capture stopped: X server connection lost",
+                        );
+                        hook_engine::LINUX_CAPTURE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                        NativeInputInjector::release_all_keys();
+                        break;
+                    }
                     continue;
                 }
             },
             Err(e) => {
-                log::warn!("[KVM] XQueryPointer failed: {}", e);
+                consecutive_failures += 1;
+                if classify_capture_health(consecutive_failures, MAX_CONSECUTIVE_CAPTURE_FAILURES) == CaptureHealth::Lost {
+                    log::error!("[KVM] Linux input capture stopped: X server connection lost ({})", e);
+                    update_kvm_runtime_state(
+                        "x11rb",
+                        "Linux input capture stopped: X server connection lost",
+                    );
+                    hook_engine::LINUX_CAPTURE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    NativeInputInjector::release_all_keys();
+                    break;
+                }
                 continue;
             }
         };
@@ -2620,16 +2657,39 @@ fn run_linux_x11_capture_loop(
             Ok(cookie) => match cookie.reply() {
                 Ok(r) => r,
                 Err(e) => {
-                    log::warn!("[KVM] XQueryKeymap reply failed: {}", e);
+                    consecutive_failures += 1;
+                    if classify_capture_health(consecutive_failures, MAX_CONSECUTIVE_CAPTURE_FAILURES) == CaptureHealth::Lost {
+                        log::error!("[KVM] Linux input capture stopped: X server connection lost ({})", e);
+                        update_kvm_runtime_state(
+                            "x11rb",
+                            "Linux input capture stopped: X server connection lost",
+                        );
+                        hook_engine::LINUX_CAPTURE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                        NativeInputInjector::release_all_keys();
+                        break;
+                    }
                     continue;
                 }
             },
             Err(e) => {
-                log::warn!("[KVM] XQueryKeymap failed: {}", e);
+                consecutive_failures += 1;
+                if classify_capture_health(consecutive_failures, MAX_CONSECUTIVE_CAPTURE_FAILURES) == CaptureHealth::Lost {
+                    log::error!("[KVM] Linux input capture stopped: X server connection lost ({})", e);
+                    update_kvm_runtime_state(
+                        "x11rb",
+                        "Linux input capture stopped: X server connection lost",
+                    );
+                    hook_engine::LINUX_CAPTURE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    NativeInputInjector::release_all_keys();
+                    break;
+                }
                 continue;
             }
         };
         let keys = keymap_reply.keys;
+
+        // Reset failure counter on successful queries
+        consecutive_failures = 0;
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2853,6 +2913,7 @@ fn run_linux_x11_capture_loop(
     }
 
     hook_engine::LINUX_CAPTURE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    NativeInputInjector::release_all_keys();
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -3214,6 +3275,21 @@ mod tests {
         assert!(msg.contains("local capture unavailable"));
 
         let (helper, msg) = evaluate_linux_session_capability(Some(":0"), None, false);
+        assert_eq!(helper, "x11rb");
+        assert!(msg.contains("local capture unavailable"));
+    }
+
+    #[test]
+    fn test_classify_capture_health() {
+        assert_eq!(classify_capture_health(0, 10), CaptureHealth::Healthy);
+        assert_eq!(classify_capture_health(9, 10), CaptureHealth::Healthy);
+        assert_eq!(classify_capture_health(10, 10), CaptureHealth::Lost);
+        assert_eq!(classify_capture_health(15, 10), CaptureHealth::Lost);
+    }
+
+    #[test]
+    fn test_evaluate_linux_session_capability_after_capture_lost() {
+        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), Some("x11"), false);
         assert_eq!(helper, "x11rb");
         assert!(msg.contains("local capture unavailable"));
     }
