@@ -262,72 +262,52 @@ struct GithubRelease {
     assets: Vec<GithubAsset>,
 }
 
+fn pick_first<F>(assets: &[GithubAsset], pred: F) -> Option<UpdateDownload>
+where
+    F: Fn(&GithubAsset) -> bool,
+{
+    assets.iter().find(|a| pred(a)).map(|a| UpdateDownload {
+        name: a.name.clone(),
+        url: a.browser_download_url.clone(),
+        size: a.size.unwrap_or(0),
+    })
+}
+
+/// The best download for a platform ("macos" | "windows" | "linux"), or None.
+/// Kept platform-parameterized so every branch is compiled and unit-tested on
+/// every host, not just the one it runs on.
+fn pick_asset_for(platform: &str, assets: &[GithubAsset]) -> Option<UpdateDownload> {
+    match platform {
+        "macos" => {
+            let arch = std::env::consts::ARCH;
+            let arch_match = if arch == "aarch64" { "aarch64" } else { "x64" };
+            pick_first(assets, |a| {
+                a.name.ends_with(".dmg") && a.name.to_lowercase().contains("universal")
+            })
+            .or_else(|| {
+                pick_first(assets, |a| {
+                    a.name.ends_with(".dmg") && a.name.to_lowercase().contains(arch_match)
+                })
+            })
+            .or_else(|| pick_first(assets, |a| a.name.ends_with(".dmg")))
+        }
+        // Prefer the NSIS setup or MSI installer. Never choose the zero-install
+        // "portable" exe: it ignores /SILENT and would not actually update.
+        "windows" => pick_first(assets, |a| a.name.ends_with("-setup.exe"))
+            .or_else(|| pick_first(assets, |a| a.name.ends_with(".msi")))
+            .or_else(|| {
+                pick_first(assets, |a| {
+                    a.name.ends_with(".exe") && !a.name.to_lowercase().contains("portable")
+                })
+            }),
+        "linux" => pick_first(assets, |a| a.name.ends_with(".AppImage"))
+            .or_else(|| pick_first(assets, |a| a.name.ends_with(".deb"))),
+        _ => None,
+    }
+}
+
 fn pick_asset(assets: &[GithubAsset]) -> Option<UpdateDownload> {
-    #[cfg(target_os = "macos")]
-    {
-        let arch = std::env::consts::ARCH;
-        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".dmg") && a.name.to_lowercase().contains("universal")) {
-            return Some(UpdateDownload {
-                name: a.name.clone(),
-                url: a.browser_download_url.clone(),
-                size: a.size.unwrap_or(0),
-            });
-        }
-        let arch_match = if arch == "aarch64" { "aarch64" } else { "x64" };
-        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".dmg") && a.name.to_lowercase().contains(arch_match)) {
-            return Some(UpdateDownload {
-                name: a.name.clone(),
-                url: a.browser_download_url.clone(),
-                size: a.size.unwrap_or(0),
-            });
-        }
-        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".dmg")) {
-            return Some(UpdateDownload {
-                name: a.name.clone(),
-                url: a.browser_download_url.clone(),
-                size: a.size.unwrap_or(0),
-            });
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(a) = assets.iter().find(|a| a.name.ends_with("-setup.exe") || a.name.ends_with(".exe")) {
-            return Some(UpdateDownload {
-                name: a.name.clone(),
-                url: a.browser_download_url.clone(),
-                size: a.size.unwrap_or(0),
-            });
-        }
-        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".msi")) {
-            return Some(UpdateDownload {
-                name: a.name.clone(),
-                url: a.browser_download_url.clone(),
-                size: a.size.unwrap_or(0),
-            });
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".AppImage")) {
-            return Some(UpdateDownload {
-                name: a.name.clone(),
-                url: a.browser_download_url.clone(),
-                size: a.size.unwrap_or(0),
-            });
-        }
-        if let Some(a) = assets.iter().find(|a| a.name.ends_with(".deb")) {
-            return Some(UpdateDownload {
-                name: a.name.clone(),
-                url: a.browser_download_url.clone(),
-                size: a.size.unwrap_or(0),
-            });
-        }
-    }
-
-    #[allow(unreachable_code)]
-    None
+    pick_asset_for(std::env::consts::OS, assets)
 }
 
 fn parse_version(v: &str) -> Option<(Vec<u64>, String)> {
@@ -1289,6 +1269,13 @@ mod tests {
     fn test_pick_asset_resolution() {
         let assets = vec![
             GithubAsset {
+                // The real release lists the portable exe first; on Windows it
+                // must never be chosen over the -setup.exe installer.
+                name: "GlideDesk-portable-x64.exe".to_string(),
+                browser_download_url: "https://example.com/GlideDesk-portable-x64.exe".to_string(),
+                size: Some(23000000),
+            },
+            GithubAsset {
                 name: "GlideDesk_1.1.2_universal.dmg".to_string(),
                 browser_download_url: "https://example.com/GlideDesk_1.1.2_universal.dmg".to_string(),
                 size: Some(15000000),
@@ -1305,15 +1292,21 @@ mod tests {
             },
         ];
 
-        let picked = pick_asset(&assets);
-        assert!(picked.is_some());
-        let asset = picked.unwrap();
-        #[cfg(target_os = "macos")]
-        assert_eq!(asset.name, "GlideDesk_1.1.2_universal.dmg");
-        #[cfg(target_os = "windows")]
-        assert_eq!(asset.name, "GlideDesk_1.1.2_x64-setup.exe");
-        #[cfg(target_os = "linux")]
-        assert_eq!(asset.name, "GlideDesk_1.1.2_amd64.AppImage");
+        // Every platform branch is exercised on every host.
+        assert_eq!(
+            pick_asset_for("macos", &assets).unwrap().name,
+            "GlideDesk_1.1.2_universal.dmg"
+        );
+        assert_eq!(
+            pick_asset_for("windows", &assets).unwrap().name,
+            "GlideDesk_1.1.2_x64-setup.exe"
+        );
+        assert_eq!(
+            pick_asset_for("linux", &assets).unwrap().name,
+            "GlideDesk_1.1.2_amd64.AppImage"
+        );
+        // The current-platform wrapper still resolves to a file.
+        assert!(pick_asset(&assets).is_some());
     }
 
     #[test]
