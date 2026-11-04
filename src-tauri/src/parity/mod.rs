@@ -692,12 +692,12 @@ pub fn net_location() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn net_join_hotspot(ssid: String, key: String) -> Result<(), String> {
+pub fn net_join_hotspot(ssid: String, _key: String) -> Result<(), String> {
     log::info!("[Network] Joining hotspot: ssid={}", ssid);
     #[cfg(target_os = "macos")]
     {
         Command::new("networksetup")
-            .args(["-setairportnetwork", "en0", &ssid, &key])
+            .args(["-setairportnetwork", "en0", &ssid, &_key])
             .spawn()
             .map_err(|e| format!("Failed to join hotspot: {}", e))?;
         return Ok(());

@@ -475,6 +475,37 @@ impl InputBackend for RecordingBackend {
     }
 }
 
+pub const SELF_ECHO_SUPPRESSION_WINDOW_MS: u64 = 25;
+
+pub static LAST_INJECTION_TIMESTAMP_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn record_injection_timestamp() {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    LAST_INJECTION_TIMESTAMP_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn should_forward_captured_event(now_ms: u64, last_injection_ms: u64) -> bool {
+    should_forward_captured_event_with_window(now_ms, last_injection_ms, SELF_ECHO_SUPPRESSION_WINDOW_MS)
+}
+
+pub fn should_forward_captured_event_with_window(
+    now_ms: u64,
+    last_injection_ms: u64,
+    window_ms: u64,
+) -> bool {
+    if last_injection_ms == 0 {
+        return true;
+    }
+    if now_ms < last_injection_ms {
+        return true;
+    }
+    now_ms.saturating_sub(last_injection_ms) >= window_ms
+}
+
 pub fn probe_display_available(display: Option<&str>) -> Result<(), String> {
     match display {
         Some(d) if !d.trim().is_empty() => Ok(()),
@@ -485,6 +516,7 @@ pub fn probe_display_available(display: Option<&str>) -> Result<(), String> {
 pub fn evaluate_linux_session_capability(
     display: Option<&str>,
     session_type: Option<&str>,
+    capture_running: bool,
 ) -> (&'static str, &'static str) {
     match display {
         None => (
@@ -498,13 +530,111 @@ pub fn evaluate_linux_session_capability(
         Some(_) => match session_type {
             Some("wayland") => (
                 "wayland",
-                "Linux input capture: Wayland session detected; global raw input capture requires X11 session or root uinput privileges",
+                "Linux input capture: Wayland session detected; global raw input capture unavailable (requires X11 session or root uinput privileges)",
             ),
-            _ => (
-                "x11",
-                "Linux input capture: active X11 session (XInput2/libxdo ready)",
-            ),
+            _ => {
+                if capture_running {
+                    (
+                        "x11",
+                        "Linux input capture: active X11 session (capture engine running; XQueryPointer/libxdo ready)",
+                    )
+                } else {
+                    (
+                        "libxdo",
+                        "Linux input capture: active X11 session detected but capture engine not running; local capture unavailable (injection ready)",
+                    )
+                }
+            }
         },
+    }
+}
+
+pub fn x_keycode_to_vk(keycode: u8) -> Option<u16> {
+    match keycode {
+        9 => Some(0x1B),  // Escape
+        10 => Some(0x31), // 1
+        11 => Some(0x32), // 2
+        12 => Some(0x33), // 3
+        13 => Some(0x34), // 4
+        14 => Some(0x35), // 5
+        15 => Some(0x36), // 6
+        16 => Some(0x37), // 7
+        17 => Some(0x38), // 8
+        18 => Some(0x39), // 9
+        19 => Some(0x30), // 0
+        20 => Some(0xBD), // -
+        21 => Some(0xBB), // =
+        22 => Some(0x08), // BackSpace
+        23 => Some(0x09), // Tab
+        24 => Some(0x51), // Q
+        25 => Some(0x57), // W
+        26 => Some(0x45), // E
+        27 => Some(0x52), // R
+        28 => Some(0x54), // T
+        29 => Some(0x59), // Y
+        30 => Some(0x55), // U
+        31 => Some(0x49), // I
+        32 => Some(0x4F), // O
+        33 => Some(0x50), // P
+        34 => Some(0xDB), // [
+        35 => Some(0xDD), // ]
+        36 => Some(0x0D), // Return
+        37 => Some(0x11), // Control_L
+        38 => Some(0x41), // A
+        39 => Some(0x53), // S
+        40 => Some(0x44), // D
+        41 => Some(0x46), // F
+        42 => Some(0x47), // G
+        43 => Some(0x48), // H
+        44 => Some(0x4A), // J
+        45 => Some(0x4B), // K
+        46 => Some(0x4C), // L
+        47 => Some(0xBA), // ;
+        48 => Some(0xDE), // '
+        49 => Some(0xC0), // `
+        50 => Some(0x10), // Shift_L
+        51 => Some(0xDC), // \
+        52 => Some(0x5A), // Z
+        53 => Some(0x58), // X
+        54 => Some(0x43), // C
+        55 => Some(0x56), // V
+        56 => Some(0x42), // B
+        57 => Some(0x4E), // N
+        58 => Some(0x4D), // M
+        59 => Some(0xBC), // ,
+        60 => Some(0xBE), // .
+        61 => Some(0xBF), // /
+        62 => Some(0x10), // Shift_R
+        64 => Some(0x12), // Alt_L
+        65 => Some(0x20), // Space
+        66 => Some(0x14), // Caps_Lock
+        67 => Some(0x70), // F1
+        68 => Some(0x71), // F2
+        69 => Some(0x72), // F3
+        70 => Some(0x73), // F4
+        71 => Some(0x74), // F5
+        72 => Some(0x75), // F6
+        73 => Some(0x76), // F7
+        74 => Some(0x77), // F8
+        75 => Some(0x78), // F9
+        76 => Some(0x79), // F10
+        95 => Some(0x7A), // F11
+        96 => Some(0x7B), // F12
+        105 => Some(0x11), // Control_R
+        108 => Some(0x12), // Alt_R
+        110 => Some(0x24), // Home
+        111 => Some(0x26), // Up
+        112 => Some(0x21), // Prior / Page_Up
+        113 => Some(0x25), // Left
+        114 => Some(0x27), // Right
+        115 => Some(0x23), // End
+        116 => Some(0x28), // Down
+        117 => Some(0x22), // Next / Page_Down
+        118 => Some(0x2D), // Insert
+        119 => Some(0x2E), // Delete
+        133 => Some(0x5B), // Super_L
+        134 => Some(0x5C), // Super_R
+        _ => None,
     }
 }
 
@@ -893,11 +1023,13 @@ pub struct NativeInputInjector;
 
 impl NativeInputInjector {
     pub fn key_event(vk: u16, is_down: bool, extended: bool) {
+        record_injection_timestamp();
         track_key(vk, is_down);
         Self::platform_key_event(vk, is_down, extended);
     }
 
     pub fn mouse_button(button: MouseButton, is_down: bool) {
+        record_injection_timestamp();
         track_button(button, is_down);
         Self::platform_mouse_button(button, is_down);
     }
@@ -945,6 +1077,7 @@ impl NativeInputInjector {
 
     #[cfg(any(windows, target_os = "macos"))]
     pub fn recenter_local_cursor() {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.warp(960, 540);
             return;
@@ -955,6 +1088,7 @@ impl NativeInputInjector {
 
     #[cfg(not(any(windows, target_os = "macos")))]
     pub fn recenter_local_cursor() {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.warp(960, 540);
             return;
@@ -970,6 +1104,7 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.warp(vx + vw / 2, vy + vh / 2);
             return;
@@ -982,6 +1117,7 @@ impl NativeInputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.warp(vx + vw / 2, vy + vh / 2);
             return;
@@ -998,6 +1134,7 @@ impl NativeInputInjector {
 
     #[cfg(not(any(windows, target_os = "macos")))]
     pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.warp(vx + vw / 2, vy + vh / 2);
             return;
@@ -1038,6 +1175,7 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn move_cursor_relative(dx: i32, dy: i32) {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.move_relative(dx, dy);
             return;
@@ -1068,6 +1206,7 @@ impl NativeInputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn move_cursor_relative(dx: i32, dy: i32) {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.move_relative(dx, dy);
             return;
@@ -1099,6 +1238,7 @@ impl NativeInputInjector {
 
     #[cfg(not(any(windows, target_os = "macos")))]
     pub fn move_cursor_relative(dx: i32, dy: i32) {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.move_relative(dx, dy);
             return;
@@ -1202,6 +1342,7 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn mouse_wheel(dx: i32, dy: i32) {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.wheel(dx, dy);
             return;
@@ -1253,6 +1394,7 @@ impl NativeInputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn mouse_wheel(dx: i32, dy: i32) {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.wheel(dx, dy);
             return;
@@ -1277,6 +1419,7 @@ impl NativeInputInjector {
 
     #[cfg(not(any(windows, target_os = "macos")))]
     pub fn mouse_wheel(dx: i32, dy: i32) {
+        record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.wheel(dx, dy);
             return;
@@ -2326,16 +2469,452 @@ pub mod hook_engine {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub mod x11_ffi {
+    use std::os::raw::{c_int, c_uint, c_ulong};
+
+    pub type Display = std::ffi::c_void;
+    pub type Window = c_ulong;
+    pub type Bool = c_int;
+
+    pub const BUTTON1_MASK: c_uint = 1 << 8;
+    pub const BUTTON2_MASK: c_uint = 1 << 9;
+    pub const BUTTON3_MASK: c_uint = 1 << 10;
+    pub const BUTTON4_MASK: c_uint = 1 << 11;
+    pub const BUTTON5_MASK: c_uint = 1 << 12;
+    pub const CONTROL_MASK: c_uint = 1 << 2;
+}
+
+#[cfg(target_os = "linux")]
+pub struct X11Lib {
+    _lib: libloading::Library,
+    pub XOpenDisplay: unsafe extern "C" fn(display_name: *const std::os::raw::c_char) -> *mut x11_ffi::Display,
+    pub XCloseDisplay: unsafe extern "C" fn(display: *mut x11_ffi::Display) -> std::os::raw::c_int,
+    pub XDefaultRootWindow: unsafe extern "C" fn(display: *mut x11_ffi::Display) -> x11_ffi::Window,
+    pub XDefaultScreen: unsafe extern "C" fn(display: *mut x11_ffi::Display) -> std::os::raw::c_int,
+    pub XDisplayWidth: unsafe extern "C" fn(display: *mut x11_ffi::Display, screen_number: std::os::raw::c_int) -> std::os::raw::c_int,
+    pub XDisplayHeight: unsafe extern "C" fn(display: *mut x11_ffi::Display, screen_number: std::os::raw::c_int) -> std::os::raw::c_int,
+    pub XQueryPointer: unsafe extern "C" fn(
+        display: *mut x11_ffi::Display,
+        w: x11_ffi::Window,
+        root_return: *mut x11_ffi::Window,
+        child_return: *mut x11_ffi::Window,
+        root_x_return: *mut std::os::raw::c_int,
+        root_y_return: *mut std::os::raw::c_int,
+        win_x_return: *mut std::os::raw::c_int,
+        win_y_return: *mut std::os::raw::c_int,
+        mask_return: *mut std::os::raw::c_uint,
+    ) -> std::os::raw::c_int,
+    pub XWarpPointer: unsafe extern "C" fn(
+        display: *mut x11_ffi::Display,
+        src_w: x11_ffi::Window,
+        dest_w: x11_ffi::Window,
+        src_x: std::os::raw::c_int,
+        src_y: std::os::raw::c_int,
+        src_width: std::os::raw::c_uint,
+        src_height: std::os::raw::c_uint,
+        dest_x: std::os::raw::c_int,
+        dest_y: std::os::raw::c_int,
+    ) -> std::os::raw::c_int,
+    pub XQueryKeymap: unsafe extern "C" fn(
+        display: *mut x11_ffi::Display,
+        keys_return: *mut [std::os::raw::c_char; 32],
+    ) -> std::os::raw::c_int,
+    pub XFlush: unsafe extern "C" fn(display: *mut x11_ffi::Display) -> std::os::raw::c_int,
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn get_sym<T: Copy>(lib: &libloading::Library, name: &[u8]) -> Result<T, String> {
+    let sym: libloading::Symbol<T> = lib
+        .get(name)
+        .map_err(|e| format!("missing symbol {}: {}", String::from_utf8_lossy(name), e))?;
+    Ok(*sym)
+}
+
+#[cfg(target_os = "linux")]
+impl X11Lib {
+    pub fn load() -> Result<Self, String> {
+        let candidates = ["libX11.so.6", "libX11.so"];
+        for name in &candidates {
+            if let Ok(lib) = unsafe { libloading::Library::new(name) } {
+                unsafe {
+                    if let (
+                        Ok(XOpenDisplay),
+                        Ok(XCloseDisplay),
+                        Ok(XDefaultRootWindow),
+                        Ok(XDefaultScreen),
+                        Ok(XDisplayWidth),
+                        Ok(XDisplayHeight),
+                        Ok(XQueryPointer),
+                        Ok(XWarpPointer),
+                        Ok(XQueryKeymap),
+                        Ok(XFlush),
+                    ) = (
+                        get_sym(&lib, b"XOpenDisplay\0"),
+                        get_sym(&lib, b"XCloseDisplay\0"),
+                        get_sym(&lib, b"XDefaultRootWindow\0"),
+                        get_sym(&lib, b"XDefaultScreen\0"),
+                        get_sym(&lib, b"XDisplayWidth\0"),
+                        get_sym(&lib, b"XDisplayHeight\0"),
+                        get_sym(&lib, b"XQueryPointer\0"),
+                        get_sym(&lib, b"XWarpPointer\0"),
+                        get_sym(&lib, b"XQueryKeymap\0"),
+                        get_sym(&lib, b"XFlush\0"),
+                    ) {
+                        return Ok(Self {
+                            _lib: lib,
+                            XOpenDisplay,
+                            XCloseDisplay,
+                            XDefaultRootWindow,
+                            XDefaultScreen,
+                            XDisplayWidth,
+                            XDisplayHeight,
+                            XQueryPointer,
+                            XWarpPointer,
+                            XQueryKeymap,
+                            XFlush,
+                        });
+                    }
+                }
+            }
+        }
+        Err("libX11 library not found".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_x11_capture_loop(
+    app: AppHandle,
+    state: AppState,
+    network: NetworkManager,
+    display: Option<String>,
+    session_type: Option<String>,
+) {
+    let xlib = match X11Lib::load() {
+        Ok(lib) => lib,
+        Err(e) => {
+            log::warn!("[KVM] Linux X11 input capture unavailable: {}", e);
+            return;
+        }
+    };
+
+    let c_display = display.as_ref().and_then(|d| std::ffi::CString::new(d.as_str()).ok());
+    let dpy_ptr = c_display.as_ref().map(|s| s.as_ptr()).unwrap_or(std::ptr::null());
+    let dpy = unsafe { (xlib.XOpenDisplay)(dpy_ptr) };
+    if dpy.is_null() {
+        log::warn!("[KVM] Linux X11 input capture unavailable: failed to open X display");
+        return;
+    }
+
+    let root = unsafe { (xlib.XDefaultRootWindow)(dpy) };
+    let screen = unsafe { (xlib.XDefaultScreen)(dpy) };
+    let width = unsafe { (xlib.XDisplayWidth)(dpy, screen) };
+    let height = unsafe { (xlib.XDisplayHeight)(dpy, screen) };
+
+    hook_engine::LINUX_CAPTURE_RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (helper, message) = evaluate_linux_session_capability(
+        display.as_deref(),
+        session_type.as_deref(),
+        true,
+    );
+    update_kvm_runtime_state(helper, message);
+    log::info!("[KVM] {}", message);
+
+    let (vx, vy, vw, vh) = (0, 0, width, height);
+    let max_x = vx + vw;
+    let max_y = vy + vh;
+
+    let mut last_x = width / 2;
+    let mut last_y = height / 2;
+    let mut virtual_remote_x: f64 = 0.0;
+    let mut virtual_remote_y: f64 = 0.0;
+    let mut prev_mask: std::os::raw::c_uint = 0;
+    let mut prev_keys: [std::os::raw::c_char; 32] = [0; 32];
+
+    while hook_engine::LINUX_CAPTURE_RUNNING.load(std::sync::atomic::Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(8)); // ~120 Hz polling loop (XQueryPointer / XQueryKeymap)
+
+        let mut root_ret: x11_ffi::Window = 0;
+        let mut child_ret: x11_ffi::Window = 0;
+        let mut root_x: std::os::raw::c_int = 0;
+        let mut root_y: std::os::raw::c_int = 0;
+        let mut win_x: std::os::raw::c_int = 0;
+        let mut win_y: std::os::raw::c_int = 0;
+        let mut mask: std::os::raw::c_uint = 0;
+
+        let query_res = unsafe {
+            (xlib.XQueryPointer)(
+                dpy,
+                root,
+                &mut root_ret,
+                &mut child_ret,
+                &mut root_x,
+                &mut root_y,
+                &mut win_x,
+                &mut win_y,
+                &mut mask,
+            )
+        };
+        if query_res == 0 {
+            continue;
+        }
+
+        let mut keys: [std::os::raw::c_char; 32] = [0; 32];
+        unsafe {
+            (xlib.XQueryKeymap)(dpy, &mut keys);
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let last_inj_ms = LAST_INJECTION_TIMESTAMP_MS.load(std::sync::atomic::Ordering::Relaxed);
+
+        if !should_forward_captured_event(now_ms, last_inj_ms) {
+            // Self-echo suppression: drop inputs injected by GlideDesk itself
+            last_x = root_x;
+            last_y = root_y;
+            prev_mask = mask;
+            prev_keys = keys;
+            continue;
+        }
+
+        let snap = state.snapshot();
+        let has_peer = snap.client.is_some() || snap.peer.is_some() || snap.link.state == "connected";
+        let is_driving = snap.input == "driving";
+
+        let sharing_enabled = snap.kvm.mouse && snap.kvm.linked && snap.kvm.drive_other && !snap.kvm_state.paused;
+
+        if !is_driving && has_peer && sharing_enabled {
+            let crossed = check_edge_crossed(&snap.layout.side, root_x as f64, root_y as f64, vx, vy, vw, vh);
+            if crossed {
+                virtual_remote_x = 0.0;
+                virtual_remote_y = 0.0;
+                log::info!("[KVM] Cursor crossed to peer: side={}, pt=({}, {})", snap.layout.side, root_x, root_y);
+
+                let is_left_down = (mask & x11_ffi::BUTTON1_MASK) != 0;
+                let is_ctrl_down = (mask & x11_ffi::CONTROL_MASK) != 0;
+
+                if is_left_down && is_ctrl_down {
+                    let _ = app.emit("window-handoff-trigger", serde_json::json!({
+                        "x": root_x,
+                        "y": root_y,
+                        "side": snap.layout.side,
+                    }));
+                }
+
+                state.set_where_input("driving");
+                let new_snap = state.snapshot();
+                let _ = app.emit("state-change", &new_snap);
+
+                let take = WireMessage {
+                    t: "kvm.take".to_string(),
+                    v: Some(1),
+                    ..Default::default()
+                };
+                network.send_packet_sync(take);
+
+                let park_x = match snap.layout.side.as_str() {
+                    "right" => max_x - 5,
+                    "left" => vx + 5,
+                    _ => root_x,
+                };
+                let park_y = match snap.layout.side.as_str() {
+                    "top" => vy + 5,
+                    "bottom" => max_y - 5,
+                    _ => root_y,
+                };
+                unsafe {
+                    (xlib.XWarpPointer)(dpy, 0, root, 0, 0, 0, 0, park_x, park_y);
+                    (xlib.XFlush)(dpy);
+                }
+                last_x = park_x;
+                last_y = park_y;
+                prev_mask = mask;
+                prev_keys = keys;
+                continue;
+            }
+        } else if is_driving {
+            if !has_peer {
+                log::info!("[KVM] Peer disconnected while driving; restoring home cursor");
+                state.set_where_input("home");
+                NativeInputInjector::release_all_keys();
+                let new_snap = state.snapshot();
+                let _ = app.emit("state-change", &new_snap);
+                continue;
+            }
+
+            let dx = (root_x - last_x) as f64;
+            let dy = (root_y - last_y) as f64;
+            virtual_remote_x += dx;
+            virtual_remote_y += dy;
+
+            let returned = check_edge_returned(&snap.layout.side, virtual_remote_x, virtual_remote_y);
+            if returned {
+                log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, virtual_remote_x);
+                state.set_where_input("home");
+                NativeInputInjector::release_all_keys();
+                let new_snap = state.snapshot();
+                let _ = app.emit("state-change", &new_snap);
+
+                let home_msg = WireMessage {
+                    t: "kvm.home".to_string(),
+                    v: Some(1),
+                    ..Default::default()
+                };
+                network.send_packet_sync(home_msg);
+
+                let return_x = match snap.layout.side.as_str() {
+                    "right" => max_x - 12,
+                    "left" => vx + 12,
+                    _ => root_x,
+                };
+                let return_y = match snap.layout.side.as_str() {
+                    "top" => vy + 12,
+                    "bottom" => max_y - 12,
+                    _ => root_y,
+                };
+                unsafe {
+                    (xlib.XWarpPointer)(dpy, 0, root, 0, 0, 0, 0, return_x, return_y);
+                    (xlib.XFlush)(dpy);
+                }
+                last_x = return_x;
+                last_y = return_y;
+                prev_mask = mask;
+                prev_keys = keys;
+                continue;
+            }
+
+            if dx.abs() > 0.0 || dy.abs() > 0.0 {
+                network.send_motion(dx, dy);
+            }
+
+            // Keep cursor parked near edge
+            let park_x = match snap.layout.side.as_str() {
+                "right" => max_x - 5,
+                "left" => vx + 5,
+                _ => root_x.clamp(vx, max_x - 1),
+            };
+            let park_y = match snap.layout.side.as_str() {
+                "top" => vy + 5,
+                "bottom" => max_y - 5,
+                _ => root_y.clamp(vy, max_y - 1),
+            };
+            unsafe {
+                (xlib.XWarpPointer)(dpy, 0, root, 0, 0, 0, 0, park_x, park_y);
+                (xlib.XFlush)(dpy);
+            }
+            last_x = park_x;
+            last_y = park_y;
+
+            // Handle mouse button transitions
+            let changed_mask = mask ^ prev_mask;
+            if changed_mask != 0 {
+                // Button 1 (Left)
+                if (changed_mask & x11_ffi::BUTTON1_MASK) != 0 {
+                    let is_down = (mask & x11_ffi::BUTTON1_MASK) != 0;
+                    network.send_packet_sync(WireMessage {
+                        t: if is_down { "k.md".to_string() } else { "k.mu".to_string() },
+                        v: Some(1),
+                        b: Some(0),
+                        ..Default::default()
+                    });
+                }
+                // Button 3 (Right)
+                if (changed_mask & x11_ffi::BUTTON3_MASK) != 0 {
+                    let is_down = (mask & x11_ffi::BUTTON3_MASK) != 0;
+                    network.send_packet_sync(WireMessage {
+                        t: if is_down { "k.md".to_string() } else { "k.mu".to_string() },
+                        v: Some(1),
+                        b: Some(1),
+                        ..Default::default()
+                    });
+                }
+                // Button 2 (Middle)
+                if (changed_mask & x11_ffi::BUTTON2_MASK) != 0 {
+                    let is_down = (mask & x11_ffi::BUTTON2_MASK) != 0;
+                    network.send_packet_sync(WireMessage {
+                        t: if is_down { "k.md".to_string() } else { "k.mu".to_string() },
+                        v: Some(1),
+                        b: Some(2),
+                        ..Default::default()
+                    });
+                }
+                // Button 4 (Wheel Up)
+                if (changed_mask & x11_ffi::BUTTON4_MASK) != 0 && (mask & x11_ffi::BUTTON4_MASK) != 0 {
+                    network.send_packet_sync(WireMessage {
+                        t: "k.wh".to_string(),
+                        v: Some(1),
+                        dx: Some(0.0),
+                        dy: Some(1.0),
+                        ..Default::default()
+                    });
+                }
+                // Button 5 (Wheel Down)
+                if (changed_mask & x11_ffi::BUTTON5_MASK) != 0 && (mask & x11_ffi::BUTTON5_MASK) != 0 {
+                    network.send_packet_sync(WireMessage {
+                        t: "k.wh".to_string(),
+                        v: Some(1),
+                        dx: Some(0.0),
+                        dy: Some(-1.0),
+                        ..Default::default()
+                    });
+                }
+            }
+
+            // Handle keyboard transitions
+            for byte_idx in 0..32 {
+                let diff = keys[byte_idx] ^ prev_keys[byte_idx];
+                if diff != 0 {
+                    for bit in 0..8 {
+                        if (diff & (1 << bit)) != 0 {
+                            let keycode = (byte_idx * 8 + bit) as u8;
+                            let is_down = (keys[byte_idx] & (1 << bit)) != 0;
+                            if let Some(vk) = x_keycode_to_vk(keycode) {
+                                network.send_packet_sync(WireMessage {
+                                    t: if is_down { "k.kd".to_string() } else { "k.ku".to_string() },
+                                    v: Some(1),
+                                    vk: Some(vk as u32),
+                                    k: Some(vk.to_string()),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        last_x = root_x;
+        last_y = root_y;
+        prev_mask = mask;
+        prev_keys = keys;
+    }
+
+    unsafe {
+        (xlib.XCloseDisplay)(dpy);
+    }
+}
+
 #[cfg(not(any(windows, target_os = "macos")))]
 pub mod hook_engine {
     use super::*;
-    pub fn start_hooks(_app: AppHandle, state: AppState, _network: NetworkManager) {
+
+    pub static LINUX_CAPTURE_RUNNING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    pub fn is_capture_running() -> bool {
+        LINUX_CAPTURE_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn start_hooks(app: AppHandle, state: AppState, network: NetworkManager) {
         set_kvm_app_state(state.clone());
         let display = std::env::var("DISPLAY").ok();
         let session_type = std::env::var("XDG_SESSION_TYPE").ok();
         let (helper, message) = evaluate_linux_session_capability(
             display.as_deref(),
             session_type.as_deref(),
+            false,
         );
         {
             let mut inner = state.inner.write();
@@ -2348,6 +2927,16 @@ pub mod hook_engine {
             if let Err(e) = get_linux_backend() {
                 log::warn!("[KVM] Linux input injection capability check: {}", e);
             }
+
+            let app_clone = app.clone();
+            let state_clone = state.clone();
+            let net_clone = network.clone();
+            let dpy_str = display.clone();
+            let sess_str = session_type.clone();
+
+            std::thread::spawn(move || {
+                run_linux_x11_capture_loop(app_clone, state_clone, net_clone, dpy_str, sess_str);
+            });
         }
     }
 }
@@ -2641,29 +3230,78 @@ mod tests {
 
     #[test]
     fn test_evaluate_linux_session_capability() {
-        // Headless DISPLAY None
-        let (helper, msg) = evaluate_linux_session_capability(None, None);
+        // Case 1: Headless / DISPLAY unset -> capture unavailable + injection unavailable
+        let (helper, msg) = evaluate_linux_session_capability(None, None, false);
         assert_eq!(helper, "libxdo");
-        assert!(msg.contains("headless session"));
+        assert!(msg.contains("remote input injection and local capture unavailable"));
 
-        // Headless DISPLAY empty
-        let (helper, msg) = evaluate_linux_session_capability(Some("   "), None);
+        let (helper, msg) = evaluate_linux_session_capability(Some("   "), None, false);
         assert_eq!(helper, "libxdo");
-        assert!(msg.contains("headless session"));
+        assert!(msg.contains("remote input injection and local capture unavailable"));
 
-        // Wayland
-        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), Some("wayland"));
+        // Case 2: Wayland -> capture unavailable
+        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), Some("wayland"), false);
         assert_eq!(helper, "wayland");
-        assert!(msg.contains("Wayland session detected"));
+        assert!(msg.contains("global raw input capture unavailable"));
 
-        // X11
-        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), Some("x11"));
+        // Case 3: X11 + capture engine running -> capture active
+        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), Some("x11"), true);
         assert_eq!(helper, "x11");
-        assert!(msg.contains("active X11 session"));
+        assert!(msg.contains("capture engine running"));
 
-        // Default with DISPLAY set and no session_type
-        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), None);
-        assert_eq!(helper, "x11");
-        assert!(msg.contains("active X11 session"));
+        // Case 4: X11 + capture engine NOT running -> capture unavailable (regression test for DEFECT 2)
+        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), Some("x11"), false);
+        assert_eq!(helper, "libxdo");
+        assert!(msg.contains("local capture unavailable"));
+
+        let (helper, msg) = evaluate_linux_session_capability(Some(":0"), None, false);
+        assert_eq!(helper, "libxdo");
+        assert!(msg.contains("local capture unavailable"));
+    }
+
+    #[test]
+    fn test_should_forward_captured_event() {
+        // Initial state: no injections yet (last_injection_ms == 0) -> always forward
+        assert!(should_forward_captured_event(10, 0));
+        assert!(should_forward_captured_event(0, 0));
+
+        // When injection happened at t=1000 with 25ms window:
+        // Inside window -> drop (suppress self-echo)
+        assert!(!should_forward_captured_event(1000, 1000));
+        assert!(!should_forward_captured_event(1010, 1000));
+        assert!(!should_forward_captured_event(1024, 1000));
+
+        // Boundary: exactly at window (25ms) -> forward
+        assert!(should_forward_captured_event(1025, 1000));
+
+        // Exceeding window (> 25ms) -> forward
+        assert!(should_forward_captured_event(1026, 1000));
+        assert!(should_forward_captured_event(2000, 1000));
+
+        // Clock anomaly (now < last_injection) -> safe forward
+        assert!(should_forward_captured_event(500, 1000));
+    }
+
+    #[test]
+    fn test_x_keycode_to_vk_mapping() {
+        assert_eq!(x_keycode_to_vk(9), Some(0x1B)); // Escape
+        assert_eq!(x_keycode_to_vk(10), Some(0x31)); // '1'
+        assert_eq!(x_keycode_to_vk(19), Some(0x30)); // '0'
+        assert_eq!(x_keycode_to_vk(22), Some(0x08)); // Backspace
+        assert_eq!(x_keycode_to_vk(23), Some(0x09)); // Tab
+        assert_eq!(x_keycode_to_vk(24), Some(0x51)); // 'Q'
+        assert_eq!(x_keycode_to_vk(36), Some(0x0D)); // Return
+        assert_eq!(x_keycode_to_vk(37), Some(0x11)); // Control_L
+        assert_eq!(x_keycode_to_vk(38), Some(0x41)); // 'A'
+        assert_eq!(x_keycode_to_vk(50), Some(0x10)); // Shift_L
+        assert_eq!(x_keycode_to_vk(64), Some(0x12)); // Alt_L
+        assert_eq!(x_keycode_to_vk(65), Some(0x20)); // Space
+        assert_eq!(x_keycode_to_vk(67), Some(0x70)); // F1
+        assert_eq!(x_keycode_to_vk(111), Some(0x26)); // Up Arrow
+        assert_eq!(x_keycode_to_vk(113), Some(0x25)); // Left Arrow
+        assert_eq!(x_keycode_to_vk(114), Some(0x27)); // Right Arrow
+        assert_eq!(x_keycode_to_vk(116), Some(0x28)); // Down Arrow
+        assert_eq!(x_keycode_to_vk(133), Some(0x5B)); // Super_L
+        assert_eq!(x_keycode_to_vk(255), None); // Unknown
     }
 }
