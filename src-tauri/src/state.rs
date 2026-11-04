@@ -703,7 +703,7 @@ pub struct UpdatesView {
 impl Default for UpdatesView {
     fn default() -> Self {
         Self {
-            current: "1.1.7".to_string(),
+            current: env!("CARGO_PKG_VERSION").to_string(),
             latest: None,
             available: false,
             checking: false,
@@ -1622,5 +1622,13 @@ mod tests {
         assert_eq!(deserialized.layout.side, "right");
         assert_eq!(deserialized.kvm.pc_side.as_deref(), Some("left"));
         assert_eq!(deserialized.input, "home");
+    }
+
+    #[test]
+    fn test_updates_default_current_matches_crate_version() {
+        // The updater must compare against the running build's version, not a
+        // hard-coded literal (regression: this was pinned to "1.1.7", so every
+        // install reported a permanent phantom update).
+        assert_eq!(UpdatesView::default().current, env!("CARGO_PKG_VERSION"));
     }
 }

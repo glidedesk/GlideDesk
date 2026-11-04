@@ -257,7 +257,6 @@ struct GithubRelease {
     #[serde(default)]
     draft: bool,
     #[serde(default)]
-    #[allow(dead_code)]
     prerelease: bool,
     #[serde(default)]
     assets: Vec<GithubAsset>,
@@ -374,6 +373,17 @@ fn is_version_newer(candidate: &str, current: &str) -> bool {
     cand_pre > curr_pre
 }
 
+/// Choose the release to offer: skip drafts, and prefer a stable release over a
+/// pre-release. The GitHub releases API returns newest first, so `min_by_key`
+/// keeps the newest release for the preferred kind (stable before pre-release),
+/// falling back to a pre-release only when no stable release exists.
+fn pick_candidate(releases: Vec<GithubRelease>) -> Option<GithubRelease> {
+    releases
+        .into_iter()
+        .filter(|r| !r.draft)
+        .min_by_key(|r| r.prerelease)
+}
+
 #[tauri::command]
 pub async fn check_updates(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     {
@@ -440,7 +450,7 @@ pub async fn check_updates(state: State<'_, AppState>, app: AppHandle) -> Result
         }
     };
 
-    let candidate = releases.into_iter().find(|r| !r.draft);
+    let candidate = pick_candidate(releases);
 
     {
         let mut s = state.inner.write();
@@ -1358,5 +1368,36 @@ mod tests {
             assert!(!s.clipboard.share);
             assert!(!s.clipboard.send);
         }
+    }
+
+    #[test]
+    fn test_pick_candidate_prefers_stable_and_skips_drafts() {
+        fn rel(tag: &str, draft: bool, prerelease: bool) -> GithubRelease {
+            GithubRelease {
+                tag_name: tag.to_string(),
+                name: None,
+                html_url: String::new(),
+                body: None,
+                published_at: None,
+                draft,
+                prerelease,
+                assets: Vec::new(),
+            }
+        }
+
+        // Newest is a draft (skipped); the newest stable wins over the prerelease.
+        let picked = pick_candidate(vec![
+            rel("v3.1.0", true, false),
+            rel("v3.0.1-beta.1", false, true),
+            rel("v3.0.0", false, false),
+        ]);
+        assert_eq!(picked.expect("a candidate").tag_name, "v3.0.0");
+
+        // No stable release: fall back to the newest pre-release.
+        let picked = pick_candidate(vec![rel("v3.1.0-beta.1", false, true)]);
+        assert_eq!(picked.expect("a candidate").tag_name, "v3.1.0-beta.1");
+
+        // Only drafts: nothing to offer.
+        assert!(pick_candidate(vec![rel("v3.1.0", true, false)]).is_none());
     }
 }
