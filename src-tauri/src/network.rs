@@ -3539,4 +3539,228 @@ mod tests {
         };
         assert!(!file_packet_targets_local(&empty, "peer_beta"));
     }
+
+    #[test]
+    fn test_multi_peer_transfer_isolation_loopback() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use sha2::Digest;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            // 1. Bind loopback server
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind listener");
+            let srv_addr = listener.local_addr().expect("local addr");
+
+            // 2. Setup server channels to feed packet forwarder
+            let (tx_a_in, mut rx_a_in) = mpsc::channel::<WireMessage>(20);
+            let (tx_b_in, mut rx_b_in) = mpsc::channel::<WireMessage>(20);
+
+            // Connect Peer Alpha
+            let mut client_alpha = tokio::net::TcpStream::connect(srv_addr).await.expect("connect alpha");
+            let (mut srv_conn_alpha, addr_alpha) = listener.accept().await.expect("accept alpha");
+
+            // Connect Peer Beta
+            let mut client_beta = tokio::net::TcpStream::connect(srv_addr).await.expect("connect beta");
+            let (mut srv_conn_beta, addr_beta) = listener.accept().await.expect("accept beta");
+
+            tokio::spawn(async move {
+                while let Some(msg) = rx_a_in.recv().await {
+                    let json = serde_json::to_vec(&msg).unwrap();
+                    let len = (json.len() as u32).to_be_bytes();
+                    if srv_conn_alpha.write_all(&len).await.is_err() || srv_conn_alpha.write_all(&json).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            tokio::spawn(async move {
+                while let Some(msg) = rx_b_in.recv().await {
+                    let json = serde_json::to_vec(&msg).unwrap();
+                    let len = (json.len() as u32).to_be_bytes();
+                    if srv_conn_beta.write_all(&len).await.is_err() || srv_conn_beta.write_all(&json).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let session_alpha = ActiveClientSession {
+                id: addr_alpha.to_string(),
+                peer_id: Arc::new(RwLock::new(Some("peer_alpha".to_string()))),
+                peer_addr: addr_alpha,
+                tx: tx_a_in,
+                authenticated: Arc::new(RwLock::new(true)),
+            };
+
+            let session_beta = ActiveClientSession {
+                id: addr_beta.to_string(),
+                peer_id: Arc::new(RwLock::new(Some("peer_beta".to_string()))),
+                peer_addr: addr_beta,
+                tx: tx_b_in,
+                authenticated: Arc::new(RwLock::new(true)),
+            };
+
+            let active_clients = Arc::new(RwLock::new(HashMap::new()));
+            {
+                let mut guard = active_clients.write();
+                guard.insert(session_alpha.id.clone(), session_alpha);
+                guard.insert(session_beta.id.clone(), session_beta);
+            }
+
+            async fn read_framed(stream: &mut tokio::net::TcpStream) -> Option<WireMessage> {
+                let mut len_buf = [0u8; 4];
+                stream.read_exact(&mut len_buf).await.ok()?;
+                let len = u32::from_be_bytes(len_buf) as usize;
+                let mut buf = vec![0u8; len];
+                stream.read_exact(&mut buf).await.ok()?;
+                serde_json::from_slice(&buf).ok()
+            }
+
+            let dispatch_msg = |pkt: WireMessage, clients: Arc<RwLock<HashMap<String, ActiveClientSession>>>| {
+                let guard = clients.read();
+                let is_sensitive = matches!(
+                    pkt.t.as_str(),
+                    "files.batch" | "files.chunk" | "files.done" | "files.cancel"
+                );
+                for client in guard.values() {
+                    let pid = client.peer_id.read().clone();
+                    let matches_dest = match &pkt.d {
+                        Some(dests) => dests.iter().any(|d| {
+                            d == &client.id
+                                || pid.as_deref() == Some(d.as_str())
+                                || d == &client.peer_addr.ip().to_string()
+                        }),
+                        None => true,
+                    };
+                    if matches_dest && (!is_sensitive || *client.authenticated.read()) {
+                        let _ = client.tx.try_send(pkt.clone());
+                    }
+                }
+            };
+
+            let payload_alpha: Vec<u8> = (0..131072).map(|i| (i * 7 % 255) as u8).collect();
+            let hash_alpha = format!("{:x}", sha2::Sha256::digest(&payload_alpha));
+
+            let payload_beta: Vec<u8> = (0..131072).map(|i| (i * 13 % 255) as u8).collect();
+            let hash_beta = format!("{:x}", sha2::Sha256::digest(&payload_beta));
+
+            assert_ne!(hash_alpha, hash_beta);
+
+            // Dispatch batch headers
+            dispatch_msg(WireMessage {
+                t: "files.batch".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_A".to_string()),
+                d: Some(vec!["peer_alpha".to_string()]),
+                ..Default::default()
+            }, active_clients.clone());
+
+            dispatch_msg(WireMessage {
+                t: "files.batch".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_B".to_string()),
+                d: Some(vec!["peer_beta".to_string()]),
+                ..Default::default()
+            }, active_clients.clone());
+
+            // Dispatch chunk 1 of Alpha (0..65536)
+            let chunk_a1 = &payload_alpha[0..65536];
+            dispatch_msg(WireMessage {
+                t: "files.chunk".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_A".to_string()),
+                file_id: Some("file_alpha".to_string()),
+                offset: Some(0),
+                len: Some(65536),
+                data: Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, chunk_a1)),
+                sha256_chunk: Some(format!("{:x}", sha2::Sha256::digest(chunk_a1))),
+                d: Some(vec!["peer_alpha".to_string()]),
+                ..Default::default()
+            }, active_clients.clone());
+
+            // Dispatch chunk of Beta (0..131072)
+            let chunk_b = &payload_beta[..];
+            dispatch_msg(WireMessage {
+                t: "files.chunk".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_B".to_string()),
+                file_id: Some("file_beta".to_string()),
+                offset: Some(0),
+                len: Some(131072),
+                data: Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, chunk_b)),
+                sha256_chunk: Some(format!("{:x}", sha2::Sha256::digest(chunk_b))),
+                d: Some(vec!["peer_beta".to_string()]),
+                ..Default::default()
+            }, active_clients.clone());
+
+            dispatch_msg(WireMessage {
+                t: "files.done".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_B".to_string()),
+                file_id: Some("file_beta".to_string()),
+                sha256_total: Some(hash_beta.clone()),
+                d: Some(vec!["peer_beta".to_string()]),
+                ..Default::default()
+            }, active_clients.clone());
+
+            // Resume chunk 2 of Alpha (65536..131072)
+            let chunk_a2 = &payload_alpha[65536..131072];
+            dispatch_msg(WireMessage {
+                t: "files.chunk".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_A".to_string()),
+                file_id: Some("file_alpha".to_string()),
+                offset: Some(65536),
+                len: Some(65536),
+                data: Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, chunk_a2)),
+                sha256_chunk: Some(format!("{:x}", sha2::Sha256::digest(chunk_a2))),
+                d: Some(vec!["peer_alpha".to_string()]),
+                ..Default::default()
+            }, active_clients.clone());
+
+            dispatch_msg(WireMessage {
+                t: "files.done".to_string(),
+                v: Some(1),
+                batch_id: Some("batch_A".to_string()),
+                file_id: Some("file_alpha".to_string()),
+                sha256_total: Some(hash_alpha.clone()),
+                d: Some(vec!["peer_alpha".to_string()]),
+                ..Default::default()
+            }, active_clients.clone());
+
+            // Read on Peer Alpha
+            let pkt_a_batch = read_framed(&mut client_alpha).await.expect("pkt a batch");
+            assert_eq!(pkt_a_batch.batch_id.as_deref(), Some("batch_A"));
+
+            let pkt_a_c1 = read_framed(&mut client_alpha).await.expect("pkt a chunk 1");
+            assert_eq!(pkt_a_c1.offset, Some(0));
+
+            let pkt_a_c2 = read_framed(&mut client_alpha).await.expect("pkt a chunk 2 (resumed)");
+            assert_eq!(pkt_a_c2.offset, Some(65536));
+
+            let pkt_a_done = read_framed(&mut client_alpha).await.expect("pkt a done");
+            assert_eq!(pkt_a_done.sha256_total.as_deref(), Some(hash_alpha.as_str()));
+
+            // Read on Peer Beta
+            let pkt_b_batch = read_framed(&mut client_beta).await.expect("pkt b batch");
+            assert_eq!(pkt_b_batch.batch_id.as_deref(), Some("batch_B"));
+
+            let pkt_b_chunk = read_framed(&mut client_beta).await.expect("pkt b chunk");
+            assert_eq!(pkt_b_chunk.batch_id.as_deref(), Some("batch_B"));
+
+            let pkt_b_done = read_framed(&mut client_beta).await.expect("pkt b done");
+            assert_eq!(pkt_b_done.sha256_total.as_deref(), Some(hash_beta.as_str()));
+
+            // Verify reassembled data and checksum on Alpha
+            let data_a1 = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, pkt_a_c1.data.unwrap()).unwrap();
+            let data_a2 = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, pkt_a_c2.data.unwrap()).unwrap();
+            let mut assembled_a = data_a1;
+            assembled_a.extend_from_slice(&data_a2);
+            assert_eq!(assembled_a, payload_alpha);
+            assert_eq!(format!("{:x}", sha2::Sha256::digest(&assembled_a)), hash_alpha);
+
+            // Verify reassembled data and checksum on Beta
+            let data_b = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, pkt_b_chunk.data.unwrap()).unwrap();
+            assert_eq!(data_b, payload_beta);
+            assert_eq!(format!("{:x}", sha2::Sha256::digest(&data_b)), hash_beta);
+        });
+    }
 }
