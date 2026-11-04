@@ -58,6 +58,10 @@ async function runE2E() {
       cwd: rootDir,
       stdio: 'ignore',
       detached: false,
+      env: {
+        ...process.env,
+        GLIDEDESK_ALLOW_PLAINTEXT: process.env.GLIDEDESK_ALLOW_PLAINTEXT || '1',
+      },
     });
 
     // Poll until port opens (up to 5s)
