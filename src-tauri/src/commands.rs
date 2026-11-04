@@ -532,8 +532,12 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
                         codesign --force --deep --sign - --identifier "com.glidedesk.desktop" "/Applications/GlideDesk.app" 2>/dev/null || true
                         hdiutil detach "${{MOUNT_POINT}}" -quiet || true
                         rm -rf "${{TMP_DIR}}"
-                        open -a "/Applications/GlideDesk.app"
+                        # Quit the running instance first, then relaunch the freshly
+                        # installed bundle. (Previously this opened the new app and
+                        # then pkill'd it, so the update appeared to do nothing.)
                         pkill -ix "glidedesk" || true
+                        sleep 1
+                        open -a "/Applications/GlideDesk.app"
                     fi
                 fi
             "#, explicit_url);
