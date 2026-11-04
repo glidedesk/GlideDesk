@@ -475,6 +475,74 @@ impl InputBackend for RecordingBackend {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InjectionErrorKind {
+    Key,
+    Button,
+    Wheel,
+    MoveRelative,
+    Warp,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitAction {
+    Log,
+    Suppress,
+}
+
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct InjectionErrorRateLimiter {
+    failed: std::collections::HashSet<InjectionErrorKind>,
+}
+
+#[allow(dead_code)]
+impl InjectionErrorRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            failed: std::collections::HashSet::new(),
+        }
+    }
+
+    pub fn record_failure(&mut self, kind: InjectionErrorKind) -> RateLimitAction {
+        if self.failed.insert(kind) {
+            RateLimitAction::Log
+        } else {
+            RateLimitAction::Suppress
+        }
+    }
+
+    pub fn record_success(&mut self, kind: InjectionErrorKind) {
+        self.failed.remove(&kind);
+    }
+}
+
+pub static INJECTION_RATE_LIMITER: parking_lot::Mutex<Option<InjectionErrorRateLimiter>> =
+    parking_lot::Mutex::new(None);
+
+#[allow(dead_code)]
+pub fn handle_injection_result(kind: InjectionErrorKind, result: Result<(), String>) {
+    let mut guard = INJECTION_RATE_LIMITER.lock();
+    let limiter = guard.get_or_insert_with(InjectionErrorRateLimiter::new);
+    match result {
+        Ok(()) => {
+            limiter.record_success(kind);
+        }
+        Err(err) => {
+            let action = limiter.record_failure(kind);
+            if action == RateLimitAction::Log {
+                log::warn!("[KVM] Linux input injection error ({:?}): {}", kind, err);
+                update_kvm_runtime_state(
+                    "libxdo",
+                    &format!("Linux input injection error: {}", err),
+                );
+            }
+        }
+    }
+}
+
 pub const SELF_ECHO_SUPPRESSION_WINDOW_MS: u64 = 25;
 
 pub static LAST_INJECTION_TIMESTAMP_MS: std::sync::atomic::AtomicU64 =
@@ -969,8 +1037,11 @@ impl InputBackend for XdoBackend {
             let count = dy.abs().min(10);
             for _ in 0..count {
                 unsafe {
-                    (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn);
-                    (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    let r1 = (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    let r2 = (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    if r1 != 0 || r2 != 0 {
+                        return Err(format!("xdo wheel scroll {} failed", if dy > 0 { "up" } else { "down" }));
+                    }
                 }
             }
         }
@@ -979,8 +1050,11 @@ impl InputBackend for XdoBackend {
             let count = dx.abs().min(10);
             for _ in 0..count {
                 unsafe {
-                    (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn);
-                    (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    let r1 = (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    let r2 = (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    if r1 != 0 || r2 != 0 {
+                        return Err(format!("xdo wheel scroll {} failed", if dx > 0 { "right" } else { "left" }));
+                    }
                 }
             }
         }
@@ -1143,14 +1217,21 @@ impl NativeInputInjector {
     pub fn recenter_local_cursor() {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.warp(960, 540);
+            let res = backend.warp(960, 540);
+            handle_injection_result(InjectionErrorKind::Warp, res);
             return;
         }
         #[cfg(target_os = "linux")]
         {
-            if let Ok(backend) = get_linux_backend() {
-                let (w, h) = backend.get_viewport_dimensions().unwrap_or((1920, 1080));
-                let _ = backend.warp((w / 2) as i32, (h / 2) as i32);
+            match get_linux_backend() {
+                Ok(backend) => {
+                    let (w, h) = backend.get_viewport_dimensions().unwrap_or((1920, 1080));
+                    let res = backend.warp((w / 2) as i32, (h / 2) as i32);
+                    handle_injection_result(InjectionErrorKind::Warp, res);
+                }
+                Err(e) => {
+                    handle_injection_result(InjectionErrorKind::Warp, Err(e));
+                }
             }
         }
     }
@@ -1189,13 +1270,20 @@ impl NativeInputInjector {
     pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.warp(vx + vw / 2, vy + vh / 2);
+            let res = backend.warp(vx + vw / 2, vy + vh / 2);
+            handle_injection_result(InjectionErrorKind::Warp, res);
             return;
         }
         #[cfg(target_os = "linux")]
         {
-            if let Ok(backend) = get_linux_backend() {
-                let _ = backend.warp(vx + vw / 2, vy + vh / 2);
+            match get_linux_backend() {
+                Ok(backend) => {
+                    let res = backend.warp(vx + vw / 2, vy + vh / 2);
+                    handle_injection_result(InjectionErrorKind::Warp, res);
+                }
+                Err(e) => {
+                    handle_injection_result(InjectionErrorKind::Warp, Err(e));
+                }
             }
         }
     }
@@ -1293,13 +1381,20 @@ impl NativeInputInjector {
     pub fn move_cursor_relative(dx: i32, dy: i32) {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.move_relative(dx, dy);
+            let res = backend.move_relative(dx, dy);
+            handle_injection_result(InjectionErrorKind::MoveRelative, res);
             return;
         }
         #[cfg(target_os = "linux")]
         {
-            if let Ok(backend) = get_linux_backend() {
-                let _ = backend.move_relative(dx, dy);
+            match get_linux_backend() {
+                Ok(backend) => {
+                    let res = backend.move_relative(dx, dy);
+                    handle_injection_result(InjectionErrorKind::MoveRelative, res);
+                }
+                Err(e) => {
+                    handle_injection_result(InjectionErrorKind::MoveRelative, Err(e));
+                }
             }
         }
     }
@@ -1307,7 +1402,8 @@ impl NativeInputInjector {
     #[cfg(windows)]
     pub fn platform_mouse_button(button: MouseButton, is_down: bool) {
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.button(button, is_down);
+            let res = backend.button(button, is_down);
+            handle_injection_result(InjectionErrorKind::Button, res);
             return;
         }
         Self::sync_input_desktop();
@@ -1348,7 +1444,8 @@ impl NativeInputInjector {
     #[cfg(target_os = "macos")]
     pub fn platform_mouse_button(button: MouseButton, is_down: bool) {
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.button(button, is_down);
+            let res = backend.button(button, is_down);
+            handle_injection_result(InjectionErrorKind::Button, res);
             return;
         }
         use macos_ffi::*;
@@ -1382,13 +1479,20 @@ impl NativeInputInjector {
     #[cfg(not(any(windows, target_os = "macos")))]
     pub fn platform_mouse_button(button: MouseButton, is_down: bool) {
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.button(button, is_down);
+            let res = backend.button(button, is_down);
+            handle_injection_result(InjectionErrorKind::Button, res);
             return;
         }
         #[cfg(target_os = "linux")]
         {
-            if let Ok(backend) = get_linux_backend() {
-                let _ = backend.button(button, is_down);
+            match get_linux_backend() {
+                Ok(backend) => {
+                    let res = backend.button(button, is_down);
+                    handle_injection_result(InjectionErrorKind::Button, res);
+                }
+                Err(e) => {
+                    handle_injection_result(InjectionErrorKind::Button, Err(e));
+                }
             }
         }
     }
@@ -1397,7 +1501,8 @@ impl NativeInputInjector {
     pub fn mouse_wheel(dx: i32, dy: i32) {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.wheel(dx, dy);
+            let res = backend.wheel(dx, dy);
+            handle_injection_result(InjectionErrorKind::Wheel, res);
             return;
         }
         Self::sync_input_desktop();
@@ -1449,7 +1554,8 @@ impl NativeInputInjector {
     pub fn mouse_wheel(dx: i32, dy: i32) {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.wheel(dx, dy);
+            let res = backend.wheel(dx, dy);
+            handle_injection_result(InjectionErrorKind::Wheel, res);
             return;
         }
         use macos_ffi::*;
@@ -1474,13 +1580,20 @@ impl NativeInputInjector {
     pub fn mouse_wheel(dx: i32, dy: i32) {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.wheel(dx, dy);
+            let res = backend.wheel(dx, dy);
+            handle_injection_result(InjectionErrorKind::Wheel, res);
             return;
         }
         #[cfg(target_os = "linux")]
         {
-            if let Ok(backend) = get_linux_backend() {
-                let _ = backend.wheel(dx, dy);
+            match get_linux_backend() {
+                Ok(backend) => {
+                    let res = backend.wheel(dx, dy);
+                    handle_injection_result(InjectionErrorKind::Wheel, res);
+                }
+                Err(e) => {
+                    handle_injection_result(InjectionErrorKind::Wheel, Err(e));
+                }
             }
         }
     }
@@ -1488,7 +1601,8 @@ impl NativeInputInjector {
     #[cfg(windows)]
     pub fn platform_key_event(vk: u16, is_down: bool, extended: bool) {
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.key(vk, is_down, extended);
+            let res = backend.key(vk, is_down, extended);
+            handle_injection_result(InjectionErrorKind::Key, res);
             return;
         }
         Self::sync_input_desktop();
@@ -1527,7 +1641,8 @@ impl NativeInputInjector {
     #[cfg(target_os = "macos")]
     pub fn platform_key_event(vk: u16, is_down: bool, extended: bool) {
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.key(vk, is_down, extended);
+            let res = backend.key(vk, is_down, extended);
+            handle_injection_result(InjectionErrorKind::Key, res);
             return;
         }
         use macos_ffi::*;
@@ -1545,13 +1660,20 @@ impl NativeInputInjector {
     #[cfg(not(any(windows, target_os = "macos")))]
     pub fn platform_key_event(vk: u16, is_down: bool, extended: bool) {
         if let Some(backend) = get_custom_backend() {
-            let _ = backend.key(vk, is_down, extended);
+            let res = backend.key(vk, is_down, extended);
+            handle_injection_result(InjectionErrorKind::Key, res);
             return;
         }
         #[cfg(target_os = "linux")]
         {
-            if let Ok(backend) = get_linux_backend() {
-                let _ = backend.key(vk, is_down, extended);
+            match get_linux_backend() {
+                Ok(backend) => {
+                    let res = backend.key(vk, is_down, extended);
+                    handle_injection_result(InjectionErrorKind::Key, res);
+                }
+                Err(e) => {
+                    handle_injection_result(InjectionErrorKind::Key, Err(e));
+                }
             }
         }
     }
@@ -3356,5 +3478,60 @@ mod tests {
         assert_eq!(x_keycode_to_vk(116), Some(0x28)); // Down Arrow
         assert_eq!(x_keycode_to_vk(133), Some(0x5B)); // Super_L
         assert_eq!(x_keycode_to_vk(255), None); // Unknown
+    }
+
+    #[test]
+    fn test_injection_error_rate_limiter() {
+        let mut limiter = InjectionErrorRateLimiter::new();
+
+        // First failure returns Log
+        assert_eq!(
+            limiter.record_failure(InjectionErrorKind::Key),
+            RateLimitAction::Log
+        );
+
+        // Immediate repeat failure is suppressed
+        assert_eq!(
+            limiter.record_failure(InjectionErrorKind::Key),
+            RateLimitAction::Suppress
+        );
+        assert_eq!(
+            limiter.record_failure(InjectionErrorKind::Key),
+            RateLimitAction::Suppress
+        );
+
+        // Different failure kind logs on first occurrence
+        assert_eq!(
+            limiter.record_failure(InjectionErrorKind::MoveRelative),
+            RateLimitAction::Log
+        );
+        assert_eq!(
+            limiter.record_failure(InjectionErrorKind::MoveRelative),
+            RateLimitAction::Suppress
+        );
+
+        // A success resets the failure flag for that kind
+        limiter.record_success(InjectionErrorKind::Key);
+
+        // Next failure of Key returns Log again
+        assert_eq!(
+            limiter.record_failure(InjectionErrorKind::Key),
+            RateLimitAction::Log
+        );
+        assert_eq!(
+            limiter.record_failure(InjectionErrorKind::Key),
+            RateLimitAction::Suppress
+        );
+
+        // MoveRelative is still suppressed until its success
+        assert_eq!(
+            limiter.record_failure(InjectionErrorKind::MoveRelative),
+            RateLimitAction::Suppress
+        );
+        limiter.record_success(InjectionErrorKind::MoveRelative);
+        assert_eq!(
+            limiter.record_failure(InjectionErrorKind::MoveRelative),
+            RateLimitAction::Log
+        );
     }
 }
