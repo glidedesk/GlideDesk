@@ -38,3 +38,12 @@ Input capture on Linux requires listening to global input events across display 
    - In automated testing or headless server environments where `DISPLAY` is not defined:
    - Status: `helper = "x11rb"`, `message = "Linux input capture: headless session (DISPLAY not set); remote input injection and local capture unavailable"`.
    - GlideDesk degrades gracefully with honest capability reporting on `KvmRuntimeState` rather than panicking or failing silently.
+
+## Background Presentation & Tray Execution
+
+GlideDesk runs as a persistent background daemon when the primary window is closed or when launched with `--daemon`.
+
+- **X11 Taskbar Exclusion**:
+  On X11 environments, hiding the main window sets `set_skip_taskbar(true)`, which translates to setting the `_NET_WM_STATE_SKIP_TASKBAR` property on the client window. Standard window managers (GNOME Shell, KDE KWin, XFCE xfwm4, etc.) omit the window from panel taskbars and pager switchers while the tray icon remains active. When restored from the system tray, `set_skip_taskbar(false)` clears the hint and re-registers the window on the taskbar.
+- **Wayland Compositor Caveat**:
+  Under native Wayland sessions (such as GNOME Wayland or Sway), window taskbar presentation is governed entirely by the compositor rather than standard X11 window hints. While Tauri/GTK sets the equivalent surface hints, some Wayland compositors may ignore client-side requests to skip dock/panel listing. Full exclusion from taskbar panels is guaranteed on X11 and XWayland-managed windows.

@@ -230,8 +230,12 @@ adb install -r GlideDesk-1.1.1.apk
   - Copy text or images on Mac, paste immediately on Windows or Linux, with built-in loopback echo suppression.
 - **Instant LAN Discovery & Conflict Detection**:
   - Automatic peer discovery on UDP port `47801` without typing IP addresses, with intelligent detection and user notifications for busy ports.
-- **Ultra-Light System Tray**:
+- **Ultra-Light System Tray & Background Presentation**:
   - Runs in the background using under 30 MB of RAM (versus 500 MB+ in Electron KVMs).
+  - Background presentation dynamically adapts per platform when the window is closed or launched daemonized (`--daemon`):
+    - **macOS**: Switches to `ActivationPolicy::Accessory` (menu-bar agent without Dock icon or Cmd+Tab entry).
+    - **Windows**: Excludes the window from the Taskbar and Alt+Tab switcher (`set_skip_taskbar(true)`).
+    - **Linux**: Sets the window manager `_NET_WM_STATE_SKIP_TASKBAR` hint (note: some Wayland compositors ignore client-side taskbar hints; standard X11 window managers respect it).
 
 ---
 
