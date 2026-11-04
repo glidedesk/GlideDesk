@@ -763,7 +763,7 @@ pub fn update_kvm_runtime_state(helper: &str, message: &str) {
 
 #[cfg(target_os = "linux")]
 pub mod xdo_ffi {
-    use std::os::raw::{c_char, c_int, c_uint, c_ulong};
+    use std::os::raw::c_ulong;
 
     pub type Window = c_ulong;
     pub type UsecondsT = c_ulong;
@@ -773,38 +773,88 @@ pub mod xdo_ffi {
     pub struct Xdo {
         _unused: [u8; 0],
     }
+}
 
-    #[link(name = "xdo")]
-    extern "C" {
-        pub fn xdo_new(display_name: *const c_char) -> *mut Xdo;
-        pub fn xdo_free(xdo: *mut Xdo);
-        pub fn xdo_move_mouse_relative(xdo: *const Xdo, x: c_int, y: c_int) -> c_int;
-        pub fn xdo_move_mouse(xdo: *const Xdo, x: c_int, y: c_int, screen: c_int) -> c_int;
-        pub fn xdo_mouse_down(xdo: *const Xdo, window: Window, button: c_int) -> c_int;
-        pub fn xdo_mouse_up(xdo: *const Xdo, window: Window, button: c_int) -> c_int;
-        pub fn xdo_send_keysequence_window_down(
-            xdo: *const Xdo,
-            window: Window,
-            keysequence: *const c_char,
-            delay: UsecondsT,
-        ) -> c_int;
-        pub fn xdo_send_keysequence_window_up(
-            xdo: *const Xdo,
-            window: Window,
-            keysequence: *const c_char,
-            delay: UsecondsT,
-        ) -> c_int;
-        pub fn xdo_get_viewport_dimensions(
-            xdo: *const Xdo,
-            width: *mut c_uint,
-            height: *mut c_uint,
-            screen: c_int,
-        ) -> c_int;
+#[cfg(target_os = "linux")]
+pub struct XdoSymbols {
+    _lib: libloading::Library,
+    pub xdo_new: unsafe extern "C" fn(display_name: *const std::os::raw::c_char) -> *mut xdo_ffi::Xdo,
+    pub xdo_free: unsafe extern "C" fn(xdo: *mut xdo_ffi::Xdo),
+    pub xdo_move_mouse_relative: unsafe extern "C" fn(xdo: *const xdo_ffi::Xdo, x: std::os::raw::c_int, y: std::os::raw::c_int) -> std::os::raw::c_int,
+    pub xdo_move_mouse: unsafe extern "C" fn(xdo: *const xdo_ffi::Xdo, x: std::os::raw::c_int, y: std::os::raw::c_int, screen: std::os::raw::c_int) -> std::os::raw::c_int,
+    pub xdo_mouse_down: unsafe extern "C" fn(xdo: *const xdo_ffi::Xdo, window: xdo_ffi::Window, button: std::os::raw::c_int) -> std::os::raw::c_int,
+    pub xdo_mouse_up: unsafe extern "C" fn(xdo: *const xdo_ffi::Xdo, window: xdo_ffi::Window, button: std::os::raw::c_int) -> std::os::raw::c_int,
+    pub xdo_send_keysequence_window_down: unsafe extern "C" fn(
+        xdo: *const xdo_ffi::Xdo,
+        window: xdo_ffi::Window,
+        keysequence: *const std::os::raw::c_char,
+        delay: xdo_ffi::UsecondsT,
+    ) -> std::os::raw::c_int,
+    pub xdo_send_keysequence_window_up: unsafe extern "C" fn(
+        xdo: *const xdo_ffi::Xdo,
+        window: xdo_ffi::Window,
+        keysequence: *const std::os::raw::c_char,
+        delay: xdo_ffi::UsecondsT,
+    ) -> std::os::raw::c_int,
+    pub xdo_get_viewport_dimensions: unsafe extern "C" fn(
+        xdo: *const xdo_ffi::Xdo,
+        width: *mut std::os::raw::c_uint,
+        height: *mut std::os::raw::c_uint,
+        screen: std::os::raw::c_int,
+    ) -> std::os::raw::c_int,
+}
+
+#[cfg(target_os = "linux")]
+impl XdoSymbols {
+    pub fn load() -> Result<Self, String> {
+        let candidates = ["libxdo.so.3", "libxdo.so.4", "libxdo.so"];
+        for name in &candidates {
+            if let Ok(lib) = unsafe { libloading::Library::new(name) } {
+                unsafe {
+                    if let (
+                        Ok(xdo_new),
+                        Ok(xdo_free),
+                        Ok(xdo_move_mouse_relative),
+                        Ok(xdo_move_mouse),
+                        Ok(xdo_mouse_down),
+                        Ok(xdo_mouse_up),
+                        Ok(xdo_send_keysequence_window_down),
+                        Ok(xdo_send_keysequence_window_up),
+                        Ok(xdo_get_viewport_dimensions),
+                    ) = (
+                        get_sym(&lib, b"xdo_new\0"),
+                        get_sym(&lib, b"xdo_free\0"),
+                        get_sym(&lib, b"xdo_move_mouse_relative\0"),
+                        get_sym(&lib, b"xdo_move_mouse\0"),
+                        get_sym(&lib, b"xdo_mouse_down\0"),
+                        get_sym(&lib, b"xdo_mouse_up\0"),
+                        get_sym(&lib, b"xdo_send_keysequence_window_down\0"),
+                        get_sym(&lib, b"xdo_send_keysequence_window_up\0"),
+                        get_sym(&lib, b"xdo_get_viewport_dimensions\0"),
+                    ) {
+                        return Ok(Self {
+                            _lib: lib,
+                            xdo_new,
+                            xdo_free,
+                            xdo_move_mouse_relative,
+                            xdo_move_mouse,
+                            xdo_mouse_down,
+                            xdo_mouse_up,
+                            xdo_send_keysequence_window_down,
+                            xdo_send_keysequence_window_up,
+                            xdo_get_viewport_dimensions,
+                        });
+                    }
+                }
+            }
+        }
+        Err("libxdo not installed; input injection unavailable".to_string())
     }
 }
 
 #[cfg(target_os = "linux")]
 pub struct XdoBackend {
+    symbols: std::sync::Arc<XdoSymbols>,
     handle: parking_lot::Mutex<*mut xdo_ffi::Xdo>,
 }
 
@@ -818,7 +868,7 @@ impl Drop for XdoBackend {
     fn drop(&mut self) {
         let ptr = *self.handle.lock();
         if !ptr.is_null() {
-            unsafe { xdo_ffi::xdo_free(ptr) };
+            unsafe { (self.symbols.xdo_free)(ptr) };
         }
     }
 }
@@ -826,18 +876,21 @@ impl Drop for XdoBackend {
 #[cfg(target_os = "linux")]
 impl XdoBackend {
     pub fn new() -> Result<Self, String> {
+        let symbols = std::sync::Arc::new(XdoSymbols::load()?);
+
         let display = std::env::var("DISPLAY").ok();
         probe_display_available(display.as_deref())?;
 
         let c_display = display.as_ref().and_then(|d| std::ffi::CString::new(d.as_str()).ok());
         let dpy_ptr = c_display.as_ref().map(|s| s.as_ptr()).unwrap_or(std::ptr::null());
-        let handle = unsafe { xdo_ffi::xdo_new(dpy_ptr) };
+        let handle = unsafe { (symbols.xdo_new)(dpy_ptr) };
         if handle.is_null() {
             let err = "input injection unavailable: DISPLAY not set or failed to open X display".to_string();
             update_kvm_runtime_state("libxdo", &err);
             return Err(err);
         }
         Ok(Self {
+            symbols,
             handle: parking_lot::Mutex::new(handle),
         })
     }
@@ -850,7 +903,7 @@ impl XdoBackend {
         let mut width: std::os::raw::c_uint = 0;
         let mut height: std::os::raw::c_uint = 0;
         let ret = unsafe {
-            xdo_ffi::xdo_get_viewport_dimensions(*guard, &mut width, &mut height, 0)
+            (self.symbols.xdo_get_viewport_dimensions)(*guard, &mut width, &mut height, 0)
         };
         if ret != 0 {
             return Err("failed to get viewport dimensions".to_string());
@@ -872,9 +925,9 @@ impl InputBackend for XdoBackend {
         }
         let ret = unsafe {
             if is_down {
-                xdo_ffi::xdo_send_keysequence_window_down(*guard, xdo_ffi::CURRENTWINDOW, c_sym.as_ptr(), 0)
+                (self.symbols.xdo_send_keysequence_window_down)(*guard, xdo_ffi::CURRENTWINDOW, c_sym.as_ptr(), 0)
             } else {
-                xdo_ffi::xdo_send_keysequence_window_up(*guard, xdo_ffi::CURRENTWINDOW, c_sym.as_ptr(), 0)
+                (self.symbols.xdo_send_keysequence_window_up)(*guard, xdo_ffi::CURRENTWINDOW, c_sym.as_ptr(), 0)
             }
         };
         if ret != 0 {
@@ -895,9 +948,9 @@ impl InputBackend for XdoBackend {
         }
         let ret = unsafe {
             if is_down {
-                xdo_ffi::xdo_mouse_down(*guard, xdo_ffi::CURRENTWINDOW, btn)
+                (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn)
             } else {
-                xdo_ffi::xdo_mouse_up(*guard, xdo_ffi::CURRENTWINDOW, btn)
+                (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn)
             }
         };
         if ret != 0 {
@@ -916,8 +969,8 @@ impl InputBackend for XdoBackend {
             let count = dy.abs().min(10);
             for _ in 0..count {
                 unsafe {
-                    xdo_ffi::xdo_mouse_down(*guard, xdo_ffi::CURRENTWINDOW, btn);
-                    xdo_ffi::xdo_mouse_up(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn);
                 }
             }
         }
@@ -926,8 +979,8 @@ impl InputBackend for XdoBackend {
             let count = dx.abs().min(10);
             for _ in 0..count {
                 unsafe {
-                    xdo_ffi::xdo_mouse_down(*guard, xdo_ffi::CURRENTWINDOW, btn);
-                    xdo_ffi::xdo_mouse_up(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    (self.symbols.xdo_mouse_down)(*guard, xdo_ffi::CURRENTWINDOW, btn);
+                    (self.symbols.xdo_mouse_up)(*guard, xdo_ffi::CURRENTWINDOW, btn);
                 }
             }
         }
@@ -940,7 +993,7 @@ impl InputBackend for XdoBackend {
             return Err("xdo handle is null".to_string());
         }
         let ret = unsafe {
-            xdo_ffi::xdo_move_mouse_relative(*guard, dx, dy)
+            (self.symbols.xdo_move_mouse_relative)(*guard, dx, dy)
         };
         if ret != 0 {
             return Err(format!("xdo move_relative failed for ({}, {})", dx, dy));
@@ -954,7 +1007,7 @@ impl InputBackend for XdoBackend {
             return Err("xdo handle is null".to_string());
         }
         let ret = unsafe {
-            xdo_ffi::xdo_move_mouse(*guard, x, y, 0)
+            (self.symbols.xdo_move_mouse)(*guard, x, y, 0)
         };
         if ret != 0 {
             return Err(format!("xdo warp failed for ({}, {})", x, y));
