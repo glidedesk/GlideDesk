@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Lightweight, Zero-Latency Software KVM & Multi-Device Workspace Bridge</b><br>
-  Share one mouse, keyboard, and clipboard across Mac, Windows, Linux, and Android.<br>
+  Share one mouse, keyboard, and clipboard across Mac, Windows, and Linux.<br>
   <b>15x Lower RAM. Zero-GC Latency. Instant Screen Transitions.</b>
 </p>
 
@@ -15,7 +15,7 @@
   <a href="https://github.com/glidedesk/GlideDesk/actions"><img alt="Build Status" src="https://img.shields.io/github/actions/workflow/status/glidedesk/GlideDesk/build-tauri.yml?branch=main&label=CI%20Build"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.78%2B-dea584?logo=rust">
   <img alt="Tauri v2" src="https://img.shields.io/badge/Tauri-v2.0-24c8db?logo=tauri">
-  <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Android-Supported-blue">
+  <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Linux-Supported-blue">
   <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
 </p>
 
@@ -61,14 +61,11 @@ flowchart LR
         Mac["🍎 macOS Workstation<br/><code>(M1–M4 / Intel)</code>"]
         Win["🪟 Windows PC<br/><code>(10 / 11 64-bit)</code>"]
         Linux["🐧 Linux Rig<br/><code>(X11 / Wayland)</code>"]
-        Phone["📱 Android Companion<br/><code>(Touchpad & Display)</code>"]
     end
 
     Mac <===>|"Zero-Latency UDP Mesh (Port 47801)"| Win
     Win <===>|"Real-Time Clipboard & Input Hopping"| Linux
     Mac <===>|"Encrypted P2P Link"| Linux
-    Phone -.->|"Wi-Fi / BLE Wireless Trackpad"| Mac
-    Phone -.->|"Second Screen & Audio Mirroring"| Win
 ```
 
 ---
@@ -80,16 +77,16 @@ GlideDesk is engineered for modern cross-platform power users who need zero-late
 | Feature / Capability | GlideDesk | Barrier / Deskflow | Symless Synergy | Microsoft Mouse Without Borders | Apple Universal Control |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Price & License** | **100% Free & Open Source (GPL-3.0)** | Free & Open Source (GPL-2.0) | Paid ($29 – $39) / Proprietary | Free / Proprietary (PowerToys) | Free / Apple Hardware Locked |
-| **Supported Platforms** | **macOS, Windows, Linux, Android** | macOS, Windows, Linux | macOS, Windows, Linux | Windows only | macOS & iPadOS only |
+| **Supported Platforms** | **macOS, Windows, Linux** (Android roadmap) | macOS, Windows, Linux | macOS, Windows, Linux | Windows only | macOS & iPadOS only |
 | **Engine & Language** | **Tokio Async Rust + Tauri v2** | C++ / Qt5 | C++ / Qt5 | C# / .NET Framework | Swift / Objective-C (Apple Private APIs) |
 | **Idle RAM Footprint** | **~28 MB** | ~60 MB – 80 MB | ~120 MB – 180 MB | ~45 MB – 65 MB | Built-in OS Daemon |
 | **Garbage Collection (GC)** | **Zero GC (Deterministic Rust)** | Zero GC (C++) | Zero GC (C++) | CLR GC (Periodic pauses) | ARC (Apple Reference Counting) |
 | **Single-Window Edge Handoff** | **✅ Built-in (`Ctrl`/`Cmd` + Drag window across border)** | ❌ Whole cursor/screen only | ❌ Whole cursor/screen only | ❌ Whole cursor/screen only | ❌ Whole cursor/screen only |
 | **Dual-Active Input Arbitration** | **✅ Strict 3-State Machine (`home`, `driving`, `driven`)** | ❌ Stutters on dual inputs | ❌ Gestures trigger remote actions | ❌ Windows only | ✅ Native trackpad gestures |
-| **Android Mobile Companion** | **✅ Native Companion (Trackpad, Display, Webcam)** | ❌ No mobile support | ❌ No mobile support | ❌ No mobile support | ❌ iPad only (No Android) |
+| **Android Mobile Companion** | **Roadmap** (De-scoped in v3.0 for desktop focus) | ❌ No mobile support | ❌ No mobile support | ❌ No mobile support | ❌ iPad only (No Android) |
 | **High Refresh Rate (144Hz+)** | **✅ Delta Coalescing (Smooth under Wi-Fi load)** | ⚠️ Drops packets on high polling | ⚠️ Latency spikes on Wi-Fi | ⚠️ Stutters on high DPI mice | ✅ Apple ProMotion 120Hz |
 | **Image Clipboard Transfer** | **✅ Real-Time PNG/JPEG Transfer with Hash Deduplication** | ⚠️ Frequently hangs on large clips | ✅ Basic image sync | ⚠️ Small files only | ✅ Apple Continuity |
-| **Multi-Monitor Mesh Topology** | **✅ N-Way P2P Mesh (3+ Computers + Phone)** | ⚠️ Rigid server/client grid | ⚠️ Rigid server/client grid | ⚠️ 4 PCs max (Windows only) | ⚠️ 3 Apple devices max |
+| **Multi-Monitor Mesh Topology** | **✅ N-Way P2P Mesh (3+ Computers)** | ⚠️ Rigid server/client grid | ⚠️ Rigid server/client grid | ⚠️ 4 PCs max (Windows only) | ⚠️ 3 Apple devices max |
 
 <details>
 <summary><b>🔍 View Architectural Deep Dive (Rust Engine vs Legacy Architectures)</b></summary>
@@ -115,7 +112,7 @@ GlideDesk is engineered for modern cross-platform power users who need zero-late
 | | **Offscreen Window Parking** | ❌ Not available | ✅ **Automated Offscreen Parking at `(-32000, -32000)`** | Keeps apps rendering at full speed without throttling |
 | | **Floating Canvas Projection** | ❌ Not available | ✅ **Dedicated Target Canvas Window with Native Input** | Full mouse, click, and keyboard control of remote window |
 | | **Crash Recovery Watchdog** | ❌ None (offscreen windows stay stranded) | ✅ **12s Disconnect Watchdog (Auto-restores all windows)** | Guaranteed zero lost windows if link drops or app exits |
-| **Network & Mesh Topology** | **Network Architecture** | 1-to-1 direct peer link only | **N-Way Multi-Device Mesh Grid** | Link 3+ computers and Android phones simultaneously |
+| **Network & Mesh Topology** | **Network Architecture** | 1-to-1 direct peer link only | **N-Way Multi-Device Mesh Grid** | Link 3+ computers simultaneously |
 | | **LAN Peer Discovery** | Static IP configuration or basic broadcast | **UDP broadcast on 47801 with auto-pruning & fallback** | Zero-config instant pairing |
 | | **Port Conflict Resilience** | ❌ Crashes when default port is occupied | ✅ **Graceful `EADDRINUSE` handling & UI notification** | Safely co-exists with other tools without crashing |
 | | **Connection Health** | Static ping interval | **Adaptive 1s active / 5s idle keepalive with backoff** | Low network overhead when idle |
@@ -153,8 +150,7 @@ brew install --cask glidedesk
 ```
 
 #### Option 3: Manual Direct Download
-- **Universal Build (Recommended for Apple Silicon & Intel Macs):** [`GlideDesk_1.1.2_universal.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_universal.dmg) (16 MB)
-- **Apple Silicon Only (M1 / M2 / M3 / M4 Compact):** [`GlideDesk_1.1.1_aarch64.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.1/GlideDesk_1.1.1_aarch64.dmg) (8 MB)
+- **Universal Build (Apple Silicon & Intel Macs):** [`GlideDesk_3.0.0_universal.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v3.0.0/GlideDesk_3.0.0_universal.dmg) (21 MB)
 
 ---
 
@@ -184,9 +180,8 @@ winget install --manifest "https://raw.githubusercontent.com/glidedesk/GlideDesk
 ```
 
 #### Option 3: Manual Direct Download
-- **Standard Installer (`.exe`):** [`GlideDesk_1.1.2_x64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_x64-setup.exe)
-- **Portable Standalone (`.exe`, Zero-Install):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk-portable-x64.exe)
-- **Enterprise MSI (`.msi`):** [`GlideDesk_1.1.1_x64_en-US.msi`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.1_x64_en-US.msi)
+- **Standard Installer (`.exe`):** [`GlideDesk_3.0.0_x64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.0.0/GlideDesk_3.0.0_x64-setup.exe)
+- **Portable Standalone (`.exe`, Zero-Install):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.0.0/GlideDesk-portable-x64.exe)
 
 ---
 
@@ -201,29 +196,21 @@ curl -fsSL https://raw.githubusercontent.com/glidedesk/GlideDesk/main/linux/scri
 #### Option 2: Manual Package Download & Terminal Commands
 - **Universal AppImage (Recommended for all Linux distros — Fedora, Arch, openSUSE, Ubuntu, Debian):**
   ```bash
-  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_amd64.AppImage
-  chmod +x GlideDesk_1.1.2_amd64.AppImage
-  ./GlideDesk_1.1.2_amd64.AppImage
+  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v3.0.0/GlideDesk_3.0.0_amd64.AppImage
+  chmod +x GlideDesk_3.0.0_amd64.AppImage
+  ./GlideDesk_3.0.0_amd64.AppImage
   ```
 - **Debian / Ubuntu / Pop!_OS / Linux Mint (`.deb` Package):**
   ```bash
-  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk_1.1.2_amd64.deb
-  sudo dpkg -i GlideDesk_1.1.2_amd64.deb || sudo apt-get install -f -y
+  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v3.0.0/GlideDesk_3.0.0_amd64.deb
+  sudo dpkg -i GlideDesk_3.0.0_amd64.deb || sudo apt-get install -f -y
   ```
 
 ---
 
-### 📱 Android Companion (Android 10+)
+### 📱 Mobile Companion Status (Future Roadmap)
 
-#### Option 1: Direct Download & In-App Auto-Update
-- **Standard APK (Compact KVM & Clipboard):** [`GlideDesk-1.1.1.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk-1.1.1.apk)
-- **Full APK (Adds Phone Webcam & Notification Sync):** [`GlideDesk-1.1.1-full.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk-1.1.1-full.apk)
-
-#### Option 2: Install via ADB (USB or Wi-Fi)
-```bash
-curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v1.1.2/GlideDesk-1.1.1.apk
-adb install -r GlideDesk-1.1.1.apk
-```
+The Android companion application has been intentionally de-scoped in the v3.0.0 milestone to focus exclusively on hardening the core desktop Tauri v2 + Rust KVM engine, input injection, and unicast file transfer across macOS, Windows, and Linux. Mobile companion support is planned for a subsequent release once the desktop foundation is verified across all tier-1 OS targets.
 
 ---
 
@@ -237,7 +224,7 @@ adb install -r GlideDesk-1.1.1.apk
   - Strict 3-state machine (`home`, `driving`, `driven`) resolves input collisions when an external mouse on one machine is used alongside a laptop touchpad on another.
   - Windows multi-finger touchpad gestures (like 3-finger swipe down / `Win+D`) stay local and are isolated from triggering destructive `Cmd+M` / `Cmd+H` minimize/hide actions on macOS.
 - **Multi-Device Mesh Grid (3+ Workstations Simultaneously)**:
-  - Connect 3+ Macs, Windows PCs, Linux workstations, and Android devices into an interconnected workspace grid.
+  - Connect 3+ Macs, Windows PCs, and Linux workstations into an interconnected workspace grid.
 - **Crash-Safe Self-Healing Watchdog**:
   - Continuous 12-second heartbeat watchdog monitors connection stability.
   - If a remote computer disconnects or loses network link while a window is parked, GlideDesk automatically unparks and restores all windows to your local monitor.
@@ -258,9 +245,9 @@ adb install -r GlideDesk-1.1.1.apk
 
 ---
 
-### 📱 Android Companion Features
+### 📱 Mobile Companion (Planned Roadmap)
 
-GlideDesk includes a companion Android app (`android/`) for multi-device continuity:
+Mobile companion continuity is planned for a future milestone following the desktop core release:
 - **Phone as Wireless Second Screen**: Extend your desktop onto an Android phone or tablet with smooth hardware-accelerated video streaming.
 - **Touch Trackpad & Gamepad Mode**: Use your phone screen as an ultra-responsive wireless trackpad or gamepad for your PC over Wi-Fi or Bluetooth BLE.
 - **Universal Clipboard Sync**: Copy text or pictures on your phone, paste immediately on your computer, and vice versa.
@@ -289,10 +276,10 @@ npm install
 # Run in development mode
 npm run dev
 
-# Run all test suites (Rust engine, JS protocol, Android)
+# Run all test suites (Rust engine + JS suites)
 npm test
 
-# Fast tests (Rust backend + JS suites, skipping Android build)
+# Fast tests (Rust backend + JS suites)
 npm run test:fast
 
 # Build production package

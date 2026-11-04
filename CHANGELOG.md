@@ -18,6 +18,21 @@ and behaves as a proper background/tray application on macOS, Windows, and Linux
   pointer/keyboard input is captured directly from the X server, via
   [`x11rb`](https://crates.io/crates/x11rb). The KVM engine no longer dlopens `libxdo`
   or `libX11`.
+- **Pure-Rust Linux X11 screen capture.** Screen capture on Linux is implemented via `x11rb`
+  using `xproto::get_image` (`ZPixmap`) with automatic color-channel normalization and
+  auto-stop / graceful health degradation on lost X connection (5 consecutive errors).
+  Wayland limitations are documented in `docs/linux.md`.
+- **Native off-screen window parking and hit testing.** Real window parking at
+  `(-32000, -32000)`, window restore, and hit testing (`find_window_at_point`) are implemented
+  for macOS (`CGWindowListCopyWindowInfo` + `AXUIElement`) and Linux (`x11rb` `query_tree` +
+  `get_geometry` + `WM_NAME`), maintaining the 12-second crash-safe recovery watchdog.
+- **Multi-peer transfer isolation and resume verification.** Loopback TCP socket integration
+  tests verify that concurrent peer transfers remain strictly isolated to designated peer IDs
+  with zero cross-talk, valid SHA256 verification, and chunk offset resumption.
+- **Live localhost E2E testing suite.** Added automated end-to-end integration test
+  (`e2e-kvm-transfer-lifecycle.test.js`) validating the full wire protocol lifecycle
+  (`pair.start` through SAS authentication, `kvm.take`, pointer streaming, file batch/chunk transfer,
+  and cleanup) over live loopback sockets.
 - **Linux edge-crossing and window hand-off parity.** The Linux engine runs the same
   edge-crossing detection, `kvm.take`/`kvm.home` protocol, cursor parking, and
   Ctrl+Drag window hand-off as Windows and macOS.
@@ -34,6 +49,8 @@ and behaves as a proper background/tray application on macOS, Windows, and Linux
 
 ### Changed
 
+- **Android companion de-scoped.** The Android companion app is explicitly de-scoped in v3.0.0
+  to focus on hardening and stabilizing the core desktop Tauri v2 + Rust KVM engine.
 - **No native X helper dependency on Linux.** `libxdo` and `libX11` are no longer loaded
   at runtime; `x11rb` is the only Linux-specific runtime dependency.
 - **Injection failure telemetry.** Injection errors are reported once per failure kind
@@ -45,10 +62,14 @@ and behaves as a proper background/tray application on macOS, Windows, and Linux
 
 ### Fixed
 
+- **Destination contract in unicast file transfer.** Sender and receiver contract aligned on
+  stable client ID routing; receiver guard accurately accepts legitimate peer transfer packets.
 - **Linux capability honesty.** Local capture is only reported as running when the
   capture engine is actually alive.
 - **Windows screen capture.** Correct device-context handling for
   `CreateCompatibleDC`/`BitBlt`.
+- **Release installer cleanliness.** Build pipeline cleans stale bundle directories before packaging
+  to prevent historical installer versions from leaking into current releases.
 
 ### Security
 
