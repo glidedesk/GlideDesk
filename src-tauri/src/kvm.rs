@@ -52,6 +52,7 @@ impl KvmQueue {
 }
 
 /// Check if cursor coordinates cross the outer edge of the virtual desktop layout.
+#[cfg(any(test, not(windows)))]
 pub fn check_edge_crossed(side: &str, pt_x: f64, pt_y: f64, vx: i32, vy: i32, vw: i32, vh: i32) -> bool {
     let max_x = (vx + vw) as f64;
     let max_y = (vy + vh) as f64;
@@ -65,6 +66,7 @@ pub fn check_edge_crossed(side: &str, pt_x: f64, pt_y: f64, vx: i32, vy: i32, vw
 }
 
 /// Check if cumulative remote virtual deltas indicate cursor has moved back across the seam to home.
+#[cfg(any(test, not(windows)))]
 pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: f64) -> bool {
     match side {
         "right" => virtual_remote_x < -8.0,
@@ -818,7 +820,7 @@ pub fn mouse_wheel_to_x11_pulses(dx: i32, dy: i32) -> (Option<(u8, usize)>, Opti
 static CUSTOM_BACKEND: parking_lot::RwLock<Option<std::sync::Arc<dyn InputBackend>>> =
     parking_lot::RwLock::new(None);
 
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(test)]
 pub fn set_input_backend(backend: Option<std::sync::Arc<dyn InputBackend>>) {
     *CUSTOM_BACKEND.write() = backend;
 }
@@ -844,7 +846,6 @@ pub fn update_kvm_runtime_state(helper: &str, message: &str) {
 #[cfg(target_os = "linux")]
 pub struct X11RbBackend {
     conn: x11rb::rust_connection::RustConnection,
-    screen_num: usize,
     root: x11rb::protocol::xproto::Window,
     width: u32,
     height: u32,
@@ -896,7 +897,6 @@ impl X11RbBackend {
 
         Ok(Self {
             conn,
-            screen_num,
             root,
             width,
             height,
@@ -1138,25 +1138,20 @@ impl NativeInputInjector {
 
     #[cfg(not(any(windows, target_os = "macos")))]
     pub fn recenter_local_cursor() {
-        record_injection_timestamp();
-        if let Some(backend) = get_custom_backend() {
-            let res = backend.warp(960, 540);
-            handle_injection_result(InjectionErrorKind::Warp, res);
-            return;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            match get_linux_backend() {
-                Ok(backend) => {
-                    let (w, h) = backend.get_viewport_dimensions().unwrap_or((1920, 1080));
-                    let res = backend.warp((w / 2) as i32, (h / 2) as i32);
-                    handle_injection_result(InjectionErrorKind::Warp, res);
-                }
-                Err(e) => {
-                    handle_injection_result(InjectionErrorKind::Warp, Err(e));
-                }
+        let (w, h) = {
+            #[cfg(target_os = "linux")]
+            {
+                get_linux_backend()
+                    .ok()
+                    .and_then(|b| b.get_viewport_dimensions().ok())
+                    .unwrap_or((1920, 1080))
             }
-        }
+            #[cfg(not(target_os = "linux"))]
+            {
+                (1920, 1080)
+            }
+        };
+        Self::recenter_cursor(0, 0, w as i32, h as i32);
     }
 
     #[cfg(windows)]
@@ -2942,10 +2937,6 @@ pub mod hook_engine {
 
     pub static LINUX_CAPTURE_RUNNING: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
-
-    pub fn is_capture_running() -> bool {
-        LINUX_CAPTURE_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
-    }
 
     pub fn start_hooks(app: AppHandle, state: AppState, network: NetworkManager) {
         set_kvm_app_state(state.clone());
