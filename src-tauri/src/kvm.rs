@@ -372,6 +372,7 @@ pub trait InputBackend: Send + Sync {
     fn warp(&self, x: i32, y: i32) -> Result<(), String>;
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordedInputEvent {
     Key { vk: u16, is_down: bool, extended: bool, timestamp_ms: u64 },
@@ -381,10 +382,12 @@ pub enum RecordedInputEvent {
     Warp { x: i32, y: i32, timestamp_ms: u64 },
 }
 
+#[cfg(test)]
 pub struct RecordingBackend {
     events: std::sync::Mutex<Vec<RecordedInputEvent>>,
 }
 
+#[cfg(test)]
 impl RecordingBackend {
     pub fn new() -> Self {
         Self {
@@ -401,12 +404,14 @@ impl RecordingBackend {
     }
 }
 
+#[cfg(test)]
 impl Default for RecordingBackend {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl InputBackend for RecordingBackend {
     fn key(&self, vk: u16, is_down: bool, extended: bool) -> Result<(), String> {
         let timestamp_ms = std::time::SystemTime::now()
@@ -543,6 +548,7 @@ pub fn handle_injection_result(kind: InjectionErrorKind, result: Result<(), Stri
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub const SELF_ECHO_SUPPRESSION_WINDOW_MS: u64 = 25;
 
 pub static LAST_INJECTION_TIMESTAMP_MS: std::sync::atomic::AtomicU64 =
@@ -556,10 +562,12 @@ pub fn record_injection_timestamp() {
     LAST_INJECTION_TIMESTAMP_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn should_forward_captured_event(now_ms: u64, last_injection_ms: u64) -> bool {
     should_forward_captured_event_with_window(now_ms, last_injection_ms, SELF_ECHO_SUPPRESSION_WINDOW_MS)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn should_forward_captured_event_with_window(
     now_ms: u64,
     last_injection_ms: u64,
@@ -574,6 +582,7 @@ pub fn should_forward_captured_event_with_window(
     now_ms.saturating_sub(last_injection_ms) >= window_ms
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn probe_display_available(display: Option<&str>) -> Result<(), String> {
     match display {
         Some(d) if !d.trim().is_empty() => Ok(()),
@@ -581,12 +590,14 @@ pub fn probe_display_available(display: Option<&str>) -> Result<(), String> {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureHealth {
     Healthy,
     Lost,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn classify_capture_health(consecutive_failures: u32, threshold: u32) -> CaptureHealth {
     if consecutive_failures >= threshold {
         CaptureHealth::Lost
@@ -595,6 +606,7 @@ pub fn classify_capture_health(consecutive_failures: u32, threshold: u32) -> Cap
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn evaluate_linux_session_capability(
     display: Option<&str>,
     session_type: Option<&str>,
@@ -631,6 +643,7 @@ pub fn evaluate_linux_session_capability(
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn x_keycode_to_vk(keycode: u8) -> Option<u16> {
     match keycode {
         9 => Some(0x1B),  // Escape
@@ -720,6 +733,7 @@ pub fn x_keycode_to_vk(keycode: u8) -> Option<u16> {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn vk_to_x_keysym(vk: u16) -> Option<u32> {
     match vk {
         0x08 => Some(0xFF08), // BackSpace
@@ -773,6 +787,7 @@ pub fn vk_to_x_keysym(vk: u16) -> Option<u32> {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn mouse_button_to_x11_button(button: MouseButton) -> u8 {
     match button {
         MouseButton::Left => 1,
@@ -781,6 +796,7 @@ pub fn mouse_button_to_x11_button(button: MouseButton) -> u8 {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn mouse_wheel_to_x11_pulses(dx: i32, dy: i32) -> (Option<(u8, usize)>, Option<(u8, usize)>) {
     let y_pulse = if dy != 0 {
         let btn = if dy > 0 { 4 } else { 5 };
@@ -802,6 +818,7 @@ pub fn mouse_wheel_to_x11_pulses(dx: i32, dy: i32) -> (Option<(u8, usize)>, Opti
 static CUSTOM_BACKEND: parking_lot::RwLock<Option<std::sync::Arc<dyn InputBackend>>> =
     parking_lot::RwLock::new(None);
 
+#[cfg(any(test, target_os = "linux"))]
 pub fn set_input_backend(backend: Option<std::sync::Arc<dyn InputBackend>>) {
     *CUSTOM_BACKEND.write() = backend;
 }
@@ -2906,8 +2923,10 @@ fn run_linux_x11_capture_loop(
             }
         }
 
-        last_x = root_x;
-        last_y = root_y;
+        if !is_driving {
+            last_x = root_x;
+            last_y = root_y;
+        }
         prev_mask = mask;
         prev_keys = keys;
     }

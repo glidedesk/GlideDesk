@@ -1074,7 +1074,7 @@ pub async fn send_wire_message(
 }
 
 #[tauri::command]
-pub fn choose_send_files(app: AppHandle) -> Result<Vec<String>, String> {
+pub fn choose_send_files(_app: AppHandle) -> Result<Vec<String>, String> {
     log::info!("Opening native file selection dialog for choose_send_files");
     #[cfg(target_os = "macos")]
     {
@@ -1098,7 +1098,7 @@ pub fn choose_send_files(app: AppHandle) -> Result<Vec<String>, String> {
 
         if !files.is_empty() {
             log::info!("User selected {} file(s) for sending", files.len());
-            let _ = app.emit("files-selected", &files);
+            let _ = _app.emit("files-selected", &files);
         }
         return Ok(files);
     }
