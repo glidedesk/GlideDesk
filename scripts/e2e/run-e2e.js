@@ -10,6 +10,7 @@ const { DEFAULT_URL } = require('./e2e-helpers.js');
 const authGate = require('./e2e-auth-gate.test.js');
 const layoutSync = require('./e2e-layout-sync.test.js');
 const keyRelease = require('./e2e-key-release.test.js');
+const kvmTransfer = require('./e2e-kvm-transfer-lifecycle.test.js');
 
 function checkPortOpen(port = 47800, host = '127.0.0.1', timeoutMs = 1000) {
   return new Promise((resolve) => {
@@ -83,6 +84,7 @@ async function runE2E() {
     { name: 'Auth Gate & SAS Pairing Security', fn: authGate.run },
     { name: 'Opposite Layout Sync & Handshake', fn: layoutSync.run },
     { name: 'Graceful Disconnect & Key Release', fn: keyRelease.run },
+    { name: 'KVM Edge-Crossing & File Transfer', fn: kvmTransfer.run },
   ];
 
   let passed = 0;

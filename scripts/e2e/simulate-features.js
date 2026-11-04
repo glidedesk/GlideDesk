@@ -1,10 +1,11 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// E2E Simulation Test: Pairing, SAS, KVM Edge Crossing, Cursor, and Audio streaming handshake
+// [SIMULATION ONLY] In-Memory Protocol & Geometry Unit Simulation (Mocked Peer State)
+// Note: This script validates math/state formulas in memory without active network sockets.
+// For live localhost integration tests against the compiled Tauri binary, run: npm run test:e2e
 
 const assert = require('assert');
-const http = require('http');
 
-console.log('🚀 Starting GlideDesk Live E2E Feature Simulation (Pairing -> KVM -> Audio)...');
+console.log('ℹ️ Running GlideDesk Protocol & Edge Math In-Memory Simulation (Mocked State)...');
 
 // 1. Simulate Protocol Handshake & SAS Code Verification
 const mockPeerState = {
