@@ -212,7 +212,7 @@ pub fn convert_x11_image_to_rgba(
 mod linux_capture {
     use super::convert_x11_image_to_rgba;
     use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{self, ConnectionExt as _};
+    use x11rb::protocol::xproto;
 
     /// Captures the primary X11 root window display using x11rb `get_image`.
     /// Note: Wayland compositors restrict global root window capture without PipeWire or portal permissions.

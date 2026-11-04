@@ -448,6 +448,7 @@ pub fn find_window_at_point(x: f64, y: f64) -> Option<(String, String, i32, i32,
     if display.trim().is_empty() {
         return None;
     }
+    use x11rb::connection::Connection as _;
     use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, MapState};
     let (conn, screen_num) = x11rb::connect(Some(&display)).ok()?;
     let setup = conn.setup();
