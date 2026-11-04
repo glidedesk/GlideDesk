@@ -24,8 +24,27 @@
   <a href="#-industry-comparison-glidedesk-vs-barrier-synergy--universal-control"><b>Comparison Matrix</b></a> •
   <a href="#-architecture--mesh-topology"><b>Architecture</b></a> •
   <a href="#-features"><b>Key Features</b></a> •
-  <a href="#-building--development"><b>Build from Source</b></a>
+  <a href="#-building--development"><b>Build from Source</b></a> •
+  <a href="CHANGELOG.md"><b>Changelog</b></a>
 </p>
+
+---
+
+## 🚀 What's New in v3.0.0
+
+GlideDesk 3.0 is the **pure Tauri v2 + Rust** milestone — the KVM engine carries no native
+input-helper dependency, and input is first-class on every desktop platform:
+
+- **Linux input, native and helper-free** — keyboard/mouse injection and X11 capture are
+  implemented directly against the X server with pure-Rust [`x11rb`](https://crates.io/crates/x11rb)
+  (XTest + X11 query/record). The KVM engine no longer loads `libxdo` or `libX11`.
+- **Background mode on every platform** — closing the window (or launching with `--daemon`)
+  keeps GlideDesk running in the tray. macOS becomes a menu-bar agent (no Dock icon, and no
+  "App Running in Background" notice); Windows and Linux hide from the taskbar/Alt+Tab.
+- **Honest capability reporting** — Linux capture stops and downgrades its reported state if
+  the X connection drops, and input-injection failures are surfaced instead of swallowed.
+
+See the full [CHANGELOG](CHANGELOG.md) for details.
 
 ---
 

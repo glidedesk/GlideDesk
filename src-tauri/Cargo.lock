@@ -1693,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "glidedesk"
-version = "1.1.9"
+version = "3.0.0"
 dependencies = [
  "arboard",
  "base64 0.23.1",

@@ -1125,7 +1125,7 @@ impl AppState {
             updates: UpdatesView::default(),
             about: AboutState {
                 app: AppInfo {
-                    version: "1.1.9".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
                     name: "GlideDesk".to_string(),
                     arch: arch.clone(),
                     runtime: "GlideDesk (Tauri v2 + Rust Native Webview)".to_string(),
@@ -1139,7 +1139,7 @@ impl AppState {
             displays: Vec::new(),
             mac_name: host,
             active_tab: "overview".to_string(),
-            version: "1.1.9".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
 
             kvm_state: KvmRuntimeState::default(),
             kvm: KvmSettings::default(),
