@@ -469,56 +469,49 @@ pub fn open_update(state: State<'_, AppState>, app: AppHandle) -> Result<(), Str
 #[tauri::command]
 pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     log::info!("[Updater] Direct in-app update initiated (no browser required)");
-    let download_url = {
+    let download = {
         let mut s = state.inner.write();
         s.updates.checking = true;
-        s.updates.download.as_ref().map(|d| d.url.clone())
+        s.updates.download.clone()
     };
     push_state(&app, &state);
+
+    let download = match download {
+        Some(d) if !d.url.trim().is_empty() => d,
+        _ => {
+            let mut s = state.inner.write();
+            s.updates.checking = false;
+            s.updates.error = "No update asset available for download".to_string();
+            push_state(&app, &state);
+            return Err("No update asset available for download".to_string());
+        }
+    };
+    let explicit_url = download.url;
 
     tauri::async_runtime::spawn(async move {
         #[cfg(target_os = "macos")]
         {
-            let explicit_url = download_url.unwrap_or_default();
             let script = format!(r#"
-                REPO="glidedesk/GlideDesk"
-                ARCH="$(uname -m)"
                 DOWNLOAD_URL="{}"
-                if [ -z "${{DOWNLOAD_URL}}" ]; then
-                    RELEASES_JSON="$(curl -sSL -H "User-Agent: GlideDesk" "https://api.github.com/repos/${{REPO}}/releases?per_page=5" 2>/dev/null || true)"
-                    DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*_universal\.dmg" | head -n 1 || true)"
-                    if [ -z "${{DOWNLOAD_URL}}" ]; then
-                        if [ "${{ARCH}}" = "arm64" ]; then
-                            DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*_(arm64|aarch64)\.dmg" | head -n 1 || true)"
-                        else
-                            DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*_x64\.dmg" | head -n 1 || true)"
-                        fi
-                    fi
-                    if [ -z "${{DOWNLOAD_URL}}" ]; then
-                        DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*\.dmg" | head -n 1 || true)"
-                    fi
-                fi
-                if [ -n "${{DOWNLOAD_URL}}" ]; then
-                    TMP_DIR="$(mktemp -d)"
-                    DMG_PATH="${{TMP_DIR}}/update.dmg"
-                    MOUNT_POINT="${{TMP_DIR}}/mount"
-                    curl -fSL "${{DOWNLOAD_URL}}" -o "${{DMG_PATH}}"
-                    mkdir -p "${{MOUNT_POINT}}"
-                    hdiutil attach "${{DMG_PATH}}" -mountpoint "${{MOUNT_POINT}}" -nobrowse -quiet
-                    if [ -d "${{MOUNT_POINT}}/GlideDesk.app" ]; then
-                        rm -rf "/Applications/GlideDesk.app"
-                        cp -R "${{MOUNT_POINT}}/GlideDesk.app" "/Applications/GlideDesk.app"
-                        xattr -cr "/Applications/GlideDesk.app"
-                        codesign --force --deep --sign - --identifier "com.glidedesk.desktop" "/Applications/GlideDesk.app" 2>/dev/null || true
-                        hdiutil detach "${{MOUNT_POINT}}" -quiet || true
-                        rm -rf "${{TMP_DIR}}"
-                        # Quit the running instance first, then relaunch the freshly
-                        # installed bundle. (Previously this opened the new app and
-                        # then pkill'd it, so the update appeared to do nothing.)
-                        pkill -ix "glidedesk" || true
-                        sleep 1
-                        open -a "/Applications/GlideDesk.app"
-                    fi
+                TMP_DIR="$(mktemp -d)"
+                DMG_PATH="${{TMP_DIR}}/update.dmg"
+                MOUNT_POINT="${{TMP_DIR}}/mount"
+                curl -fSL "${{DOWNLOAD_URL}}" -o "${{DMG_PATH}}"
+                mkdir -p "${{MOUNT_POINT}}"
+                hdiutil attach "${{DMG_PATH}}" -mountpoint "${{MOUNT_POINT}}" -nobrowse -quiet
+                if [ -d "${{MOUNT_POINT}}/GlideDesk.app" ]; then
+                    rm -rf "/Applications/GlideDesk.app"
+                    cp -R "${{MOUNT_POINT}}/GlideDesk.app" "/Applications/GlideDesk.app"
+                    xattr -cr "/Applications/GlideDesk.app"
+                    codesign --force --deep --sign - --identifier "com.glidedesk.desktop" "/Applications/GlideDesk.app" 2>/dev/null || true
+                    hdiutil detach "${{MOUNT_POINT}}" -quiet || true
+                    rm -rf "${{TMP_DIR}}"
+                    # Quit the running instance first, then relaunch the freshly
+                    # installed bundle. (Previously this opened the new app and
+                    # then pkill'd it, so the update appeared to do nothing.)
+                    pkill -ix "glidedesk" || true
+                    sleep 1
+                    open -a "/Applications/GlideDesk.app"
                 fi
             "#, explicit_url);
             let _ = std::process::Command::new("bash").arg("-c").arg(script).spawn();
@@ -526,41 +519,23 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
 
         #[cfg(target_os = "windows")]
         {
-            let explicit_url = download_url.unwrap_or_default();
             let script = format!(r#"
-                $repo = "glidedesk/GlideDesk"
                 $downloadUrl = "{}"
-                if (-not $downloadUrl) {{
-                    $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=5" -Headers @{{ 'User-Agent' = 'GlideDesk' }}
-                    $release = if ($releases -is [array]) {{ $releases[0] }} else {{ $releases }}
-                    $asset = $release.assets | Where-Object {{ $_.name -like "*x64-setup.exe" -or $_.name -like "*.exe" }} | Select-Object -First 1
-                    if ($asset) {{ $downloadUrl = $asset.browser_download_url }}
-                }}
-                if ($downloadUrl) {{
-                    $tmpPath = "$env:TEMP\GlideDesk-update.exe"
-                    Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpPath
-                    Start-Process -FilePath $tmpPath -ArgumentList "/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS"
-                }}
+                $tmpPath = "$env:TEMP\GlideDesk-update.exe"
+                Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpPath
+                Start-Process -FilePath $tmpPath -ArgumentList "/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS"
             "#, explicit_url);
             let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).spawn();
         }
 
         #[cfg(target_os = "linux")]
         {
-            let explicit_url = download_url.unwrap_or_default();
             let script = format!(r#"
-                REPO="glidedesk/GlideDesk"
                 DOWNLOAD_URL="{}"
-                if [ -z "${{DOWNLOAD_URL}}" ]; then
-                    RELEASES_JSON="$(curl -sSL -H "User-Agent: GlideDesk" "https://api.github.com/repos/${{REPO}}/releases?per_page=5" 2>/dev/null || true)"
-                    DOWNLOAD_URL="$(echo "${{RELEASES_JSON}}" | grep -o 'https://[^"]*' | grep -E "GlideDesk_.*\.AppImage" | head -n 1 || true)"
-                fi
-                if [ -n "${{DOWNLOAD_URL}}" ]; then
-                    curl -fSL "${{DOWNLOAD_URL}}" -o "/tmp/GlideDesk.AppImage"
-                    chmod +x "/tmp/GlideDesk.AppImage"
-                    /tmp/GlideDesk.AppImage &
-                    pkill -ix "glidedesk" || true
-                fi
+                curl -fSL "${{DOWNLOAD_URL}}" -o "/tmp/GlideDesk.AppImage"
+                chmod +x "/tmp/GlideDesk.AppImage"
+                /tmp/GlideDesk.AppImage &
+                pkill -ix "glidedesk" || true
             "#, explicit_url);
             let _ = std::process::Command::new("bash").arg("-c").arg(script).spawn();
         }
@@ -1307,6 +1282,84 @@ mod tests {
         );
         // The current-platform wrapper still resolves to a file.
         assert!(pick_asset(&assets).is_some());
+
+        // macOS fallback hierarchy: universal -> arch -> any dmg
+        let arch_dmg_only = vec![
+            GithubAsset {
+                name: "GlideDesk_1.1.2_x64.dmg".to_string(),
+                browser_download_url: "https://example.com/GlideDesk_1.1.2_x64.dmg".to_string(),
+                size: Some(15000000),
+            },
+            GithubAsset {
+                name: "GlideDesk_1.1.2_aarch64.dmg".to_string(),
+                browser_download_url: "https://example.com/GlideDesk_1.1.2_aarch64.dmg".to_string(),
+                size: Some(15000000),
+            },
+        ];
+        assert!(pick_asset_for("macos", &arch_dmg_only).is_some());
+
+        let any_dmg_only = vec![GithubAsset {
+            name: "GlideDesk-legacy.dmg".to_string(),
+            browser_download_url: "https://example.com/GlideDesk-legacy.dmg".to_string(),
+            size: Some(15000000),
+        }];
+        assert_eq!(
+            pick_asset_for("macos", &any_dmg_only).unwrap().name,
+            "GlideDesk-legacy.dmg"
+        );
+
+        // Windows fallback hierarchy: -setup.exe -> .msi -> non-portable .exe -> reject portable
+        let msi_only = vec![
+            GithubAsset {
+                name: "GlideDesk-portable-x64.exe".to_string(),
+                browser_download_url: "https://example.com/portable.exe".to_string(),
+                size: Some(20000000),
+            },
+            GithubAsset {
+                name: "GlideDesk_1.1.2_x64.msi".to_string(),
+                browser_download_url: "https://example.com/GlideDesk.msi".to_string(),
+                size: Some(6000000),
+            },
+        ];
+        assert_eq!(
+            pick_asset_for("windows", &msi_only).unwrap().name,
+            "GlideDesk_1.1.2_x64.msi"
+        );
+
+        let non_portable_exe_only = vec![
+            GithubAsset {
+                name: "GlideDesk-portable-x64.exe".to_string(),
+                browser_download_url: "https://example.com/portable.exe".to_string(),
+                size: Some(20000000),
+            },
+            GithubAsset {
+                name: "GlideDesk-Installer-v1.1.2.exe".to_string(),
+                browser_download_url: "https://example.com/installer.exe".to_string(),
+                size: Some(7000000),
+            },
+        ];
+        assert_eq!(
+            pick_asset_for("windows", &non_portable_exe_only).unwrap().name,
+            "GlideDesk-Installer-v1.1.2.exe"
+        );
+
+        let portable_only = vec![GithubAsset {
+            name: "GlideDesk-portable-x64.exe".to_string(),
+            browser_download_url: "https://example.com/portable.exe".to_string(),
+            size: Some(20000000),
+        }];
+        assert!(pick_asset_for("windows", &portable_only).is_none());
+
+        // Linux fallback hierarchy: .AppImage -> .deb
+        let deb_only = vec![GithubAsset {
+            name: "GlideDesk_1.1.2_amd64.deb".to_string(),
+            browser_download_url: "https://example.com/GlideDesk.deb".to_string(),
+            size: Some(10000000),
+        }];
+        assert_eq!(
+            pick_asset_for("linux", &deb_only).unwrap().name,
+            "GlideDesk_1.1.2_amd64.deb"
+        );
     }
 
     #[test]
