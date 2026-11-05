@@ -1,10 +1,11 @@
-﻿// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
+// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 // shared/updates.js pickAsset: each computer finds its own download among a release's files,
 // with the Mac's disk images named GlideDesk-<version>-<arch>.dmg (mac/build-dmg.sh) and as before.
 'use strict';
 
 const assert = require('assert');
 const { pickAsset } = require('../updates.js');
+const { formatUpdateStatus } = require('../../ui-about.js');
 
 const files = (...names) => names.map((name) => ({ name, browser_download_url: 'https://example.invalid/' + name, size: 1 }));
 const pick = (assets, platform, arch, prefer) => (pickAsset(assets, platform, arch, prefer) || {}).name || null;
@@ -31,5 +32,32 @@ assert.strictEqual(pick(both, 'win', 'x64'), 'GlideDesk-Setup-2.3.0.exe');
 assert.strictEqual(pick(both, 'win', 'arm64'), 'GlideDesk-Setup-2.3.0-arm64.exe');
 assert.strictEqual(pick(both, 'linux', 'x64'), 'GlideDesk-2.3.0-x86_64.AppImage');
 assert.strictEqual(pick(both, 'linux', 'x64', 'deb'), 'GlideDesk-2.3.0-amd64.deb');
+
+// Status formatting tests
+const dlStatus = formatUpdateStatus({ status: 'downloading', progress: 42.4, statusText: 'Downloading… 42% (10 MB / 24 MB)' });
+assert.strictEqual(dlStatus.statusText, 'Downloading… 42% (10 MB / 24 MB)');
+assert.strictEqual(dlStatus.checkDisabled, true);
+assert.strictEqual(dlStatus.getDisabled, true);
+assert.strictEqual(dlStatus.releaseHidden, true);
+
+const insStatus = formatUpdateStatus({ status: 'installing' });
+assert.strictEqual(insStatus.statusText, 'Installing…');
+assert.strictEqual(insStatus.checkDisabled, true);
+assert.strictEqual(insStatus.getDisabled, true);
+
+const rstStatus = formatUpdateStatus({ status: 'restarting' });
+assert.strictEqual(rstStatus.statusText, 'Update installed — restarting');
+assert.strictEqual(rstStatus.checkDisabled, true);
+assert.strictEqual(rstStatus.getHidden, true);
+
+const errStatus = formatUpdateStatus({ status: 'error', error: 'Network timeout' });
+assert.strictEqual(errStatus.statusText, 'Update failed');
+assert.strictEqual(errStatus.checkDisabled, false);
+assert.strictEqual(errStatus.releaseHidden, false);
+assert(errStatus.hint.includes('Network timeout'));
+
+const chkStatus = formatUpdateStatus({ checking: true });
+assert.strictEqual(chkStatus.statusText, 'Checking…');
+assert.strictEqual(chkStatus.checkDisabled, true);
 
 console.log('updates: ok');

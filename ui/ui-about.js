@@ -3,6 +3,64 @@
 // computer, the app's build, the maker and the licence. Facts come from shared/about.js.
 'use strict';
 
+function formatUpdateStatus(u) {
+  if (!u) return { statusText: '', hint: '', checkDisabled: false, getHidden: true, getDisabled: false, releaseHidden: true };
+  let statusText = '';
+  let hint = '';
+  let checkDisabled = false;
+  let getHidden = !u.available;
+  let getDisabled = false;
+  let releaseHidden = !u.error;
+
+  if (u.status === 'downloading') {
+    statusText = u.statusText || ('Downloading… ' + Math.round(u.progress || 0) + '%');
+    hint = 'Downloading ' + (u.download ? u.download.name : 'update') + '…';
+    checkDisabled = true;
+    getDisabled = true;
+    getHidden = false;
+  } else if (u.status === 'verifying') {
+    statusText = 'Verifying…';
+    hint = 'Verifying downloaded update integrity…';
+    checkDisabled = true;
+    getDisabled = true;
+    getHidden = false;
+  } else if (u.status === 'installing') {
+    statusText = 'Installing…';
+    hint = 'Applying update to your system…';
+    checkDisabled = true;
+    getDisabled = true;
+    getHidden = false;
+  } else if (u.status === 'restarting') {
+    statusText = 'Update installed — restarting';
+    hint = 'Relaunching GlideDesk with the new version…';
+    checkDisabled = true;
+    getHidden = true;
+  } else if (u.error) {
+    statusText = 'Update failed';
+    hint = 'Error: ' + u.error;
+    checkDisabled = false;
+    getDisabled = false;
+    releaseHidden = false;
+  } else if (u.checking) {
+    statusText = 'Checking…';
+    hint = 'Checking GitHub for new releases…';
+    checkDisabled = true;
+  } else if (u.available) {
+    statusText = u.latest + ' is available';
+    hint = 'You have ' + u.current + '. ' + (u.download ? 'Download ' + u.download.name : 'Opens the release page');
+    getHidden = false;
+  } else if (u.noReleases) {
+    statusText = '';
+    hint = 'Version ' + u.current + '. No releases published yet';
+  } else if (u.checkedAt) {
+    statusText = 'Up to date';
+    hint = 'Version ' + u.current + (u.checkedAt ? ' · checked ' + new Date(u.checkedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '');
+  }
+
+  return { statusText, hint, checkDisabled, getHidden, getDisabled, releaseHidden };
+}
+
+if (typeof UI !== 'undefined' && UI.tab) {
 UI.tab({
   id: 'about',
   order: 110,
@@ -42,7 +100,9 @@ UI.tab({
     const updStatus = el('span', { class: 'value' });
     const updCheck = UI.button('Check now', () => api.checkUpdates(), 'small');
     const updGet = UI.button('Update now', () => (api.installUpdate ? api.installUpdate() : api.openUpdate()), 'small primary');
-    const updRow = UI.row('GlideDesk', '', [updStatus, updGet, updCheck]);
+    const updRelease = UI.button('Release page', () => api.openUpdate(), 'small');
+    updRelease.hidden = true;
+    const updRow = UI.row('GlideDesk', '', [updStatus, updGet, updRelease, updCheck]);
     const updAuto = UI.switch((v) => api.setUpdates({ auto: v }), { label: 'Check for updates automatically' });
 
     const pc = facts('This computer', ['Computer name', 'System', 'Kernel', 'Processor', 'Memory', 'Architecture']);
@@ -86,14 +146,19 @@ UI.tab({
       const u = s.updates;
       if (u) {
         updAuto.set(u.auto);
-        updCheck.disabled = u.checking;
-        updGet.hidden = !u.available;
-        updStatus.textContent = u.checking ? 'Checking…' : u.available ? u.latest + ' is available' : u.checkedAt ? 'Up to date' : '';
-        updRow.setHint(u.error ? 'Couldn’t check: ' + u.error
-          : u.available ? 'You have ' + u.current + '. ' + (u.download ? 'Download ' + u.download.name : 'Opens the release page')
-            : u.noReleases ? 'Version ' + u.current + '. No releases published yet'
-              : 'Version ' + u.current + (u.checkedAt ? ' · checked ' + new Date(u.checkedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''));
+        const st = formatUpdateStatus(u);
+        updStatus.textContent = st.statusText;
+        updRow.setHint(st.hint);
+        updCheck.disabled = st.checkDisabled;
+        updGet.hidden = st.getHidden;
+        updGet.disabled = st.getDisabled;
+        updRelease.hidden = st.releaseHidden;
       }
     };
   },
 });
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { formatUpdateStatus };
+}
