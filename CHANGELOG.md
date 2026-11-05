@@ -5,6 +5,29 @@ All notable changes to GlideDesk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-11-05
+
+GlideDesk 3.1.0 introduces a built-in in-app updater across macOS, Windows, and Linux with progress tracking, package integrity verification, automated installation, and graceful fallback.
+
+### Added
+
+- **In-App Updater with Streamed Progress and SHA-256 Verification:**
+  - Direct streamed downloads to per-user temporary directories without buffering whole DMG/installer binaries in memory.
+  - Real-time download progress updates (%, MB downloaded / total) throttled to 100ms.
+  - Package integrity verification comparing actual payload byte sizes and SHA-256 checksums extracted from published release notes.
+  - Dedicated "Release page" fallback button in the About tab for immediate manual download if network or install errors occur.
+- **Per-OS Automated In-Place Installation:**
+  - **macOS**: Pre-flight `/Applications` write verification, DMG mount, `/Applications/GlideDesk.app` replacement, quarantine flag clearing (`xattr -cr`), ad-hoc re-signing, running-instance termination before relaunch.
+  - **Windows**: Executes NSIS `-setup.exe` with silent flags (`/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS`), passes exit code back, detects non-zero exit codes (such as dismissed UAC), and rejects portable `.exe` packages.
+  - **Linux**: Downloads AppImage directly to `$XDG_DATA_HOME` or `~/.local/bin` (not `/tmp`), marks executable (`chmod +x`), spawns in background, and terminates previous instance handling both `glidedesk` and `GlideDesk.AppImage` process naming.
+
+### Fixed
+
+- **Updater Asset Selection & State Reporting:**
+  - Resolved issue where Windows auto-update could select zero-install portable executables (`GlideDesk-portable-x64.exe`) which ignore silent installer flags.
+  - Fixed UI hanging indefinitely on "Checking...": all update checks and install operations cleanly set `checking = false` and report actionable status messages.
+  - Stripped external shell scraping from install scripts: installers directly consume the Rust-resolved asset URL.
+
 ## [3.0.0] - 2026-11-04
 
 GlideDesk 3.0 is the pure **Tauri v2 + Rust** release. The desktop app runs with no
@@ -46,14 +69,6 @@ and behaves as a proper background/tray application on macOS, Windows, and Linux
   this is `_NET_WM_STATE_SKIP_TASKBAR` (some Wayland compositors may ignore it).
 - **Linux capture health monitoring.** The capture loop stops and downgrades its reported
   status if the X connection is lost, instead of spinning silently.
-- **In-app updater with progress streaming, verification, and OS-native installation.**
-  - Added streamed chunk download with live UI progress (%, MB downloaded / total) to a per-user temporary directory without buffering whole installers in memory.
-  - Added package verification checking expected download size and SHA-256 checksums parsed from GitHub release notes.
-  - Added per-platform automated install plans (`install_plan_for` and `execute_install_plan`):
-    - macOS: Pre-flight `/Applications` write verification, DMG mount, `/Applications/GlideDesk.app` replacement, quarantine flag clearing (`xattr -cr`), ad-hoc re-signing, running-instance termination before relaunch.
-    - Windows: NSIS `-setup.exe` silent execution (`/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS`), UAC elevation detection, and rejection of portable zero-install executables.
-    - Linux: User-directory placement (`$XDG_DATA_HOME` / `~/.local/bin` instead of `/tmp`), executable bit granting (`chmod +x`), process relaunch, and running-instance termination.
-  - Added UI status reporting in the About tab (`downloading`, `verifying`, `installing`, `restarting`, `error`) and a fallback "Release page" button on failure to avoid UI hanging on "Checking...".
 
 ### Changed
 
@@ -70,7 +85,6 @@ and behaves as a proper background/tray application on macOS, Windows, and Linux
 
 ### Fixed
 
-- **Updater installer selection and failure reporting.** Install scripts now use the Rust-selected asset URL instead of re-scraping GitHub; Windows no longer selects `GlideDesk-portable-x64.exe` for silent updates; update check errors and installation failures cleanly reset `checking = false` and report actionable status messages.
 - **Destination contract in unicast file transfer.** Sender and receiver contract aligned on
   stable client ID routing; receiver guard accurately accepts legitimate peer transfer packets.
 - **Linux capability honesty.** Local capture is only reported as running when the
@@ -87,4 +101,5 @@ and behaves as a proper background/tray application on macOS, Windows, and Linux
 - **Transfer integrity.** File packets are unicast to a stable peer id, with chunked,
   resumable, checksum-verified transfer and auth required for explicit targets.
 
+[3.1.0]: https://github.com/glidedesk/GlideDesk/releases/tag/v3.1.0
 [3.0.0]: https://github.com/glidedesk/GlideDesk/releases/tag/v3.0.0
