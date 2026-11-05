@@ -671,6 +671,8 @@ pub struct UpdateDownload {
     pub name: String,
     pub url: String,
     pub size: u64,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -680,6 +682,16 @@ pub struct UpdatesView {
     pub available: bool,
     pub checking: bool,
     pub error: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub progress: f32,
+    #[serde(default, rename = "downloadedBytes")]
+    pub downloaded_bytes: u64,
+    #[serde(default, rename = "totalBytes")]
+    pub total_bytes: u64,
+    #[serde(default, rename = "statusText")]
+    pub status_text: String,
     #[serde(rename = "checkedAt")]
     pub checked_at: u64,
     #[serde(rename = "releaseUrl")]
@@ -708,6 +720,11 @@ impl Default for UpdatesView {
             available: false,
             checking: false,
             error: String::new(),
+            status: String::new(),
+            progress: 0.0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            status_text: String::new(),
             checked_at: 0,
             release_url: "https://github.com/glidedesk/GlideDesk/releases".to_string(),
             release_notes: String::new(),

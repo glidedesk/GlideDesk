@@ -270,7 +270,161 @@ where
         name: a.name.clone(),
         url: a.browser_download_url.clone(),
         size: a.size.unwrap_or(0),
+        sha256: None,
     })
+}
+
+pub fn verify_download(
+    expected_size: u64,
+    actual_size: u64,
+    expected_sha256: Option<&str>,
+    actual_sha256: Option<&str>,
+) -> Result<(), String> {
+    if actual_size == 0 {
+        return Err("Downloaded update file is empty (0 bytes)".to_string());
+    }
+    if expected_size > 0 && actual_size != expected_size {
+        return Err(format!(
+            "Download size mismatch: expected {} bytes, got {} bytes",
+            expected_size, actual_size
+        ));
+    }
+    if let (Some(expected), Some(actual)) = (expected_sha256, actual_sha256) {
+        let expected = expected.trim();
+        let actual = actual.trim();
+        if !expected.is_empty() && !expected.eq_ignore_ascii_case(actual) {
+            return Err(format!(
+                "SHA-256 checksum mismatch: expected {}, got {}",
+                expected, actual
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn find_published_sha256(asset_name: &str, body: Option<&str>) -> Option<String> {
+    if let Some(text) = body {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.contains(asset_name) {
+                for token in line.split_whitespace() {
+                    let clean = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                    if clean.len() == 64 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return Some(clean.to_lowercase());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub async fn download_update_asset(
+    download: &UpdateDownload,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(std::path::PathBuf, String), String> {
+    let client = reqwest::Client::builder()
+        .user_agent("GlideDesk")
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let mut resp = client
+        .get(&download.url)
+        .header("Accept", "application/octet-stream")
+        .send()
+        .await
+        .map_err(|e| format!("Download request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Download server returned HTTP {}", resp.status()));
+    }
+
+    let total_size = resp.content_length().unwrap_or(download.size);
+
+    let temp_dir = std::env::temp_dir().join("glidedesk-updates");
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| format!("Failed to create temporary directory {:?}: {}", temp_dir, e))?;
+    let dest_path = temp_dir.join(&download.name);
+
+    let mut file = tokio::fs::File::create(&dest_path)
+        .await
+        .map_err(|e| format!("Failed to create file at {:?}: {}", dest_path, e))?;
+
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+    let mut hasher = Sha256::new();
+    let mut downloaded: u64 = 0;
+    let mut last_progress_emit = std::time::Instant::now();
+
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("Error while downloading stream: {}", e))?
+    {
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("Failed writing to {:?}: {}", dest_path, e))?;
+        hasher.update(&chunk);
+        downloaded += chunk.len() as u64;
+
+        if last_progress_emit.elapsed().as_millis() >= 100 || (total_size > 0 && downloaded >= total_size) {
+            last_progress_emit = std::time::Instant::now();
+            let pct = if total_size > 0 {
+                ((downloaded as f64 / total_size as f64) * 100.0).min(100.0) as f32
+            } else {
+                0.0
+            };
+            let dl_mb = downloaded as f64 / (1024.0 * 1024.0);
+            let tot_mb = total_size as f64 / (1024.0 * 1024.0);
+            let status_text = if total_size > 0 {
+                format!("Downloading… {:.0}% ({:.1} MB / {:.1} MB)", pct, dl_mb, tot_mb)
+            } else {
+                format!("Downloading… {:.1} MB", dl_mb)
+            };
+
+            {
+                let mut s = state.inner.write();
+                s.updates.status = "downloading".to_string();
+                s.updates.progress = pct;
+                s.updates.downloaded_bytes = downloaded;
+                s.updates.total_bytes = total_size;
+                s.updates.status_text = status_text;
+            }
+            push_state(app, state);
+        }
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("Failed flushing {:?}: {}", dest_path, e))?;
+    drop(file);
+
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+
+    {
+        let mut s = state.inner.write();
+        s.updates.status = "verifying".to_string();
+        s.updates.progress = 100.0;
+        s.updates.downloaded_bytes = downloaded;
+        s.updates.total_bytes = downloaded;
+        s.updates.status_text = "Verifying download…".to_string();
+    }
+    push_state(app, state);
+
+    if let Err(err) = verify_download(
+        download.size,
+        downloaded,
+        download.sha256.as_deref(),
+        Some(&actual_sha256),
+    ) {
+        let _ = tokio::fs::remove_file(&dest_path).await;
+        return Err(err);
+    }
+
+    Ok((dest_path, actual_sha256))
 }
 
 /// The best download for a platform ("macos" | "windows" | "linux"), or None.
@@ -444,9 +598,14 @@ pub async fn check_updates(state: State<'_, AppState>, app: AppHandle) -> Result
 
             s.updates.latest = Some(latest_tag);
             s.updates.release_url = rel.html_url.clone();
-            s.updates.release_notes = rel.body.unwrap_or_default();
+            let body_text = rel.body.unwrap_or_default();
+            s.updates.release_notes = body_text.clone();
             s.updates.published_at = rel.published_at.unwrap_or_default();
-            s.updates.download = pick_asset(&rel.assets);
+            let mut dl = pick_asset(&rel.assets);
+            if let Some(ref mut d) = dl {
+                d.sha256 = find_published_sha256(&d.name, Some(&body_text));
+            }
+            s.updates.download = dl;
             s.updates.available = is_newer;
             s.updates.no_releases = false;
         } else {
@@ -486,17 +645,39 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
             return Err("No update asset available for download".to_string());
         }
     };
-    let explicit_url = download.url;
+    let app_handle = app.clone();
+    let state_inner = (*state).clone();
 
     tauri::async_runtime::spawn(async move {
+        let (downloaded_path, _sha) = match download_update_asset(&download, &app_handle, &state_inner).await {
+            Ok(res) => res,
+            Err(e) => {
+                log::error!("[Updater] Download failed: {}", e);
+                let mut s = state_inner.inner.write();
+                s.updates.checking = false;
+                s.updates.status = "error".to_string();
+                s.updates.error = e;
+                drop(s);
+                push_state(&app_handle, &state_inner);
+                return;
+            }
+        };
+
+        {
+            let mut s = state_inner.inner.write();
+            s.updates.status = "installing".to_string();
+            s.updates.status_text = "Installing update…".to_string();
+        }
+        push_state(&app_handle, &state_inner);
+
+        let file_path_str = downloaded_path.to_string_lossy().to_string();
+
         #[cfg(target_os = "macos")]
         {
             let script = format!(r#"
-                DOWNLOAD_URL="{}"
+                DMG_PATH="{}"
                 TMP_DIR="$(mktemp -d)"
-                DMG_PATH="${{TMP_DIR}}/update.dmg"
                 MOUNT_POINT="${{TMP_DIR}}/mount"
-                curl -fSL "${{DOWNLOAD_URL}}" -o "${{DMG_PATH}}"
                 mkdir -p "${{MOUNT_POINT}}"
                 hdiutil attach "${{DMG_PATH}}" -mountpoint "${{MOUNT_POINT}}" -nobrowse -quiet
                 if [ -d "${{MOUNT_POINT}}/GlideDesk.app" ]; then
@@ -506,37 +687,35 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
                     codesign --force --deep --sign - --identifier "com.glidedesk.desktop" "/Applications/GlideDesk.app" 2>/dev/null || true
                     hdiutil detach "${{MOUNT_POINT}}" -quiet || true
                     rm -rf "${{TMP_DIR}}"
-                    # Quit the running instance first, then relaunch the freshly
-                    # installed bundle. (Previously this opened the new app and
-                    # then pkill'd it, so the update appeared to do nothing.)
+                    rm -f "${{DMG_PATH}}"
                     pkill -ix "glidedesk" || true
                     sleep 1
                     open -a "/Applications/GlideDesk.app"
                 fi
-            "#, explicit_url);
+            "#, file_path_str);
             let _ = std::process::Command::new("bash").arg("-c").arg(script).spawn();
         }
 
         #[cfg(target_os = "windows")]
         {
             let script = format!(r#"
-                $downloadUrl = "{}"
-                $tmpPath = "$env:TEMP\GlideDesk-update.exe"
-                Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpPath
-                Start-Process -FilePath $tmpPath -ArgumentList "/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS"
-            "#, explicit_url);
+                $installerPath = "{}"
+                Start-Process -FilePath $installerPath -ArgumentList "/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS"
+            "#, file_path_str);
             let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).spawn();
         }
 
         #[cfg(target_os = "linux")]
         {
             let script = format!(r#"
-                DOWNLOAD_URL="{}"
-                curl -fSL "${{DOWNLOAD_URL}}" -o "/tmp/GlideDesk.AppImage"
-                chmod +x "/tmp/GlideDesk.AppImage"
-                /tmp/GlideDesk.AppImage &
+                SRC_PATH="{}"
+                TARGET_DIR="${{XDG_DATA_HOME:-$HOME/.local/bin}}"
+                mkdir -p "${{TARGET_DIR}}"
+                cp -f "${{SRC_PATH}}" "${{TARGET_DIR}}/GlideDesk.AppImage"
+                chmod +x "${{TARGET_DIR}}/GlideDesk.AppImage"
+                "${{TARGET_DIR}}/GlideDesk.AppImage" &
                 pkill -ix "glidedesk" || true
-            "#, explicit_url);
+            "#, file_path_str);
             let _ = std::process::Command::new("bash").arg("-c").arg(script).spawn();
         }
     });
@@ -1360,6 +1539,50 @@ mod tests {
             pick_asset_for("linux", &deb_only).unwrap().name,
             "GlideDesk_1.1.2_amd64.deb"
         );
+    }
+
+    #[test]
+    fn test_verify_download() {
+        let expected_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let actual_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+        // Successful match with size + hash
+        assert!(verify_download(100, 100, Some(expected_hash), Some(actual_hash)).is_ok());
+
+        // Successful match with size only (no expected hash)
+        assert!(verify_download(100, 100, None, Some(actual_hash)).is_ok());
+
+        // Successful match when expected size is 0 (dynamic/unknown content length)
+        assert!(verify_download(0, 50, None, Some(actual_hash)).is_ok());
+
+        // Error: 0 bytes downloaded
+        let err_empty = verify_download(100, 0, None, None);
+        assert!(err_empty.is_err());
+        assert!(err_empty.unwrap_err().contains("empty"));
+
+        // Error: size mismatch
+        let err_size = verify_download(100, 99, None, None);
+        assert!(err_size.is_err());
+        assert!(err_size.unwrap_err().contains("size mismatch"));
+
+        // Error: hash mismatch
+        let wrong_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let err_hash = verify_download(100, 100, Some(expected_hash), Some(wrong_hash));
+        assert!(err_hash.is_err());
+        assert!(err_hash.unwrap_err().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn test_find_published_sha256() {
+        let body = "Release notes\nSHA256 checksums:\nGlideDesk_3.0.0_universal.dmg: 33f31ad383c76166cbc730129426750c3213efff06fd760c8ee6601cacf0eb26\n";
+        let found = find_published_sha256("GlideDesk_3.0.0_universal.dmg", Some(body));
+        assert_eq!(
+            found.as_deref(),
+            Some("33f31ad383c76166cbc730129426750c3213efff06fd760c8ee6601cacf0eb26")
+        );
+
+        assert!(find_published_sha256("other.dmg", Some(body)).is_none());
+        assert!(find_published_sha256("GlideDesk_3.0.0_universal.dmg", None).is_none());
     }
 
     #[test]
