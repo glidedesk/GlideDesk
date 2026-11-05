@@ -5,6 +5,7 @@ use crate::network::NetworkManager;
 #[allow(unused_imports)]
 pub use crate::network::{ClientInfo, resolve_file_dest};
 use crate::state::{AppState, FullState, UpdateDownload};
+use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 use base64::Engine;
@@ -464,6 +465,221 @@ fn pick_asset(assets: &[GithubAsset]) -> Option<UpdateDownload> {
     pick_asset_for(std::env::consts::OS, assets)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallPlan {
+    pub platform: String,
+    pub installer_path: PathBuf,
+    pub target_path: PathBuf,
+    pub program: String,
+    pub args: Vec<String>,
+    pub script: String,
+}
+
+pub fn install_plan_for(
+    platform: &str,
+    file_path: &Path,
+    target_dir: Option<&Path>,
+) -> Result<InstallPlan, String> {
+    let file_str = file_path.to_string_lossy();
+    let file_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let ext = file_path.extension().and_then(|s| s.to_str()).unwrap_or("");
+
+    match platform {
+        "macos" | "darwin" => {
+            if ext != "dmg" {
+                return Err(format!("Expected a .dmg installer file on macOS, got: {}", file_name));
+            }
+            let target = target_dir
+                .map(|d| d.join("GlideDesk.app"))
+                .unwrap_or_else(|| PathBuf::from("/Applications/GlideDesk.app"));
+            let target_str = target.to_string_lossy();
+
+            let script = format!(
+                r#"TARGET_APP="{target}"
+TARGET_DIR="$(dirname "${{TARGET_APP}}")"
+if [ ! -w "${{TARGET_DIR}}" ]; then
+    echo "Cannot write to ${{TARGET_DIR}} — please move GlideDesk to /Applications or check folder permissions" >&2
+    exit 1
+fi
+DMG_PATH="{file}"
+TMP_DIR="$(mktemp -d)"
+MOUNT_POINT="${{TMP_DIR}}/mount"
+mkdir -p "${{MOUNT_POINT}}"
+if ! hdiutil attach "${{DMG_PATH}}" -mountpoint "${{MOUNT_POINT}}" -nobrowse -quiet; then
+    echo "Failed to mount DMG: ${{DMG_PATH}}" >&2
+    rm -rf "${{TMP_DIR}}"
+    exit 1
+fi
+APP_SRC=$(find "${{MOUNT_POINT}}" -maxdepth 2 -name "GlideDesk.app" -print -quit)
+if [ -z "${{APP_SRC}}" ] || [ ! -d "${{APP_SRC}}" ]; then
+    echo "GlideDesk.app not found in DMG" >&2
+    hdiutil detach "${{MOUNT_POINT}}" -quiet || true
+    rm -rf "${{TMP_DIR}}"
+    exit 1
+fi
+rm -rf "${{TARGET_APP}}"
+cp -R "${{APP_SRC}}" "${{TARGET_APP}}"
+xattr -cr "${{TARGET_APP}}" || true
+codesign --force --deep --sign - --identifier "com.glidedesk.desktop" "${{TARGET_APP}}" 2>/dev/null || true
+hdiutil detach "${{MOUNT_POINT}}" -quiet || true
+rm -rf "${{TMP_DIR}}"
+rm -f "${{DMG_PATH}}"
+pkill -ix "glidedesk" || true
+sleep 1
+open -a "${{TARGET_APP}}"
+"#,
+                target = target_str,
+                file = file_str
+            );
+
+            Ok(InstallPlan {
+                platform: "macos".to_string(),
+                installer_path: file_path.to_path_buf(),
+                target_path: target,
+                program: "bash".to_string(),
+                args: vec!["-c".to_string(), script.clone()],
+                script,
+            })
+        }
+        "windows" => {
+            if file_name.to_lowercase().contains("portable") {
+                return Err(format!(
+                    "Portable executable cannot be installed automatically; please use the installer setup package: {}",
+                    file_name
+                ));
+            }
+            if ext != "exe" && ext != "msi" {
+                return Err(format!("Expected .exe or .msi installer on Windows, got: {}", file_name));
+            }
+            let target = target_dir
+                .map(|d| d.join("GlideDesk"))
+                .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\GlideDesk"));
+
+            let script = format!(
+                r#"$installerPath = "{file}"
+$proc = Start-Process -FilePath $installerPath -ArgumentList "/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS" -Wait -PassThru
+if ($proc.ExitCode -ne 0) {{
+    Write-Error "Installer failed with exit code $($proc.ExitCode)"
+    exit $proc.ExitCode
+}}
+"#,
+                file = file_str
+            );
+
+            Ok(InstallPlan {
+                platform: "windows".to_string(),
+                installer_path: file_path.to_path_buf(),
+                target_path: target,
+                program: "powershell".to_string(),
+                args: vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    script.clone(),
+                ],
+                script,
+            })
+        }
+        "linux" => {
+            if ext != "AppImage" && ext != "deb" {
+                return Err(format!("Expected .AppImage or .deb on Linux, got: {}", file_name));
+            }
+            let target = target_dir
+                .map(|d| d.join("GlideDesk.AppImage"))
+                .unwrap_or_else(|| PathBuf::from("~/.local/bin/GlideDesk.AppImage"));
+            let target_str = target.to_string_lossy();
+
+            let script = format!(
+                r#"SRC_PATH="{file}"
+TARGET_FILE="{target}"
+TARGET_DIR="$(dirname "${{TARGET_FILE}}")"
+mkdir -p "${{TARGET_DIR}}"
+if [ ! -w "${{TARGET_DIR}}" ]; then
+    echo "Cannot write to target directory: ${{TARGET_DIR}}" >&2
+    exit 1
+fi
+cp -f "${{SRC_PATH}}" "${{TARGET_FILE}}"
+chmod +x "${{TARGET_FILE}}"
+rm -f "${{SRC_PATH}}"
+"${{TARGET_FILE}}" &
+sleep 0.5
+pkill -ix "glidedesk" || pkill -f "GlideDesk.AppImage" || true
+"#,
+                target = target_str,
+                file = file_str
+            );
+
+            Ok(InstallPlan {
+                platform: "linux".to_string(),
+                installer_path: file_path.to_path_buf(),
+                target_path: target,
+                program: "bash".to_string(),
+                args: vec!["-c".to_string(), script.clone()],
+                script,
+            })
+        }
+        other => Err(format!("Unsupported platform for auto-update: {}", other)),
+    }
+}
+
+pub fn execute_install_plan(plan: &InstallPlan) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let target_dir = plan.target_path.parent().unwrap_or_else(|| Path::new("/Applications"));
+        let test_file = target_dir.join(format!(".glidedesk_perm_check_{}", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&test_file) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(test_file);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err("Cannot write to /Applications — please move GlideDesk to /Applications or check folder permissions".to_string());
+            }
+            Err(_) => {}
+        }
+
+        let mut cmd = std::process::Command::new(&plan.program);
+        cmd.args(&plan.args);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        cmd.spawn().map_err(|e| format!("Failed to spawn updater script: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = std::process::Command::new(&plan.program);
+        cmd.args(&plan.args);
+        cmd.spawn().map_err(|e| format!("Failed to launch Windows installer: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = std::process::Command::new(&plan.program);
+        cmd.args(&plan.args);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        cmd.spawn().map_err(|e| format!("Failed to launch Linux updater: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err(format!("Auto-update execution not supported on {}", plan.platform))
+    }
+}
+
+fn resolve_linux_target_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/bin")))
+}
+
 fn parse_version(v: &str) -> Option<(Vec<u64>, String)> {
     let clean = v.trim().trim_start_matches('v');
     let mut parts = clean.splitn(2, '-');
@@ -656,7 +872,39 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
                 let mut s = state_inner.inner.write();
                 s.updates.checking = false;
                 s.updates.status = "error".to_string();
-                s.updates.error = e;
+                s.updates.error = e.clone();
+                s.updates.status_text = format!("Update failed: {}", e);
+                drop(s);
+                push_state(&app_handle, &state_inner);
+                return;
+            }
+        };
+
+        let current_platform = if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "linux") {
+            "linux"
+        } else {
+            "unknown"
+        };
+
+        let target_dir = if cfg!(target_os = "linux") {
+            resolve_linux_target_dir()
+        } else {
+            None
+        };
+
+        let plan = match install_plan_for(current_platform, &downloaded_path, target_dir.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("[Updater] Failed to generate install plan: {}", e);
+                let mut s = state_inner.inner.write();
+                s.updates.checking = false;
+                s.updates.status = "error".to_string();
+                s.updates.error = e.clone();
+                s.updates.status_text = format!("Update failed: {}", e);
                 drop(s);
                 push_state(&app_handle, &state_inner);
                 return;
@@ -670,53 +918,25 @@ pub async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Resul
         }
         push_state(&app_handle, &state_inner);
 
-        let file_path_str = downloaded_path.to_string_lossy().to_string();
-
-        #[cfg(target_os = "macos")]
-        {
-            let script = format!(r#"
-                DMG_PATH="{}"
-                TMP_DIR="$(mktemp -d)"
-                MOUNT_POINT="${{TMP_DIR}}/mount"
-                mkdir -p "${{MOUNT_POINT}}"
-                hdiutil attach "${{DMG_PATH}}" -mountpoint "${{MOUNT_POINT}}" -nobrowse -quiet
-                if [ -d "${{MOUNT_POINT}}/GlideDesk.app" ]; then
-                    rm -rf "/Applications/GlideDesk.app"
-                    cp -R "${{MOUNT_POINT}}/GlideDesk.app" "/Applications/GlideDesk.app"
-                    xattr -cr "/Applications/GlideDesk.app"
-                    codesign --force --deep --sign - --identifier "com.glidedesk.desktop" "/Applications/GlideDesk.app" 2>/dev/null || true
-                    hdiutil detach "${{MOUNT_POINT}}" -quiet || true
-                    rm -rf "${{TMP_DIR}}"
-                    rm -f "${{DMG_PATH}}"
-                    pkill -ix "glidedesk" || true
-                    sleep 1
-                    open -a "/Applications/GlideDesk.app"
-                fi
-            "#, file_path_str);
-            let _ = std::process::Command::new("bash").arg("-c").arg(script).spawn();
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let script = format!(r#"
-                $installerPath = "{}"
-                Start-Process -FilePath $installerPath -ArgumentList "/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS"
-            "#, file_path_str);
-            let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).spawn();
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let script = format!(r#"
-                SRC_PATH="{}"
-                TARGET_DIR="${{XDG_DATA_HOME:-$HOME/.local/bin}}"
-                mkdir -p "${{TARGET_DIR}}"
-                cp -f "${{SRC_PATH}}" "${{TARGET_DIR}}/GlideDesk.AppImage"
-                chmod +x "${{TARGET_DIR}}/GlideDesk.AppImage"
-                "${{TARGET_DIR}}/GlideDesk.AppImage" &
-                pkill -ix "glidedesk" || true
-            "#, file_path_str);
-            let _ = std::process::Command::new("bash").arg("-c").arg(script).spawn();
+        match execute_install_plan(&plan) {
+            Ok(()) => {
+                let mut s = state_inner.inner.write();
+                s.updates.checking = false;
+                s.updates.status = "restarting".to_string();
+                s.updates.status_text = "Update installed — restarting".to_string();
+                drop(s);
+                push_state(&app_handle, &state_inner);
+            }
+            Err(e) => {
+                log::error!("[Updater] Install execution failed: {}", e);
+                let mut s = state_inner.inner.write();
+                s.updates.checking = false;
+                s.updates.status = "error".to_string();
+                s.updates.error = e.clone();
+                s.updates.status_text = format!("Update failed: {}", e);
+                drop(s);
+                push_state(&app_handle, &state_inner);
+            }
         }
     });
 
@@ -1672,5 +1892,80 @@ mod tests {
 
         // Only drafts: nothing to offer.
         assert!(pick_candidate(vec![rel("v3.1.0", true, false)]).is_none());
+    }
+
+    #[test]
+    fn test_install_plan_macos() {
+        let dmg = Path::new("/tmp/downloads/GlideDesk-3.0.0.dmg");
+        let plan = install_plan_for("macos", dmg, None).expect("macos install plan");
+        assert_eq!(plan.platform, "macos");
+        assert_eq!(plan.installer_path, dmg);
+        assert_eq!(plan.target_path, PathBuf::from("/Applications/GlideDesk.app"));
+        assert_eq!(plan.program, "bash");
+        assert!(plan.script.contains("hdiutil attach"));
+        assert!(plan.script.contains("/Applications/GlideDesk.app"));
+        assert!(plan.script.contains("xattr -cr"));
+        assert!(plan.script.contains("pkill -ix \"glidedesk\""));
+        assert!(plan.script.contains("open -a"));
+        assert!(plan.script.contains("Cannot write to"));
+
+        // Custom target directory
+        let custom_dir = Path::new("/Users/developer/Applications");
+        let plan_custom = install_plan_for("macos", dmg, Some(custom_dir)).expect("custom macos plan");
+        assert_eq!(plan_custom.target_path, PathBuf::from("/Users/developer/Applications/GlideDesk.app"));
+
+        // Reject non-dmg on macOS
+        let exe = Path::new("/tmp/downloads/GlideDesk-3.0.0.exe");
+        assert!(install_plan_for("macos", exe, None).is_err());
+    }
+
+    #[test]
+    fn test_install_plan_windows() {
+        let setup_exe = Path::new(r"C:\Users\User\AppData\Local\Temp\GlideDesk-3.0.0-setup.exe");
+        let plan = install_plan_for("windows", setup_exe, None).expect("windows install plan");
+        assert_eq!(plan.platform, "windows");
+        assert_eq!(plan.installer_path, setup_exe);
+        assert_eq!(plan.target_path, PathBuf::from(r"C:\Program Files\GlideDesk"));
+        assert_eq!(plan.program, "powershell");
+        assert!(plan.script.contains("Start-Process"));
+        assert!(plan.script.contains("/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS"));
+        assert!(plan.script.contains("$proc.ExitCode"));
+
+        // Rejection of portable executable on Windows
+        let portable = Path::new(r"C:\temp\GlideDesk-portable-x64.exe");
+        let err = install_plan_for("windows", portable, None).unwrap_err();
+        assert!(err.contains("Portable executable cannot be installed automatically"));
+
+        // Reject non-exe/msi
+        let zip = Path::new(r"C:\temp\GlideDesk.zip");
+        assert!(install_plan_for("windows", zip, None).is_err());
+    }
+
+    #[test]
+    fn test_install_plan_linux() {
+        let appimage = Path::new("/tmp/GlideDesk-3.0.0.AppImage");
+        let custom_dir = Path::new("/home/user/.local/bin");
+        let plan = install_plan_for("linux", appimage, Some(custom_dir)).expect("linux install plan");
+        assert_eq!(plan.platform, "linux");
+        assert_eq!(plan.installer_path, appimage);
+        assert_eq!(plan.target_path, PathBuf::from("/home/user/.local/bin/GlideDesk.AppImage"));
+        assert_eq!(plan.program, "bash");
+        assert!(plan.script.contains("chmod +x"));
+        assert!(plan.script.contains("GlideDesk.AppImage"));
+        assert!(plan.script.contains("pkill -ix \"glidedesk\" || pkill -f \"GlideDesk.AppImage\""));
+
+        // Default target directory on Linux
+        let default_plan = install_plan_for("linux", appimage, None).expect("linux default plan");
+        assert_eq!(default_plan.target_path, PathBuf::from("~/.local/bin/GlideDesk.AppImage"));
+
+        // Reject non-AppImage / non-deb
+        let tar = Path::new("/tmp/GlideDesk.tar.gz");
+        assert!(install_plan_for("linux", tar, None).is_err());
+    }
+
+    #[test]
+    fn test_install_plan_unsupported_platform() {
+        let file = Path::new("/tmp/GlideDesk.pkg");
+        assert!(install_plan_for("unsupported_os", file, None).is_err());
     }
 }
