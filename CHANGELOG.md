@@ -46,6 +46,14 @@ and behaves as a proper background/tray application on macOS, Windows, and Linux
   this is `_NET_WM_STATE_SKIP_TASKBAR` (some Wayland compositors may ignore it).
 - **Linux capture health monitoring.** The capture loop stops and downgrades its reported
   status if the X connection is lost, instead of spinning silently.
+- **In-app updater with progress streaming, verification, and OS-native installation.**
+  - Added streamed chunk download with live UI progress (%, MB downloaded / total) to a per-user temporary directory without buffering whole installers in memory.
+  - Added package verification checking expected download size and SHA-256 checksums parsed from GitHub release notes.
+  - Added per-platform automated install plans (`install_plan_for` and `execute_install_plan`):
+    - macOS: Pre-flight `/Applications` write verification, DMG mount, `/Applications/GlideDesk.app` replacement, quarantine flag clearing (`xattr -cr`), ad-hoc re-signing, running-instance termination before relaunch.
+    - Windows: NSIS `-setup.exe` silent execution (`/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS`), UAC elevation detection, and rejection of portable zero-install executables.
+    - Linux: User-directory placement (`$XDG_DATA_HOME` / `~/.local/bin` instead of `/tmp`), executable bit granting (`chmod +x`), process relaunch, and running-instance termination.
+  - Added UI status reporting in the About tab (`downloading`, `verifying`, `installing`, `restarting`, `error`) and a fallback "Release page" button on failure to avoid UI hanging on "Checking...".
 
 ### Changed
 
@@ -62,6 +70,7 @@ and behaves as a proper background/tray application on macOS, Windows, and Linux
 
 ### Fixed
 
+- **Updater installer selection and failure reporting.** Install scripts now use the Rust-selected asset URL instead of re-scraping GitHub; Windows no longer selects `GlideDesk-portable-x64.exe` for silent updates; update check errors and installation failures cleanly reset `checking = false` and report actionable status messages.
 - **Destination contract in unicast file transfer.** Sender and receiver contract aligned on
   stable client ID routing; receiver guard accurately accepts legitimate peer transfer packets.
 - **Linux capability honesty.** Local capture is only reported as running when the

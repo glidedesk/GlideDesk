@@ -242,6 +242,15 @@ The Android companion application has been intentionally de-scoped in the v3.0.0
     - **macOS**: Switches to `ActivationPolicy::Accessory` (menu-bar agent without Dock icon or Cmd+Tab entry).
     - **Windows**: Excludes the window from the Taskbar and Alt+Tab switcher (`set_skip_taskbar(true)`).
     - **Linux**: Sets the window manager `_NET_WM_STATE_SKIP_TASKBAR` hint (note: some Wayland compositors ignore client-side taskbar hints; standard X11 window managers respect it).
+- **Built-in In-App Updater & Seamless Upgrades**:
+  - **In-App Flow**: Detects newer versions via GitHub Releases API, streams downloads directly to a per-user temporary directory with visible progress (% and MB) without memory buffering, verifies payload size and SHA-256 integrity, and performs automated in-place installation and relaunch.
+  - **Identical UI & Safe Fallback**: The About tab never gets stuck in "Checking...". It cleanly presents downloading, verifying, installing, and restarting states. On any network, checksum, or filesystem error, a dedicated "Release page" fallback button appears to open the release in your browser.
+  - **Platform-Specific Installation**:
+    - **macOS**: Mounts the DMG, checks write access to `/Applications` (failing fast with instructions to move GlideDesk to `/Applications` if non-writable), replaces `/Applications/GlideDesk.app`, strips quarantine flags (`xattr -cr`), ad-hoc re-signs, terminates the running instance, and relaunches the upgraded application.
+      > *Gatekeeper Note*: Community builds are ad-hoc signed and not Apple-notarized; first launch after install may require approval under *System Settings → Privacy & Security → Open Anyway*.
+    - **Windows**: Executes the NSIS `-setup.exe` installer with `/SILENT /FORCECLOSEAPPLICATIONS /RESTARTAPPLICATIONS`, prompting UAC elevation if required. The zero-install portable executable (`GlideDesk-portable-x64.exe`) is rejected from auto-install since it ignores silent installer flags.
+    - **Linux**: Installs `.AppImage` directly to a user-writable, executable directory (`$XDG_DATA_HOME` or `~/.local/bin`, avoiding `/tmp` which may be mounted `noexec`), marks it executable (`chmod +x`), spawns the new version, and terminates the running instance (handling both `glidedesk` and `GlideDesk.AppImage` process names).
+  - *Observation Status*: Automated installer scripts and plan generation are covered by unit tests across all three platforms; actual live binary replacement on physical hardware is verified on macOS development hosts and *awaiting real-device observation* on bare-metal Windows and Linux targets.
 
 ---
 
