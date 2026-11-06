@@ -75,7 +75,7 @@ class PhoneHub extends EventEmitter {
       const missing = (x) => (x && Array.isArray(x.missing) ? x.missing.filter((s) => typeof s === 'string').slice(0, 8) : []);
       const bt = m.bt && typeof m.bt === 'object' ? m.bt : {};
       // The phone couldn't drop its old pairing and asks its person to forget this computer: this
-      // computer forgets the phone too, or it keeps keys the phone no longer has and TwinDesk's own
+      // computer forgets the phone too, or it keeps keys the phone no longer has and GlideDesk's own
       // Bluetooth LE link to it fails on them.
       if (bt.forget && !(this.state && this.state.bt.forget) && this.audio && this.audio.unpair) this.audio.unpair();
       this.state = {
@@ -360,14 +360,14 @@ class PhoneHub extends EventEmitter {
   }
 
   // This computer's Bluetooth settings, where the person pairs the phone over classic Bluetooth (the
-  // kind a call goes through; TwinDesk doesn't pair them itself); the phone is looked for until it's there.
+  // kind a call goes through; GlideDesk doesn't pair them itself); the phone is looked for until it's there.
   pairHere() {
     if (this.btSettings) this.btSettings();
     this.watchPair();
   }
 
   // Forget: both forget each other, over classic Bluetooth and LE, so neither keeps keys the other
-  // dropped (TwinDesk's own LE link fails on those), and this computer's Bluetooth settings open to
+  // dropped (GlideDesk's own LE link fails on those), and this computer's Bluetooth settings open to
   // pair them again. The phone hears first: over Bluetooth LE the session may go with the pairing.
   forget(fromPhone) {
     if (!this.audio) return;

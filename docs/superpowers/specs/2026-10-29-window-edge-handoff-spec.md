@@ -2,7 +2,7 @@
 
 **Feature:** Single-Window Cross-Computer Drag & Projection  
 **Target:** GlideDesk (Tauri v2 + Rust)  
-**Reference Issue:** InukaAsith/TwinDesk#18  
+**Reference Issue:** window-edge handoff (internal tracking)  
 **Author:** GlideDesk Engineering Team  
 **Date:** 2026-10-29  
 

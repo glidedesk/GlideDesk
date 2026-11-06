@@ -2,7 +2,7 @@
 // When Bluetooth runs (every computer; the phone's Ble.kt / BleServe.kt the same): it's only for a
 // device that can't be reached any other way.
 //   look — advertising and scanning, to find a device or be found: only while there's no session at
-//          all, and TwinDesk's window is open (not from the tray or the menu bar alone) or a session
+//          all, and GlideDesk's window is open (not from the tray or the menu bar alone) or a session
 //          ended a moment ago (RECONNECT_MS: a dropout, Wi-Fi Direct ending, comes back by itself).
 //          Not in the first SETTLE_MS after a session ends: one that comes straight back over its
 //          link needs none of it, and switching advertising and scanning on and off with each
@@ -20,7 +20,7 @@ const SETTLE_MS = 8000; // … from this long after it ended
 const FALLBACK_MS = 5000; // the session on Wi-Fi this long, answering: its Bluetooth fallback goes
 const ANSWERING_MS = 3000; // … answering = something came through it this recently
 
-// enabled() -> the Bluetooth switch (General); windowOpen() -> TwinDesk's window is showing;
+// enabled() -> the Bluetooth switch (General); windowOpen() -> GlideDesk's window is showing;
 // current() -> the session {transport: 'ble'|'ip', …} or null; ended: when the last session ended (ms).
 function blePolicy({ enabled, windowOpen, current, ended = 0 }) {
   const on = !!enabled();

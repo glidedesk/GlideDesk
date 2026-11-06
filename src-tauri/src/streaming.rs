@@ -1,5 +1,5 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Streaming and Screen Sharing Configuration Module (TwinDesk Phase 4.1 Parity)
+// Streaming and Screen Sharing Configuration Module (GlideDesk Phase 4.1 Parity)
 
 use tauri::{AppHandle, State, Manager};
 use crate::state::AppState;

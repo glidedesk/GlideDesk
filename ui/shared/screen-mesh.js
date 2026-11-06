@@ -1,5 +1,5 @@
 ﻿// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// TwinDesk screen mesh: the display model of a computer, where a new virtual display goes, and which
+// GlideDesk screen mesh: the display model of a computer, where a new virtual display goes, and which
 // screen each connected device gets (docs/screen-mesh.md). Pure JavaScript, no I/O, the same file on
 // every platform that runs JS.
 //

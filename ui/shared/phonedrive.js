@@ -3,7 +3,7 @@
 // phone's storage (/sdcard), reached through adb, which the system mounts as a network volume
 // (Finder on a Mac, a drive letter through Windows' WebClient, GVFS on Linux). Through the USB
 // cable when the phone allows USB debugging, else through wireless debugging (the network) while
-// the phone is connected to TwinDesk; it switches between the two as the cable comes and goes,
+// the phone is connected to GlideDesk; it switches between the two as the cable comes and goes,
 // and unmounts when neither is there.
 //
 // Nothing runs until Mount is clicked on the Mount page: no polling, no adb, no server. It looks

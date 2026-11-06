@@ -1,7 +1,7 @@
 ﻿// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 // What the Calls, Messages, Photos and Files pages share, on the Mac, PC and Linux alike (they use only
 // the UI kit's common API): the line at the top of each saying what's missing — the phone, its
-// permission (Allow asks on the phone, only now), the right TwinDesk on it — and the phone's
+// permission (Allow asks on the phone, only now), the right GlideDesk on it — and the phone's
 // answers (phonehub.js passes them on as 'hub' messages) by type.
 'use strict';
 

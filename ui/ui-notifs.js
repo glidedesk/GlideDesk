@@ -1,6 +1,6 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 // Notifications tab: the other computer's notifications here as Windows
-// toasts from TwinDesk, and this PC's on the other computer (read from Windows' notification
+// toasts from GlideDesk, and this PC's on the other computer (read from Windows' notification
 // database by the helper). Two direction cards, then the apps seen sending.
 'use strict';
 

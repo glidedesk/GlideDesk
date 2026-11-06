@@ -331,7 +331,7 @@ const UI = {
 
   // Small device glyph by OS: 'mac' | 'win' | 'linux' | 'android'.
   osClass: (os) => (os === 'mac' ? 'mac' : os === 'android' ? 'phone' : 'pc'),
-  // An app's icon in a grid: its own, else (none, or it doesn't load) TwinDesk's.
+  // An app's icon in a grid: its own, else (none, or it doesn't load) GlideDesk's.
   appIcon(src) {
     const fallback = 'assets/sidebar-icon@2x.png';
     const img = UI.el('img', { src: src || fallback, alt: '' });

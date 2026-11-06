@@ -1,5 +1,5 @@
 ﻿// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// TwinDesk shared layout: where every device sits relative to the others, one map for the whole
+// GlideDesk shared layout: where every device sits relative to the others, one map for the whole
 // mesh (docs/mesh.md, "Shared layout"). Pure JavaScript, no I/O, the same file on every platform
 // that runs JS; the Kotlin app keeps a copy of the rules it needs.
 //

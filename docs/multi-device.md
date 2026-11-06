@@ -4,7 +4,7 @@ GlideDesk is designed with full multi-device mesh continuity: many computers
 and phones connected at once, one clipboard and one notification pool for all of them, each screen edge
 leading to a different device, a phone and a computer connected at the same time.
 
-It is off by default, and while it is off TwinDesk runs exactly the code it runs today.
+It is off by default, and while it is off GlideDesk runs exactly the code it runs today.
 
 ## Rules
 
@@ -15,7 +15,7 @@ It is off by default, and while it is off TwinDesk runs exactly the code it runs
    `main.js`, `multi.js`, and the Multi-device tab.
 2. **One switch, read at start.** Multi-device tab › *Use several devices at once* › Turn on / Turn off.
    It is `on` in `multi.json`; `main.js` reads it once, right after it sets the user data folder, and with
-   it on hands over to `mesh/main.js`. Changing it restarts TwinDesk (as Quit, then start again), so the
+   it on hands over to `mesh/main.js`. Changing it restarts GlideDesk (as Quit, then start again), so the
    two never run side by side; the window comes back on the Multi-device tab.
 3. **Everything for several devices is in the Multi-device tab**: the layout of the screens (which device
    each edge leads to) and *Join every device automatically*. The device list is the sidebar's. The

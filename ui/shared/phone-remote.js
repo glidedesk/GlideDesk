@@ -89,7 +89,7 @@ class PhoneRemote {
 
   // Why it isn't taken now, '' when it is.
   get why() {
-    if (!this.allow) return 'Remote is off on this computer: turn it on in TwinDesk’s Remote page there';
+    if (!this.allow) return 'Remote is off on this computer: turn it on in GlideDesk’s Remote page there';
     if (!this.atHome()) return 'This computer’s mouse is on another device now (Cursor): bring it back first';
     return '';
   }

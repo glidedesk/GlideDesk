@@ -48,7 +48,7 @@ License: MIT
 ViGEmClient
 -----------
 Source:  https://github.com/nefarius/ViGEmClient (commit b66d02d57e32cc8595369c53418b843e958649b4)
-Used in: windows-helper/pad/vigem/ (unchanged), built into twindesk-pad.exe (Remote › Real gamepad)
+Used in: windows-helper/pad/vigem/ (unchanged), built into the gamepad helper (Remote › Real gamepad)
 License: MIT (see windows-helper/pad/vigem/LICENSE)
 
   Copyright (c) 2017-2023 Nefarius Software Solutions e.U. and Contributors

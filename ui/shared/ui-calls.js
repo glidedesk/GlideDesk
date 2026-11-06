@@ -136,7 +136,7 @@ UI.tab({
     const soundCard = UI.card('Sound', [audioRow, statusRow]);
 
     // Setting it up: the person pairs the two in the systems' own Bluetooth settings, over classic
-    // Bluetooth (what a call goes through); TwinDesk doesn't pair them itself, only says how, and
+    // Bluetooth (what a call goes through); GlideDesk doesn't pair them itself, only says how, and
     // connects once they are. Forget at the bottom: both forget each other, classic and LE.
     const settingsBtn = UI.button('Open Bluetooth settings', () => api.hub({ do: 'audio', a: 'settings' }), 'small primary');
     const step1 = UI.row('', '');

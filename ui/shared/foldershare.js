@@ -3,7 +3,7 @@
 // phone). Made by phonehub.js while a phone is connected; on USB, Wi-Fi or Wi-Fi Direct, never
 // through Bluetooth: there the phone says it shares one (share.offer {on: false, wifi}), and Open
 // moves the session onto Wi-Fi Direct first (wifi(true), netlink.js), kept up while it's mounted.
-//   - The phone's folder here: the phone serves the folder chosen in TwinDesk there over WebDAV
+//   - The phone's folder here: the phone serves the folder chosen in GlideDesk there over WebDAV
 //     with TLS (share.offer {on, port, secret, name, cert}: its certificate comes through the
 //     session, so it's pinned) and this computer mounts it as the Mount page mounts the phone
 //     (Finder, a drive letter, GVFS: phonedrive.js's mounter) through a proxy on 127.0.0.1 here,

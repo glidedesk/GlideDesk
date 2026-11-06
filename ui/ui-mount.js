@@ -1,5 +1,5 @@
 ﻿// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Mount tab: the phone's storage as a drive in Explorer (phonedrive.js). Off, TwinDesk doesn't look
+// Mount tab: the phone's storage as a drive in Explorer (phonedrive.js). Off, GlideDesk doesn't look
 // for the phone or touch its files at all; on, only Mount does, and only while it's mounted.
 // Port of mac/ui-mount.js.
 'use strict';

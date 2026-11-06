@@ -1,5 +1,5 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Device Control (devctl), Overview Settings, and HUD Display Module (TwinDesk Phase 4.3 Parity)
+// Device Control (devctl), Overview Settings, and HUD Display Module (GlideDesk Phase 4.3 Parity)
 
 use tauri::{AppHandle, Emitter, Manager, State};
 use crate::state::AppState;

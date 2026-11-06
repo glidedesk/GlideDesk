@@ -278,7 +278,7 @@
       MEDIA_THUMB: 'media.thumb', // computer->phone {ids}: these next (the ones still waiting are dropped) | phone->computer {id, data}
       MEDIA_VIEW: 'media.view', // computer->phone {id} | phone->computer {id, data}: a big preview
       MEDIA_SAVE: 'media.save', // computer->phone {ids}: send these files here (they come as file.offer, drop 'send')
-      // Files: the phone's storage, through TwinDesk on it with All files access (no ADB). Paths are
+      // Files: the phone's storage, through GlideDesk on it with All files access (no ADB). Paths are
       // relative to the phone's shared storage ('' its top, 'DCIM/Camera'), never '..'.
       FS_LIST: 'fs.list', // computer->phone {path, hidden?} | phone->computer {path, items: [{name, dir, size, at, n? (a folder's items)}], free, total, error?}
       FS_DO: 'fs.do', // computer->phone {a: 'mkdir'|'rename'|'delete', path, name? (mkdir, rename: the new name), paths? (delete), ref}

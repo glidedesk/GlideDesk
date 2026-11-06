@@ -1,7 +1,7 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 // The computer's mouse and keyboard on a phone without wireless debugging (the session through
 // Bluetooth, or adb not set up): the same calls phone-bridge.js makes on scrcpy's control channel,
-// sent as phone.in messages that TwinDesk on the phone applies itself (its Accessibility service:
+// sent as phone.in messages that GlideDesk on the phone applies itself (its Accessibility service:
 // taps, drags, scrolls, typing, Back/Home/Recents). The pointer is drawn as always (phone.pointer).
 // A drag is replayed as one gesture when the button comes up (Accessibility can't hold a touch
 // open across messages); moves while a button is down are thinned to keep Bluetooth light.

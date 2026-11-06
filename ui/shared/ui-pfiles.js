@@ -1,5 +1,5 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Phone Files page (Mac, PC and Linux): the phone's storage, folder by folder, through TwinDesk on
+// Phone Files page (Mac, PC and Linux): the phone's storage, folder by folder, through GlideDesk on
 // the phone with All files access (Hub.kt, FsBrowse.kt there), so no ADB: Mount is the drive in the
 // file manager, through ADB. Open a folder, Save files and folders here (into Downloads, as Send
 // does), Upload into the folder that's open (or drop files on it), New folder, Rename, Delete.

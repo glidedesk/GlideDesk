@@ -1,7 +1,7 @@
 ﻿// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 // An introduction to a feature, on its page in place of the settings: a picture of its own, animated, in
 // the colours of its sidebar icon, its name, what it does, and Dismiss, which shows the settings. On a page
-// with a switch at the top it's there while that's off, and Dismiss holds until TwinDesk starts again; on
+// with a switch at the top it's there while that's off, and Dismiss holds until GlideDesk starts again; on
 // one without (Files, Terminal, Mount) it's there until dismissed, which is remembered. Every desktop app;
 // shared/mesh-intro.js draws devices with device().
 //   FeatureArt.FREE                -> tab ids that work without a connected device; on the others (and Overview's

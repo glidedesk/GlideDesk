@@ -1,7 +1,7 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 // Terminal tab: shells both ways as two direction cards, with any computer. The other computer →
 // here: it opens a shell here (Windows' OpenSSH Server, sshd.js). Here → the other computer: a
-// shell there (terminal.js), also as `ssh twindesk` in any terminal.
+// shell there (terminal.js), also as `ssh glidedesk` in any terminal.
 'use strict';
 
 UI.tab({

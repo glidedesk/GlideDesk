@@ -3,7 +3,7 @@
 Status: design for the mesh work (see the pull request that adds it). Written to be implemented in
 slices, each with tests, without changing what a two-device setup does today.
 
-In TwinDesk the mesh runs only with Multi-device switched on, beside the one-to-one code and not in
+In GlideDesk the mesh runs only with Multi-device switched on, beside the one-to-one code and not in
 place of it: see [multi-device.md](multi-device.md). The Windows files named below (`hub.js`,
 `server.js`, `kvm.js`, …) are the ones in `windows/mesh/`.
 

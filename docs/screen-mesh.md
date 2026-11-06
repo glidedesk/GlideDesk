@@ -71,4 +71,4 @@ the Mac gets display 2, the phone gets a new virtual display, a tablet gets noth
 
 More than one virtual display per computer (needs one adapter per display), the phone as a monitor,
 editing the arrangement from the phone, drag-to-reposition of an existing display's real position
-(the OS owns real displays; only virtual ones are placed by TwinDesk).
+(the OS owns real displays; only virtual ones are placed by GlideDesk).
