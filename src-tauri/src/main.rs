@@ -15,6 +15,7 @@ mod inputmethod;
 #[allow(dead_code)] // Public API; callers arrive with the layout UI wiring.
 mod kvm_geom;
 mod pairsync;
+mod fastfile;
 mod media;
 mod network;
 mod pairlimit;

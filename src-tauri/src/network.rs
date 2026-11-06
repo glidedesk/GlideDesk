@@ -302,6 +302,8 @@ pub struct WireMessage {
     pub port: Option<u16>,
     #[serde(default)]
     pub role: Option<String>,
+    #[serde(default)]
+    pub fx: Option<i32>,           // Fast file transfer capability (fx2)
 
     // Mesh Pooling Stamps (Pool)
     #[serde(default)]
@@ -454,6 +456,7 @@ impl Default for WireMessage {
             os: None,
             port: None,
             role: None,
+            fx: None,
             o: None,
             s: None,
             d: None,
