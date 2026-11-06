@@ -1623,6 +1623,10 @@ impl MeshServer {
             "k.kd" | "remote.kd" => {
                 if let Some(vk) = pkt.vk {
                     let shortcut = crate::kvm::NativeInputInjector::ctrl_or_meta_held();
+                    // Only typing keys carry `ch`; an arrow key must not end an input method.
+                    if pkt.ch.is_some() {
+                        crate::inputmethod::incoming(pkt.im.as_deref(), shortcut);
+                    }
                     let mapped = crate::keylayout::resolve(
                         vk as u16,
                         pkt.ch.as_deref(),

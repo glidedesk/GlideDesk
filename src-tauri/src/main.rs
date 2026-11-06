@@ -11,6 +11,7 @@ mod applog;
 mod commands;
 mod kvm;
 mod keylayout;
+mod inputmethod;
 mod media;
 mod network;
 mod pairlimit;

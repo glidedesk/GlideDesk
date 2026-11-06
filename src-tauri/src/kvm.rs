@@ -1104,6 +1104,7 @@ impl NativeInputInjector {
 
     pub fn release_all_keys() {
         crate::keylayout::reset();
+        crate::inputmethod::reset();
         let keys_to_release: Vec<u16> = {
             let mut guard = HELD_KEYS.lock();
             if let Some(ref mut set) = *guard {
@@ -2597,13 +2598,20 @@ pub mod hook_engine {
 
                         let vk = keycodes::macos_keycode_to_windows_vk(keycode);
                         // `ch`: what this key types on our layout, so shortcuts land on
-                        // the right key on the other computer.
+                        // the right key on the other computer. `im`: the input method we
+                        // are typing with, so the other side composes with its own.
                         let ch = if is_down { mac_event_char(event, vk as u16) } else { None };
+                        let im = if is_down && ch.is_some() {
+                            crate::inputmethod::current()
+                        } else {
+                            None
+                        };
                         let key_msg = WireMessage {
                             t: if is_down { "k.kd".to_string() } else { "k.ku".to_string() },
                             v: Some(1),
                             vk: Some(vk),
                             ch: ch.map(|c| c.to_string()),
+                            im,
                             ..Default::default()
                         };
                         net.send_packet_sync(key_msg);
