@@ -5,6 +5,24 @@ All notable changes to GlideDesk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-11-06
+
+GlideDesk 3.2.0 delivers full core feature parity across Rust/Tauri v2, implementing all six core KVM/mesh migration modules, fast file transfer (`fx2`), two-way settings synchronization (`pairsync`), and modern Nix build support.
+
+### Added
+
+- **Core Ported Modules (Rust / Tauri v2):**
+  - **`applog`**: Per-OS log directory (`glidedesk.log` with 5MB × 3 rotation, `crash.log`, panic hook, and env_logger TeeWriter integration). Periodic link statistics (`[link]`) sampling every 30s reporting RTT p50/p95, moves/s, and queued bytes.
+  - **`pairlimit`**: Pairing time limits (8s connecting, 15s starting, 60s waiting) across wired/BLE connections, protocol version mismatch guidance, and expiration state machine.
+  - **`kvm-moves`**: Pointer-motion coalescing with 64 KiB outbound backlog limits, 20ms maximum wait, and 2ms retry flushing.
+  - **`keylayout`**: Shortcut resolution across keyboard layouts using US mapping tables, `ch` character tagging on macOS, and modifier tracking.
+  - **`inputmethod`**: Cross-computer input method (IME) language synchronization (Fcitx 5 / IBus on Linux, TIS on macOS, HKL/IME on Windows) so typing keys compose seamlessly with the receiver's IME.
+  - **`kvm-geom`**: Multi-monitor crossing geometry calculation, touching edge stretches, placement computation, fractional exit/entry points, mapped offsets (`map_offset`), and boundary snapping.
+- **Settings & Transfer Enhancements:**
+  - **`pairsync`**: Two-way settings synchronization state machine keeping shared features (clipboard, notifications, audio, terminal, file drops, kvm) in sync across connected peers.
+  - **`fastfile` (`fx2`)**: High-performance direct HTTP streaming over the session port (`/glidedesk/fx/`) with parallelism, chunking, and streaming SHA-256 integrity verification.
+  - **Nix Build Integration**: Updated `flake.nix` for building the Tauri v2 + Rust app using `cargo-tauri`, WebKitGTK 4.1, GTK3, and soup3.
+
 ## [3.1.0] - 2026-11-05
 
 GlideDesk 3.1.0 introduces a built-in in-app updater across macOS, Windows, and Linux with progress tracking, package integrity verification, automated installation, and graceful fallback.
