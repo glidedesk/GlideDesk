@@ -105,11 +105,13 @@ pub fn opposite_direction(side: &str) -> &'static str {
 }
 
 #[tauri::command]
-pub fn set_layout(side: String, state: State<'_, AppState>, network: State<'_, NetworkManager>, app: AppHandle) -> Result<(), String> {
+pub fn set_layout(side: String, along: Option<f64>, state: State<'_, AppState>, network: State<'_, NetworkManager>, app: AppHandle) -> Result<(), String> {
     let opp = opposite_direction(&side);
+    let along_val = along.unwrap_or(0.0);
     {
         let mut s = state.inner.write();
         s.layout.side = side.clone();
+        s.layout.along = along_val;
         s.kvm.pc_side = Some(opp.to_string());
     }
     push_state(&app, &state);

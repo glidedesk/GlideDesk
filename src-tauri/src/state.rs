@@ -45,6 +45,8 @@ pub struct PeerInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutState {
     pub side: String, // "right" | "left" | "top" | "bottom"
+    #[serde(default)]
+    pub along: f64,   // offset along the side (points), 0 = starts aligned
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +70,7 @@ impl Default for LayoutState {
     fn default() -> Self {
         Self {
             side: "right".to_string(),
+            along: 0.0,
         }
     }
 }
@@ -1628,7 +1631,7 @@ mod tests {
         let json = serde_json::to_string(&snap).expect("serialize FullState");
 
         // Verify key structural elements expected by JS frontend
-        assert!(json.contains("\"layout\":{\"side\":\"right\"}"));
+        assert!(json.contains("\"layout\":{\"side\":\"right\",\"along\":0.0}"));
         assert!(json.contains("\"pcSide\":\"left\""));
         assert!(json.contains("\"beDriven\":true"));
         assert!(json.contains("\"driveOther\":true"));
