@@ -211,6 +211,12 @@ pub mod macos_ffi {
         pub fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
         pub fn CGEventGetFlags(event: CGEventRef) -> u64;
         pub fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+        pub fn CGEventKeyboardGetUnicodeString(
+            event: CGEventRef,
+            max_string_length: u64,
+            actual_string_length: *mut u64,
+            unicode_string: *mut u16,
+        );
         pub fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> CGError;
 
         pub fn CGGetActiveDisplayList(
@@ -1078,6 +1084,18 @@ impl NativeInputInjector {
         Self::platform_key_event(vk, is_down, extended);
     }
 
+    /// True while Ctrl or Cmd (Meta) is held on this computer.
+    pub fn ctrl_or_meta_held() -> bool {
+        HELD_KEYS
+            .lock()
+            .as_ref()
+            .map(|set| {
+                set.iter()
+                    .any(|vk| matches!(*vk, 0x11 | 0x5B | 0x5C | 0xA2 | 0xA3))
+            })
+            .unwrap_or(false)
+    }
+
     pub fn mouse_button(button: MouseButton, is_down: bool) {
         record_injection_timestamp();
         track_button(button, is_down);
@@ -1085,6 +1103,7 @@ impl NativeInputInjector {
     }
 
     pub fn release_all_keys() {
+        crate::keylayout::reset();
         let keys_to_release: Vec<u16> = {
             let mut guard = HELD_KEYS.lock();
             if let Some(ref mut set) = *guard {
@@ -2264,6 +2283,38 @@ pub mod hook_engine {
         });
     }
 
+    /// The character this key event typed, per the OS layout (macOS).
+    #[cfg(target_os = "macos")]
+    fn mac_event_char(event: macos_ffi::CGEventRef, vk: u16) -> Option<char> {
+        let mut buf = [0u16; crate::keylayout::MAX_CHARS];
+        let mut len: u64 = 0;
+        unsafe {
+            macos_ffi::CGEventKeyboardGetUnicodeString(
+                event,
+                buf.len() as u64,
+                &mut len,
+                buf.as_mut_ptr(),
+            );
+        }
+        let n = (len as usize).min(buf.len());
+        if n > 0 {
+            let text = String::from_utf16_lossy(&buf[..n]);
+            if let Some(c) = crate::keylayout::clean_text(&text)
+                .as_deref()
+                .and_then(crate::keylayout::single_char)
+            {
+                return Some(c);
+            }
+        }
+        // No unicode string (some synthetic/system events): fall back to the US table.
+        let shifted = unsafe { macos_ffi::CGEventGetFlags(event) } & macos_ffi::kCGEventFlagMaskShift != 0;
+        if shifted {
+            crate::keylayout::us_shift_char(vk)
+        } else {
+            crate::keylayout::us_char(vk)
+        }
+    }
+
     unsafe extern "C" fn event_tap_callback(
         _proxy: *mut c_void,
         r#type: CGEventType,
@@ -2545,10 +2596,14 @@ pub mod hook_engine {
                         }
 
                         let vk = keycodes::macos_keycode_to_windows_vk(keycode);
+                        // `ch`: what this key types on our layout, so shortcuts land on
+                        // the right key on the other computer.
+                        let ch = if is_down { mac_event_char(event, vk as u16) } else { None };
                         let key_msg = WireMessage {
                             t: if is_down { "k.kd".to_string() } else { "k.ku".to_string() },
                             v: Some(1),
                             vk: Some(vk),
+                            ch: ch.map(|c| c.to_string()),
                             ..Default::default()
                         };
                         net.send_packet_sync(key_msg);

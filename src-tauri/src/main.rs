@@ -7,10 +7,13 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod applog;
 mod commands;
 mod kvm;
+mod keylayout;
 mod media;
 mod network;
+mod pairlimit;
 mod state;
 mod tray;
 mod phone;
@@ -35,7 +38,8 @@ use std::sync::Arc;
 use tauri::Manager;
 
 fn main() {
-    env_logger::init();
+    // Rotating file log + crash log; also keeps stderr when one is attached.
+    applog::init();
 
     // Enter Tauri's Tokio runtime context on the main thread so ambient tokio calls succeed
     let rt_handle = match tauri::async_runtime::handle() {
@@ -57,6 +61,7 @@ fn main() {
         .manage(transport::TransferManager::new())
         .setup(move |app| {
             let handle = app.handle().clone();
+            let sampler_state = setup_state.clone();
             let network = NetworkManager::new(handle.clone(), setup_state);
 
             // 1. Start Async Networking Engine (Phase 2: UDP discovery & WS mesh server)
@@ -70,14 +75,27 @@ fn main() {
             kvm::hook_engine::start_hooks(handle.clone(), state.clone(), network.clone());
 
             // 4. Register NetworkManager in Tauri state
-            app.manage(network);
+            app.manage(network.clone());
 
-            // 5. System tray setup
+            // 5. Link statistics into the log (one line every 30 s while connected)
+            let stats_net = network.clone();
+            applog::start_link_stats(move || {
+                let full = sampler_state.inner.read();
+                if full.link.state != "connected" {
+                    return None;
+                }
+                Some(applog::LinkSample {
+                    rtt: full.link.rtt,
+                    queued: stats_net.queued_bytes(),
+                })
+            });
+
+            // 6. System tray setup
             if let Err(e) = tray::setup_tray(app.handle()) {
                 log::warn!("Could not initialize system tray: {}", e);
             }
 
-            // 6. Window presentation & macOS close/dock behavior
+            // 7. Window presentation & macOS close/dock behavior
             let is_daemon = std::env::args().any(|a| a == "--daemon" || a == "--headless" || a == "--silent");
             if let Some(window) = app.get_webview_window("main") {
                 let win = window.clone();

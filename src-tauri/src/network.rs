@@ -10,6 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -23,6 +24,11 @@ pub const DISCOVERY_PORT: u16 = 47801;
 pub const BEACON_INTERVAL: Duration = Duration::from_millis(2000);
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1000);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(12000);
+
+/// Pointer-motion coalescing.
+const MOTION_BACKLOG_LIMIT: u64 = 64 * 1024;
+const MOTION_MAX_WAIT: Duration = Duration::from_millis(20);
+const MOTION_RETRY_MS: u64 = 2;
 
 pub fn current_os() -> &'static str {
     #[cfg(target_os = "macos")]
@@ -322,6 +328,14 @@ pub struct WireMessage {
     pub code: Option<String>,
     #[serde(default)]
     pub vk: Option<u32>,
+    // Key layout: `ch` is what the key types here, `tx` non-Latin
+    // text, `im` the input method's language. All optional: older peers omit them.
+    #[serde(default)]
+    pub ch: Option<String>,
+    #[serde(default)]
+    pub tx: Option<String>,
+    #[serde(default)]
+    pub im: Option<String>,
     #[serde(default)]
     pub mods: Option<u32>,
     #[serde(default)]
@@ -330,6 +344,8 @@ pub struct WireMessage {
     // Clipboard text & image fields
     #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
     #[serde(default)]
     pub ts: Option<u64>,
     #[serde(default)]
@@ -449,9 +465,13 @@ impl Default for WireMessage {
             k: None,
             code: None,
             vk: None,
+            ch: None,
+            tx: None,
+            im: None,
             mods: None,
             smooth: None,
             text: None,
+            message: None,
             ts: None,
             png: None,
             w: None,
@@ -824,11 +844,11 @@ impl MeshServer {
         let listener = match TcpListener::bind(&addr).await {
             Ok(l) => l,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                log::error!("[MeshServer] TCP port {} is already in use (is TwinDesk or another instance running?).", self.port);
+                log::error!("[MeshServer] TCP port {} is already in use (is GlideDesk or another instance running?).", self.port);
                 let _ = self.app.emit("port-conflict", serde_json::json!({
                     "port": self.port,
                     "protocol": "tcp",
-                    "message": format!("TCP Port {} is already in use (e.g. TwinDesk is active). Please close the conflicting application.", self.port),
+                    "message": format!("TCP Port {} is already in use (e.g. GlideDesk is active). Please close the conflicting application.", self.port),
                 }));
                 return Err(e.into());
             }
@@ -1602,12 +1622,20 @@ impl MeshServer {
             }
             "k.kd" | "remote.kd" => {
                 if let Some(vk) = pkt.vk {
-                    crate::kvm::NativeInputInjector::key_event(vk as u16, true, false);
+                    let shortcut = crate::kvm::NativeInputInjector::ctrl_or_meta_held();
+                    let mapped = crate::keylayout::resolve(
+                        vk as u16,
+                        pkt.ch.as_deref(),
+                        shortcut,
+                        true,
+                    );
+                    crate::kvm::NativeInputInjector::key_event(mapped, true, false);
                 }
             }
             "k.ku" | "remote.ku" => {
                 if let Some(vk) = pkt.vk {
-                    crate::kvm::NativeInputInjector::key_event(vk as u16, false, false);
+                    let mapped = crate::keylayout::resolve(vk as u16, None, false, false);
+                    crate::kvm::NativeInputInjector::key_event(mapped, false, false);
                 }
             }
             "clip" => {
@@ -2076,6 +2104,34 @@ impl MeshServer {
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
             }
+            "version_mismatch" => {
+                // A host said it speaks a different protocol version: say which side to update.
+                let name = state
+                    .inner
+                    .read()
+                    .pairing
+                    .as_ref()
+                    .map(|p| p.mac_name.clone())
+                    .unwrap_or_else(|| peer_addr.to_string());
+                let text = pkt
+                    .message
+                    .clone()
+                    .or_else(|| pkt.text.clone())
+                    .unwrap_or_default();
+                if let Some(reason) = crate::pairlimit::version_message(&text, &name) {
+                    {
+                        let mut s = state.inner.write();
+                        if let Some(p) = s.pairing.as_mut() {
+                            p.phase = "failed".to_string();
+                            p.error = reason;
+                            p.code.clear();
+                            p.allowed = false;
+                        }
+                    }
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
+                }
+            }
             _ => {}
         }
     }
@@ -2083,10 +2139,19 @@ impl MeshServer {
 
 /// Motion coalescer accumulating sub-millisecond mouse deltas during high frequency moves
 /// or backpressure on the network channel.
+///
+/// Moves are summed and sent on the next runtime turn instead of one message per OS event.
+/// While the outbound queue is above `MOTION_BACKLOG_LIMIT`, moves keep summing rather
+/// than queueing stale positions; one goes anyway after `MOTION_MAX_WAIT`. Any non-move
+/// message flushes first, so a click lands where the moves took the pointer.
 #[derive(Debug, Default)]
 pub struct MotionCoalescer {
     pub accum_dx: f64,
     pub accum_dy: f64,
+    /// A flush is already scheduled; further adds join it.
+    scheduled: bool,
+    /// When the first move was held back because the link was backed up.
+    held_since: Option<std::time::Instant>,
 }
 
 impl MotionCoalescer {
@@ -2094,7 +2159,6 @@ impl MotionCoalescer {
         Self::default()
     }
 
-    #[allow(dead_code)]
     pub fn add(&mut self, dx: f64, dy: f64) {
         self.accum_dx += dx;
         self.accum_dy += dy;
@@ -2128,6 +2192,7 @@ pub struct NetworkManager {
     local_id: String,
     local_name: String,
     seq: Arc<Mutex<u64>>,
+    pair_limit_gen: Arc<AtomicU64>,
     pub tls_identity: Arc<crate::transport::tls::LocalTlsIdentity>,
 }
 
@@ -2157,8 +2222,104 @@ impl NetworkManager {
             local_id,
             local_name,
             seq: Arc::new(Mutex::new(chrono::Utc::now().timestamp_millis() as u64)),
+            pair_limit_gen: Arc::new(AtomicU64::new(0)),
             tls_identity,
         }
+    }
+
+    /// Approximate bytes waiting in the outbound queues of every connected session.
+    ///
+    /// Each queued message is counted at a nominal 2 KiB: KVM traffic is small, file
+    /// chunks are the outliers. Precise byte accounting arrives with the kvm-moves port;
+    /// what matters for the `[link]` log line is the trend, not the exact figure.
+    pub fn queued_bytes(&self) -> u64 {
+        let guard = self.active_clients.read();
+        guard
+            .values()
+            .map(|c| {
+                let max = c.tx.max_capacity().min(1 << 20);
+                let free = c.tx.capacity();
+                (max.saturating_sub(free) as u64).saturating_mul(2048)
+            })
+            .sum()
+    }
+
+    /// Put the pairing state into `phase` (guest side) and tell the UI.
+    fn set_pairing_phase(&self, phase: &str, role: &str, name: &str, address: &str) {
+        self.state.set_pairing(Some(crate::state::PairingState {
+            phase: phase.to_string(),
+            role: role.to_string(),
+            mac_name: name.to_string(),
+            os: String::new(),
+            code: String::new(),
+            allowed: false,
+            wired: false,
+            address: address.to_string(),
+            error: String::new(),
+        }));
+        let snap = self.state.snapshot();
+        let _ = self.app.emit("state-change", snap);
+    }
+
+    /// Mark the current pairing failed with a user-facing reason.
+    fn fail_pairing(&self, message: String) {
+        {
+            let mut s = self.state.inner.write();
+            if let Some(p) = s.pairing.as_mut() {
+                p.phase = "failed".to_string();
+                p.error = message;
+                p.code.clear();
+                p.allowed = false;
+            }
+        }
+        let snap = self.state.snapshot();
+        let _ = self.app.emit("state-change", snap);
+    }
+
+    /// Arm the time limit for `phase`, replacing any earlier timer. On expiry the phase
+    /// becomes "failed" with the reason to show, unless the pairing moved on meanwhile.
+    pub fn arm_pair_limit(&self, phase: &str, name: &str, address: &str) {
+        let wired = self
+            .state
+            .inner
+            .read()
+            .pairing
+            .as_ref()
+            .map(|p| p.wired)
+            .unwrap_or(false);
+        let Some(limit) = crate::pairlimit::limit_for(phase, address, wired) else {
+            return;
+        };
+        let generation = self.pair_limit_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let app = self.app.clone();
+        let state = self.state.clone();
+        let gen_arc = Arc::clone(&self.pair_limit_gen);
+        let message = crate::pairlimit::limit_message(phase, name, address);
+        let phase = phase.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(limit)).await;
+            if gen_arc.load(Ordering::SeqCst) != generation {
+                return; // a newer phase replaced this timer
+            }
+            let expired = {
+                let mut s = state.inner.write();
+                match s.pairing.as_mut() {
+                    Some(p) if p.phase == phase => {
+                        p.phase = "failed".to_string();
+                        p.error = message.clone();
+                        p.code.clear();
+                        p.allowed = false;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if expired {
+                log::warn!("[Pairing] phase '{}' timed out", phase);
+                let snap = state.snapshot();
+                let _ = app.emit("state-change", snap);
+            }
+        });
     }
 
     pub fn start(&self) {
@@ -2405,6 +2566,10 @@ impl NetworkManager {
         let clean_addr = target_addr.trim_start_matches("ws://").trim_start_matches("wss://");
         let target_ip = clean_addr.split(':').next().unwrap_or(clean_addr);
 
+        // Guest pairing: bound the dial, and say what to do if nothing answers.
+        self.set_pairing_phase("connecting", "guest", target_ip, target_ip);
+        self.arm_pair_limit("connecting", target_ip, target_ip);
+
         // Drain any existing active client sessions to this peer before starting pairing
         let to_remove: Vec<String> = {
             let guard = self.active_clients.read();
@@ -2434,12 +2599,20 @@ impl NetworkManager {
         };
 
         let allow_plaintext = self.state.inner.read().net.allow_plaintext;
-        let (ws, established_fp) = dial_peer_client(
+        let dial = dial_peer_client(
             target_addr,
             stored_fp.as_deref(),
             target_peer_id.as_deref(),
             allow_plaintext,
-        ).await?;
+        ).await;
+        let (ws, established_fp) = match dial {
+            Ok(v) => v,
+            Err(e) => {
+                let reason = crate::pairlimit::limit_message("connecting", target_ip, target_ip);
+                self.fail_pairing(reason);
+                return Err(e);
+            }
+        };
 
         if let (Some(ref pid), Some(ref fp)) = (&target_peer_id, &established_fp) {
             let _ = self.state.record_peer_fingerprint(pid, fp);
@@ -2507,7 +2680,7 @@ impl NetworkManager {
         self.state.set_pairing(Some(crate::state::PairingState {
             phase: "starting".to_string(),
             role: "guest".to_string(),
-            mac_name: target_name,
+            mac_name: target_name.clone(),
             os: target_os,
             code: String::new(),
             allowed: false,
@@ -2517,6 +2690,8 @@ impl NetworkManager {
         }));
         let snap = self.state.snapshot();
         let _ = self.app.emit("state-change", &snap);
+        // It answered; now bound how long we wait for its half of the code.
+        self.arm_pair_limit("starting", &target_name, target_ip);
 
         let pair_start = WireMessage {
             t: "pair.start".to_string(),
@@ -2744,6 +2919,16 @@ impl NetworkManager {
             }
             let snap = self.state.snapshot();
             let _ = self.app.emit("state-change", &snap);
+            // Bound how long the other user has to press Allow.
+            let (name, address) = self
+                .state
+                .inner
+                .read()
+                .pairing
+                .as_ref()
+                .map(|p| (p.mac_name.clone(), p.address.clone()))
+                .unwrap_or_default();
+            self.arm_pair_limit("waiting", &name, &address);
         }
         Ok(())
     }
@@ -2767,31 +2952,77 @@ impl NetworkManager {
         Ok(())
     }
 
-    /// Fast non-blocking relative motion dispatch with delta coalescing under backpressure.
+    /// Fast non-blocking relative motion dispatch: sum the deltas and send them on the
+    /// next runtime turn, so a burst becomes one message with the total motion.
     pub fn send_motion(&self, dx: f64, dy: f64) {
-        let mut motion = self.motion.lock();
-        motion.add(dx, dy);
-
-        if motion.accum_dx.abs() >= 0.5 || motion.accum_dy.abs() >= 0.5 {
-            let (cdx, cdy) = motion.take();
-            let msg = WireMessage {
-                t: "k.mm".to_string(),
-                v: Some(1),
-                dx: Some(cdx),
-                dy: Some(cdy),
-                ..Default::default()
-            };
-            self.send_packet_sync(msg);
+        crate::applog::note_move(1);
+        let schedule = {
+            let mut motion = self.motion.lock();
+            motion.add(dx, dy);
+            if motion.scheduled {
+                false
+            } else {
+                motion.scheduled = true;
+                true
+            }
+        };
+        if schedule {
+            let this = self.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::task::yield_now().await;
+                this.try_flush_motion();
+            });
         }
+    }
+
+    /// Send the summed motion if the link has room, or after MOTION_MAX_WAIT; while the
+    /// outbound queue is backed up keep summing and look again in MOTION_RETRY_MS.
+    fn try_flush_motion(&self) {
+        if self.queued_bytes() > MOTION_BACKLOG_LIMIT {
+            let retry = {
+                let mut motion = self.motion.lock();
+                if !motion.pending() {
+                    motion.scheduled = false;
+                    return;
+                }
+                let now = std::time::Instant::now();
+                let held = *motion.held_since.get_or_insert(now);
+                if now.duration_since(held) < MOTION_MAX_WAIT {
+                    true
+                } else {
+                    motion.held_since = None;
+                    false
+                }
+            };
+            if retry {
+                let this = self.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(MOTION_RETRY_MS)).await;
+                    this.try_flush_motion();
+                });
+                return;
+            }
+        } else {
+            self.motion.lock().held_since = None;
+        }
+        self.flush_motion_inner();
     }
 
     /// Flushes any pending accumulated motion prior to sending mouse clicks, wheel, or keystrokes.
     pub fn flush_motion(&self) {
-        let mut motion = self.motion.lock();
-        if !motion.pending() {
-            return;
-        }
-        let (cdx, cdy) = motion.take();
+        self.flush_motion_inner();
+    }
+
+    fn flush_motion_inner(&self) {
+        let (cdx, cdy) = {
+            let mut motion = self.motion.lock();
+            motion.scheduled = false;
+            motion.held_since = None;
+            if !motion.pending() {
+                return;
+            }
+            motion.take()
+        };
         let msg = WireMessage {
             t: "k.mm".to_string(),
             v: Some(1),
@@ -2962,6 +3193,24 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn motion_coalescer_sums_then_takes() {
+        let mut m = MotionCoalescer::new();
+        m.add(3.0, -1.0);
+        m.add(2.0, 4.0);
+        assert!(m.pending());
+        assert_eq!(m.take(), (5.0, 3.0));
+        assert!(!m.pending());
+        assert_eq!(m.take(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn motion_coalescer_below_epsilon_is_not_pending() {
+        let mut m = MotionCoalescer::new();
+        m.add(0.0001, -0.0001);
+        assert!(!m.pending());
+    }
 
     #[test]
     fn test_wire_message_roundtrip() {

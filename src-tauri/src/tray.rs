@@ -1,5 +1,5 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Tauri v2 + Rust: Full System Tray & Menu Bar Integration (TwinDesk-equivalent feature set)
+// Tauri v2 + Rust: Full System Tray & Menu Bar Integration (full feature set)
 
 use tauri::{
     image::Image,
@@ -223,15 +223,14 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
             "open_logs" => {
-                if let Ok(dir) = app.path().app_log_dir() {
-                    let _ = std::fs::create_dir_all(&dir);
-                    #[cfg(target_os = "macos")]
-                    let _ = std::process::Command::new("open").arg(&dir).spawn();
-                    #[cfg(target_os = "windows")]
-                    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
-                    #[cfg(target_os = "linux")]
-                    let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
-                }
+                let dir = crate::applog::dir();
+                let _ = std::fs::create_dir_all(&dir);
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&dir).spawn();
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                #[cfg(target_os = "linux")]
+                let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
             }
             "quit" => {
                 app.exit(0);
