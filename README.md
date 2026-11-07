@@ -30,9 +30,9 @@
 
 ---
 
-## 🚀 What's New in v3.1.0
+## 🚀 What's New in v3.2.0
 
-GlideDesk 3.1.0 introduces built-in in-app updating across macOS, Windows, and Linux alongside the pure Tauri v2 + Rust KVM engine:
+GlideDesk 3.2.0 delivers full core feature parity across Rust/Tauri v2, implementing all core KVM/mesh migration modules, fast file transfer (`fx2`), two-way settings synchronization (`pairsync`), and modern Nix build support:
 
 - **Built-in in-app updater** — streams downloads directly with visible progress (%, MB), verifies payload size and SHA-256 integrity against release notes, and safely executes in-place OS installation and relaunch.
 - **Linux input & capture, native and helper-free** — keyboard/mouse injection and X11 capture are implemented directly against the X server with pure-Rust [`x11rb`](https://crates.io/crates/x11rb) (XTest + X11 query/record). The KVM engine carries no runtime dependency on `libxdo` or `libX11`.
@@ -145,7 +145,7 @@ brew install --cask glidedesk
 ```
 
 #### Option 3: Manual Direct Download
-- **Universal Build (Apple Silicon & Intel Macs):** [`GlideDesk_3.1.0_universal.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v3.1.0/GlideDesk_3.1.0_universal.dmg) (21 MB)
+- **Universal Build (Apple Silicon & Intel Macs):** [`GlideDesk_3.2.0_universal.dmg`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk_3.2.0_universal.dmg) (21 MB)
 
 ---
 
@@ -175,8 +175,8 @@ winget install --manifest "https://raw.githubusercontent.com/glidedesk/GlideDesk
 ```
 
 #### Option 3: Manual Direct Download
-- **Standard Installer (`.exe`):** [`GlideDesk_3.1.0_x64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.1.0/GlideDesk_3.1.0_x64-setup.exe)
-- **Portable Standalone (`.exe`, Zero-Install):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.1.0/GlideDesk-portable-x64.exe)
+- **Standard Installer (`.exe`):** [`GlideDesk_3.2.0_x64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk_3.2.0_x64-setup.exe)
+- **Portable Standalone (`.exe`, Zero-Install):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk-portable-x64.exe)
 
 ---
 
@@ -191,14 +191,14 @@ curl -fsSL https://raw.githubusercontent.com/glidedesk/GlideDesk/main/linux/scri
 #### Option 2: Manual Package Download & Terminal Commands
 - **Universal AppImage (Recommended for all Linux distros — Fedora, Arch, openSUSE, Ubuntu, Debian):**
   ```bash
-  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v3.1.0/GlideDesk_3.1.0_amd64.AppImage
-  chmod +x GlideDesk_3.1.0_amd64.AppImage
-  ./GlideDesk_3.1.0_amd64.AppImage
+  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk_3.2.0_amd64.AppImage
+  chmod +x GlideDesk_3.2.0_amd64.AppImage
+  ./GlideDesk_3.2.0_amd64.AppImage
   ```
 - **Debian / Ubuntu / Pop!_OS / Linux Mint (`.deb` Package):**
   ```bash
-  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v3.1.0/GlideDesk_3.1.0_amd64.deb
-  sudo dpkg -i GlideDesk_3.1.0_amd64.deb || sudo apt-get install -f -y
+  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk_3.2.0_amd64.deb
+  sudo dpkg -i GlideDesk_3.2.0_amd64.deb || sudo apt-get install -f -y
   ```
 
 ---
