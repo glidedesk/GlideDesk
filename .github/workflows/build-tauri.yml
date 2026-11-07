@@ -35,14 +35,22 @@ jobs:
             os: 'Windows'
             artifact_name: 'glidedesk-windows'
             rust_targets: ''
+            build_args: '--bundles nsis'
+          - platform: 'windows-11-arm'
+            os: 'Windows-ARM64'
+            artifact_name: 'glidedesk-windows-arm64'
+            rust_targets: ''
+            build_args: '--bundles nsis'
           - platform: 'macos-latest'
             os: 'macOS'
             artifact_name: 'glidedesk-macos'
             rust_targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+            build_args: '--target universal-apple-darwin'
           - platform: 'ubuntu-22.04'
             os: 'Linux'
             artifact_name: 'glidedesk-linux'
             rust_targets: ''
+            build_args: '--bundles deb,rpm,appimage'
 
     runs-on: ${{ matrix.platform }}
 
@@ -77,7 +85,7 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 libasound2-dev libpulse-dev
+          sudo apt-get install -y libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 libasound2-dev libpulse-dev rpm
 
       - name: Install npm dependencies
         run: npm install
@@ -98,27 +106,13 @@ jobs:
           rm -rf src-tauri/target/release/bundle
           rm -rf src-tauri/target/*/release/bundle
 
-      - name: Build Tauri Package (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: npx @tauri-apps/cli build
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ""
-
-      - name: Build Tauri Package (Windows)
-        if: matrix.platform == 'windows-latest'
-        run: npx @tauri-apps/cli build --bundles nsis
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ""
-
-      - name: Build Tauri Package (macOS Universal - Apple Silicon & Intel)
-        if: matrix.platform == 'macos-latest'
-        run: |
-          npx @tauri-apps/cli build --target universal-apple-darwin
+      - name: Build Tauri Package
+        run: npx @tauri-apps/cli build ${{ matrix.build_args }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ""
 
       - name: Upload Test Artifacts (Windows)
-        if: matrix.platform == 'windows-latest'
+        if: startsWith(matrix.platform, 'windows')
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
@@ -149,6 +143,7 @@ jobs:
           path: |
             src-tauri/target/release/glidedesk
             src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
             src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: warn
 
@@ -213,8 +208,9 @@ jobs:
       - name: Prepare Release Assets
         run: |
           mkdir -p release-assets
-          find all-artifacts/ -type f \( -name "*.msi" -o -name "*-setup.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.apk" \) -exec cp {} release-assets/ \;
-          find all-artifacts/ -type f -name "glidedesk.exe" -exec cp {} release-assets/GlideDesk-portable-x64.exe \;
+          find all-artifacts/ -type f \( -name "*.msi" -o -name "*-setup.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" -o -name "*.apk" \) -exec cp {} release-assets/ \;
+          find all-artifacts/ -type f -path "*glidedesk-windows/*" -name "glidedesk.exe" -exec cp {} release-assets/GlideDesk-portable-x64.exe \;
+          find all-artifacts/ -type f -path "*glidedesk-windows-arm64/*" -name "glidedesk.exe" -exec cp {} release-assets/GlideDesk-portable-arm64.exe \;
           echo "=== Gathered Release Assets ==="
           ls -lh release-assets/
 
