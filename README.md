@@ -32,8 +32,11 @@
 
 ## 🚀 What's New in v3.2.0
 
-GlideDesk 3.2.0 delivers full core feature parity across Rust/Tauri v2, implementing all core KVM/mesh migration modules, fast file transfer (`fx2`), two-way settings synchronization (`pairsync`), and modern Nix build support:
+GlideDesk 3.2.0 delivers full core feature parity across Rust/Tauri v2, implementing all core KVM/mesh migration modules, fast file transfer (`fx2`), two-way settings synchronization (`pairsync`), modern Nix build support, and an Android companion:
 
+- **Android companion** — a Kotlin/Compose app (Android 10+) that pairs over the `glidedesk://pair` QR scheme, shares input and files with the desktop over the same `/glidedesk/fx` wire paths, and ships in standard and full flavors.
+- **Native Windows ARM64** — dedicated `arm64` installers and portable builds for Snapdragon X Elite and other Windows on Arm machines.
+- **Linux RPM** — native `.rpm` bundles alongside `.deb` and `.AppImage`, covering Fedora, RHEL, openSUSE, and Rocky.
 - **Built-in in-app updater** — streams downloads directly with visible progress (%, MB), verifies payload size and SHA-256 integrity against release notes, and safely executes in-place OS installation and relaunch.
 - **Linux input & capture, native and helper-free** — keyboard/mouse injection and X11 capture are implemented directly against the X server with pure-Rust [`x11rb`](https://crates.io/crates/x11rb) (XTest + X11 query/record). The KVM engine carries no runtime dependency on `libxdo` or `libX11`.
 - **Background mode on every platform** — closing the window (or launching with `--daemon`) keeps GlideDesk running in the tray. macOS becomes a menu-bar agent (no Dock icon, and no "App Running in Background" notice); Windows and Linux hide from the taskbar/Alt+Tab.

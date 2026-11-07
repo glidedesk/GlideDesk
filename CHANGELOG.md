@@ -22,6 +22,10 @@ GlideDesk 3.2.0 delivers full core feature parity across Rust/Tauri v2, implemen
   - **`pairsync`**: Two-way settings synchronization state machine keeping shared features (clipboard, notifications, audio, terminal, file drops, kvm) in sync across connected peers.
   - **`fastfile` (`fx2`)**: High-performance direct HTTP streaming over the session port (`/glidedesk/fx/`) with parallelism, chunking, and streaming SHA-256 integrity verification.
   - **Nix Build Integration**: Updated `flake.nix` for building the Tauri v2 + Rust app using `cargo-tauri`, WebKitGTK 4.1, GTK3, and soup3.
+- **Packaging & Platforms:**
+  - **Android companion (Kotlin/Compose)**: First-class Android 10+ companion under `android/` (`com.glidedesk.android`), pairing through the desktop's `glidedesk://pair` QR scheme and the same `/glidedesk/fx` wire paths. Ships as `GlideDesk-3.2.0.apk` (standard) and `GlideDesk-3.2.0-full.apk` (notifications, Messages, and Accessibility for mouse/keyboard without ADB).
+  - **Native Windows ARM64**: `windows-11-arm` CI leg producing `GlideDesk_3.2.0_arm64-setup.exe` and `GlideDesk-portable-arm64.exe` for Snapdragon X Elite and other Windows on Arm machines.
+  - **Linux RPM**: `deb`, `rpm`, and `appimage` bundles from the Linux leg, covering Fedora, RHEL, openSUSE, and Rocky in addition to Debian/Ubuntu.
 
 ## [3.1.0] - 2026-11-05
 
