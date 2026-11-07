@@ -175,8 +175,10 @@ winget install --manifest "https://raw.githubusercontent.com/glidedesk/GlideDesk
 ```
 
 #### Option 3: Manual Direct Download
-- **Standard Installer (`.exe`):** [`GlideDesk_3.2.0_x64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk_3.2.0_x64-setup.exe)
-- **Portable Standalone (`.exe`, Zero-Install):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk-portable-x64.exe)
+- **Standard Installer (`.exe`, x64):** [`GlideDesk_3.2.0_x64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk_3.2.0_x64-setup.exe)
+- **Standard Installer (`.exe`, ARM64):** [`GlideDesk_3.2.0_arm64-setup.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk_3.2.0_arm64-setup.exe)
+- **Portable Standalone (`.exe`, Zero-Install, x64):** [`GlideDesk-portable-x64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk-portable-x64.exe)
+- **Portable Standalone (`.exe`, Zero-Install, ARM64):** [`GlideDesk-portable-arm64.exe`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk-portable-arm64.exe)
 
 ---
 
@@ -200,12 +202,31 @@ curl -fsSL https://raw.githubusercontent.com/glidedesk/GlideDesk/main/linux/scri
   curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk_3.2.0_amd64.deb
   sudo dpkg -i GlideDesk_3.2.0_amd64.deb || sudo apt-get install -f -y
   ```
+- **Fedora / RHEL / openSUSE / Rocky (`.rpm` Package):**
+  ```bash
+  curl -fSL -O https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk-3.2.0-1.x86_64.rpm
+  sudo rpm -i GlideDesk-3.2.0-1.x86_64.rpm || sudo dnf install -y GlideDesk-3.2.0-1.x86_64.rpm
+  ```
 
 ---
 
-### 📱 Mobile Companion Status (Future Roadmap)
+### 📱 Android Companion (Android 10+)
 
-The Android companion application has been intentionally de-scoped in the v3.0.0 milestone to focus exclusively on hardening the core desktop Tauri v2 + Rust KVM engine, input injection, and unicast file transfer across macOS, Windows, and Linux. Mobile companion support is planned for a subsequent release once the desktop foundation is verified across all tier-1 OS targets.
+Two builds ship for the Android companion (same application id and signature, so one installs over the other):
+
+| Build | Permissions | Purpose |
+| :--- | :--- | :--- |
+| **Standard** (`GlideDesk-3.2.0.apk`) | None beyond the basics | What most people download. No notification access, SMS, or Accessibility — so Play Protect never blocks it. |
+| **Full** (`GlideDesk-3.2.0-full.apk`) | Notifications, Messages, Accessibility | Installed by the computer over wireless debugging, which Play Protect does not check. Adds phone notifications, Messages, and mouse/keyboard without ADB. |
+
+#### Option 1: Install the Computer-Side Companion
+Open **GlideDesk on your computer → Phone → Install**, which pushes the matching build over wireless debugging.
+
+#### Option 2: Manual APK Sideload
+- **Standard:** [`GlideDesk-3.2.0.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk-3.2.0.apk)
+- **Full:** [`GlideDesk-3.2.0-full.apk`](https://github.com/glidedesk/GlideDesk/releases/download/v3.2.0/GlideDesk-3.2.0-full.apk)
+
+Pair by scanning the QR code shown under **GlideDesk on your computer → Pair with a QR code**, or by typing the 6-digit code.
 
 ---
 
