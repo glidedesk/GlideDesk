@@ -27,6 +27,17 @@ GlideDesk 3.2.0 delivers full core feature parity across Rust/Tauri v2, implemen
   - **Native Windows ARM64**: `windows-11-arm` CI leg producing `GlideDesk_3.2.0_arm64-setup.exe` and `GlideDesk-portable-arm64.exe` for Snapdragon X Elite and other Windows on Arm machines.
   - **Linux RPM**: `deb`, `rpm`, and `appimage` bundles from the Linux leg, covering Fedora, RHEL, openSUSE, and Rocky in addition to Debian/Ubuntu.
 
+### Fixed
+
+- **Single Instance & Startup Control**:
+  - Integrated `tauri-plugin-single-instance` to prevent dual app launches and duplicate macOS menu bar icons.
+  - Prevented `launchctl load` from immediately launching a duplicate instance on macOS when enabling "Run at startup".
+  - Added startup boolean to FullState and AppState with cross-platform detection to persist the toggle state in UI.
+  - Configured initial main window visibility to prevent startup splash flash.
+- **Nearby Peer Discovery**:
+  - Enhanced UDP discovery with socket address and port reuse (`SO_REUSEADDR`/`SO_REUSEPORT`).
+  - Active broadcast probes on refresh and startup, plus beacon logging.
+
 ## [3.1.0] - 2026-11-05
 
 GlideDesk 3.1.0 introduces a built-in in-app updater across macOS, Windows, and Linux with progress tracking, package integrity verification, automated installation, and graceful fallback.
