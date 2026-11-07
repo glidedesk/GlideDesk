@@ -209,8 +209,12 @@ jobs:
         run: |
           mkdir -p release-assets
           find all-artifacts/ -type f \( -name "*.msi" -o -name "*-setup.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" -o -name "*.apk" \) -exec cp {} release-assets/ \;
-          find all-artifacts/ -type f -path "*glidedesk-windows/*" -name "glidedesk.exe" -exec cp {} release-assets/GlideDesk-portable-x64.exe \;
-          find all-artifacts/ -type f -path "*glidedesk-windows-arm64/*" -name "glidedesk.exe" -exec cp {} release-assets/GlideDesk-portable-arm64.exe \;
+          while IFS= read -r f; do
+            case "$f" in
+              *windows-arm64*) cp "$f" release-assets/GlideDesk-portable-arm64.exe ;;
+              *) cp "$f" release-assets/GlideDesk-portable-x64.exe ;;
+            esac
+          done < <(find all-artifacts/ -type f -name "glidedesk.exe")
           echo "=== Gathered Release Assets ==="
           ls -lh release-assets/
 
