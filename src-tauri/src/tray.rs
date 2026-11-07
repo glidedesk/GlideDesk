@@ -116,7 +116,8 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 let app_handle = app.clone();
                 tauri::async_runtime::spawn(async move {
                     let state = app_handle.state::<AppState>();
-                    let _ = crate::commands::refresh_found(state, app_handle.clone());
+                    let network = app_handle.state::<crate::network::NetworkManager>();
+                    let _ = crate::commands::refresh_found(state, network, app_handle.clone()).await;
                 });
             }
             "cursor_sharing" => {

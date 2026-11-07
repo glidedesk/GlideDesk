@@ -57,6 +57,15 @@ fn main() {
     let window_reg = ParkedWindowRegistry::new();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            log::info!("[SingleInstance] Second launch detected; focusing existing window");
+            crate::platform::set_window_visible_policy(app, true);
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .manage(state.clone())
         .manage(window_reg.clone())

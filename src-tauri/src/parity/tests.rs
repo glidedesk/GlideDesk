@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
     use crate::camera::process_vcam_frame;
-    use crate::parity::{generate_launchagent_plist, parse_wifi_toggle, scan_installed_apps, toggle_app_mute};
+    use crate::parity::{generate_launchagent_plist, is_startup_enabled, parse_wifi_toggle, scan_installed_apps, toggle_app_mute};
     use crate::phone::adb::{resolve_resource_path, AdbClient};
     use crate::phone::scrcpy::{self, ControlMessage, StreamHeader};
 
@@ -218,6 +218,9 @@ Timestamp     A/R    Flags  if Domain               Service Type             Ins
         assert!(plist.contains("<string>/Applications/GlideDesk.app/Contents/MacOS/glidedesk</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<true/>"));
+
+        // Verify is_startup_enabled does not panic
+        let _ = is_startup_enabled();
     }
 
     #[test]

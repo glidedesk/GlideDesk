@@ -998,12 +998,17 @@ pub async fn connect_again(network: State<'_, NetworkManager>, state: State<'_, 
 }
 
 #[tauri::command]
-pub fn refresh_found(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+pub async fn refresh_found(
+    state: State<'_, AppState>,
+    network: State<'_, NetworkManager>,
+    app: AppHandle,
+) -> Result<(), String> {
     {
         let mut s = state.inner.write();
         s.found.clear();
     }
     push_state(&app, &state);
+    network.refresh_discovery().await;
     Ok(())
 }
 

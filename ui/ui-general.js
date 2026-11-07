@@ -13,7 +13,8 @@ UI.tab({
   badge: (s) => (s.firewall && s.firewall.ok === false && !s.firewall.checking ? 'warn' : ''),
   build(body) {
     const { el, api } = UI;
-    const startup = UI.switch((v) => api.setStartup(v), { label: 'Start with Windows' });
+    const startup = UI.switch((v) => api.setStartup(v), { label: 'Run at startup' });
+    const startupRow = UI.row('Run at startup', '', [startup]);
     // Received files (shared/received.js): where files sent here and saved from a phone go.
     const recvChange = UI.button('Change…', () => api.chooseReceivedFolder(), 'small');
     const recvReset = UI.button('Downloads', () => api.resetReceivedFolder(), 'small');
@@ -51,7 +52,7 @@ UI.tab({
 
     body.append(
       UI.card('App', [
-        UI.row('Start with Windows', '', [startup]),
+        startupRow,
         UI.row('Show a popup when switching', 'When the mouse and keyboard move between computers', [hudSw]),
         media.el,
         recvRow,
@@ -63,7 +64,11 @@ UI.tab({
 
     return (s) => {
       media.update(s);
-      startup.set(s.startup);
+      const isWin = s.about && s.about.pc && s.about.pc.os && s.about.pc.os.toLowerCase().includes('win');
+      const startLabel = isWin ? 'Start with Windows' : 'Start at login';
+      const labelEl = startupRow.querySelector('.name');
+      if (labelEl) labelEl.textContent = startLabel;
+      startup.set(!!s.startup);
       hudSw.set(s.app.hud);
       const f = s.files || {};
       recvReset.hidden = !f.receivedFolder;

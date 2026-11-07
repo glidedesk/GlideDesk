@@ -1105,6 +1105,8 @@ pub struct FullState {
     pub now_playing: Option<NowPlayingState>,
     #[serde(rename = "peerFingerprints", default)]
     pub peer_fingerprints: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub startup: bool,
 }
 
 #[derive(Clone)]
@@ -1189,6 +1191,7 @@ impl AppState {
             rezume_shelf: RezumeState::default(),
             now_playing: None,
             peer_fingerprints: std::collections::HashMap::new(),
+            startup: crate::parity::is_startup_enabled(),
         };
 
         Self {
@@ -1642,6 +1645,7 @@ mod tests {
         assert_eq!(deserialized.layout.side, "right");
         assert_eq!(deserialized.kvm.pc_side.as_deref(), Some("left"));
         assert_eq!(deserialized.input, "home");
+        assert_eq!(deserialized.startup, snap.startup);
     }
 
     #[test]

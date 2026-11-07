@@ -569,6 +569,22 @@ impl DiscoveryService {
         }
     }
 
+    fn bind_reuse_udp(bind_addr: SocketAddr) -> std::io::Result<UdpSocket> {
+        let domain = match bind_addr {
+            SocketAddr::V4(_) => socket2::Domain::IPV4,
+            SocketAddr::V6(_) => socket2::Domain::IPV6,
+        };
+        let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+        let _ = sock.set_reuse_address(true);
+        #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+        let _ = sock.set_reuse_port(true);
+        let _ = sock.set_broadcast(true);
+        let _ = sock.set_nonblocking(true);
+        sock.bind(&bind_addr.into())?;
+        let std_socket: std::net::UdpSocket = sock.into();
+        UdpSocket::from_std(std_socket)
+    }
+
     pub fn start(self: Arc<Self>) {
         let s1 = Arc::clone(&self);
         tauri::async_runtime::spawn(async move {
@@ -584,19 +600,63 @@ impl DiscoveryService {
         tauri::async_runtime::spawn(async move {
             s3.run_pruner().await;
         });
+
+        let s4 = Arc::clone(&self);
+        tauri::async_runtime::spawn(async move {
+            s4.send_probe().await;
+        });
+    }
+
+    pub async fn send_probe(&self) {
+        let socket = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[Discovery] Broadcaster probe failed to bind: {}", e);
+                return;
+            }
+        };
+        let _ = socket.set_broadcast(true);
+        let broadcast_addr: SocketAddr = "255.255.255.255:47801".parse().unwrap();
+        let probe = WireMessage {
+            t: "probe".to_string(),
+            v: Some(1),
+            id: Some(self.local_id.clone()),
+            name: Some(self.local_name.clone()),
+            os: Some(current_os().to_string()),
+            port: Some(self.port),
+            role: Some("host".to_string()),
+            ..Default::default()
+        };
+        if let Ok(bytes) = serde_json::to_vec(&probe) {
+            log::info!("[Discovery] Broadcasting probe to discover nearby peers...");
+            let _ = socket.send_to(&bytes, broadcast_addr).await;
+            for ip_str in crate::state::local_ip_addresses() {
+                if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                    let octets = ip.octets();
+                    let subnet_bcast = SocketAddr::from(([octets[0], octets[1], octets[2], 255], DISCOVERY_PORT));
+                    let _ = socket.send_to(&bytes, subnet_bcast).await;
+                }
+            }
+        }
     }
 
     async fn run_listener(&self) {
         let bind_addr = SocketAddr::from(([0, 0, 0, 0], DISCOVERY_PORT));
-        let socket = match UdpSocket::bind(bind_addr).await {
+        let socket = match Self::bind_reuse_udp(bind_addr) {
             Ok(s) => s,
             Err(e) => {
-                log::warn!("[Discovery] Failed to bind primary UDP port {}: {}. Trying random port...", DISCOVERY_PORT, e);
-                match UdpSocket::bind("0.0.0.0:0").await {
+                log::warn!("[Discovery] Primary UDP bind with reuse failed on {}: {}. Trying default bind...", DISCOVERY_PORT, e);
+                match UdpSocket::bind(bind_addr).await {
                     Ok(s) => s,
                     Err(e) => {
-                        log::error!("[Discovery] Failed to bind any UDP socket: {}", e);
-                        return;
+                        log::warn!("[Discovery] Failed to bind primary UDP port {}: {}. Trying random port...", DISCOVERY_PORT, e);
+                        match UdpSocket::bind("0.0.0.0:0").await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                log::error!("[Discovery] Failed to bind any UDP socket: {}", e);
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -616,6 +676,7 @@ impl DiscoveryService {
                     match msg.t.as_str() {
                         "beacon" => {
                             if let (Some(id), Some(name)) = (msg.id, msg.name) {
+                                log::info!("[Discovery] Discovered nearby peer '{}' ({}) at {}:{:?}", name, msg.os.as_deref().unwrap_or("unknown"), src_addr.ip(), msg.port);
                                 let peer = PeerInfo {
                                     id,
                                     name,
@@ -633,6 +694,7 @@ impl DiscoveryService {
                         }
                         "probe" => {
                             // Unicast answer to probe
+                            log::info!("[Discovery] Received probe from {:?}; replying with unicast beacon", src_addr);
                             let reply = WireMessage {
                                 t: "beacon".to_string(),
                                 v: Some(1),
@@ -2201,6 +2263,7 @@ pub struct NetworkManager {
     seq: Arc<Mutex<u64>>,
     pair_limit_gen: Arc<AtomicU64>,
     pub tls_identity: Arc<crate::transport::tls::LocalTlsIdentity>,
+    discovery: Arc<RwLock<Option<Arc<DiscoveryService>>>>,
 }
 
 impl NetworkManager {
@@ -2231,6 +2294,7 @@ impl NetworkManager {
             seq: Arc::new(Mutex::new(chrono::Utc::now().timestamp_millis() as u64)),
             pair_limit_gen: Arc::new(AtomicU64::new(0)),
             tls_identity,
+            discovery: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -2341,6 +2405,7 @@ impl NetworkManager {
             local_name.clone(),
             DEFAULT_PORT,
         ));
+        *self.discovery.write() = Some(Arc::clone(&discovery));
         discovery.start();
 
         // 2. Start WebSocket server
@@ -2355,6 +2420,13 @@ impl NetworkManager {
             Arc::clone(&self.tls_identity),
         ));
         server.start();
+    }
+
+    pub async fn refresh_discovery(&self) {
+        let disc = self.discovery.read().clone();
+        if let Some(d) = disc {
+            d.send_probe().await;
+        }
     }
 
     pub async fn connect_to(&self, target_addr: &str) -> Result<(), String> {
@@ -3254,6 +3326,25 @@ mod tests {
         assert!(!tracker.is_stale());
         tracker.record_ping();
         assert!(!tracker.is_stale());
+    }
+
+    #[test]
+    fn test_discovery_probe_message_format() {
+        let probe = WireMessage {
+            t: "probe".to_string(),
+            v: Some(1),
+            id: Some("test-peer".to_string()),
+            name: Some("Test Peer".to_string()),
+            os: Some("macos".to_string()),
+            port: Some(47800),
+            role: Some("host".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&probe).expect("serialize probe");
+        let parsed: WireMessage = serde_json::from_str(&json).expect("deserialize probe");
+        assert_eq!(parsed.t, "probe");
+        assert_eq!(parsed.id.as_deref(), Some("test-peer"));
+        assert_eq!(parsed.port, Some(47800));
     }
 
     #[test]

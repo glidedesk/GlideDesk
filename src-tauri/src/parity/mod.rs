@@ -570,6 +570,37 @@ pub fn generate_launchagent_plist(exe_path: &str) -> String {
     )
 }
 
+pub fn is_startup_enabled() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let plist_path = PathBuf::from(home).join("Library/LaunchAgents/com.glidedesk.desktop.plist");
+            return plist_path.exists();
+        }
+        false
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("reg")
+            .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GlideDesk"])
+            .output();
+        if let Ok(out) = output {
+            return out.status.success();
+        }
+        false
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let desktop_file = PathBuf::from(home).join(".config/autostart/glidedesk.desktop");
+            return desktop_file.exists();
+        }
+        false
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    false
+}
+
 pub fn execute_set_startup(on: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -582,7 +613,9 @@ pub fn execute_set_startup(on: bool) -> Result<(), String> {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let plist_content = generate_launchagent_plist(&exe.to_string_lossy());
             std::fs::write(&plist_path, plist_content).map_err(|e| format!("Failed to write LaunchAgent plist: {}", e))?;
-            let _ = Command::new("launchctl").args(["load", &plist_path.to_string_lossy()]).output();
+            // Intentionally avoid calling `launchctl load` when the app is already running:
+            // with RunAtLoad=true, launchctl load executes the binary immediately, spawning a duplicate instance!
+            // macOS launchd automatically discovers and executes LaunchAgents on user login.
         } else if plist_path.exists() {
             let _ = Command::new("launchctl").args(["unload", &plist_path.to_string_lossy()]).output();
             let _ = std::fs::remove_file(plist_path);
@@ -594,8 +627,9 @@ pub fn execute_set_startup(on: bool) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let exe_str = exe.to_string_lossy();
         if on {
+            let formatted_path = format!("\"{}\"", exe_str);
             let output = Command::new("reg")
-                .args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GlideDesk", "/t", "REG_SZ", "/d", &exe_str, "/f"])
+                .args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GlideDesk", "/t", "REG_SZ", "/d", &formatted_path, "/f"])
                 .output()
                 .map_err(|e| format!("Failed to configure Windows Run registry: {}", e))?;
             if !output.status.success() {
@@ -758,9 +792,15 @@ pub fn cancel_drop(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn set_startup(on: bool) -> Result<(), String> {
+pub fn set_startup(on: bool, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     log::info!("[System] Setting run at startup: {}", on);
-    execute_set_startup(on)
+    execute_set_startup(on)?;
+    {
+        let mut s = state.inner.write();
+        s.startup = on;
+    }
+    push_state(&app, &state);
+    Ok(())
 }
 
 pub fn get_settings_url(kind: &str) -> Option<&'static str> {
