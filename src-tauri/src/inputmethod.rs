@@ -90,6 +90,21 @@ pub fn current() -> Option<String> {
     backend::current()
 }
 
+/// The input method language, readable from any thread.
+///
+/// macOS only lets its text-input services be asked on the main thread — since 27 the
+/// process is trapped when they are asked anywhere else — and the keyboard/mouse hook
+/// runs on a thread of its own, so the answer is cached: [`refresh_cached`] reads it on
+/// the main thread and this only copies what was read.
+pub fn current_cached() -> Option<String> {
+    backend::current_cached()
+}
+
+/// Re-read the cached input method. Must be called on the main thread.
+pub fn refresh_cached() {
+    backend::refresh_cached()
+}
+
 /// Whether this computer can switch input methods at all.
 #[allow(dead_code)]
 pub fn available() -> bool {
@@ -203,6 +218,12 @@ mod backend {
         }
         lang_of(&engine).map(str::to_string)
     }
+
+    pub fn current_cached() -> Option<String> {
+        current()
+    }
+
+    pub fn refresh_cached() {}
 
     /// `('ibus', 'name')` entries in GNOME's input sources.
     fn parse_gnome_sources(text: &str) -> Vec<String> {
@@ -508,6 +529,18 @@ mod backend {
         }
     }
 
+    /// What [`refresh_cached`] last read. The hook thread only ever sees this copy.
+    pub(super) static CACHED: Mutex<Option<String>> = Mutex::new(None);
+
+    pub fn current_cached() -> Option<String> {
+        CACHED.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn refresh_cached() {
+        let value = current();
+        *CACHED.lock().unwrap_or_else(|e| e.into_inner()) = value;
+    }
+
     static BEFORE: Mutex<Option<String>> = Mutex::new(None);
 
     pub fn select(lang: &str) -> bool {
@@ -706,6 +739,12 @@ mod backend {
         }
     }
 
+    pub fn current_cached() -> Option<String> {
+        current()
+    }
+
+    pub fn refresh_cached() {}
+
     static BEFORE: Mutex<Option<usize>> = Mutex::new(None);
 
     pub fn select(lang: &str) -> bool {
@@ -778,6 +817,12 @@ mod backend {
         None
     }
 
+    pub fn current_cached() -> Option<String> {
+        None
+    }
+
+    pub fn refresh_cached() {}
+
     pub fn select(_lang: &str) -> bool {
         false
     }
@@ -788,6 +833,16 @@ mod backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The keyboard hook runs on its own thread and may only read the cached answer;
+    /// asking the text-input services there traps the process on macOS 27.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cached_input_method_is_readable_off_the_main_thread() {
+        *backend::CACHED.lock().unwrap_or_else(|e| e.into_inner()) = Some("ja".to_string());
+        let seen = std::thread::spawn(current_cached).join().unwrap();
+        assert_eq!(seen.as_deref(), Some("ja"));
+    }
 
     #[test]
     fn engine_languages_match_their_family() {

@@ -1049,6 +1049,10 @@ impl MeshServer {
                 Some(pkt) = out_rx.recv() => {
                     if let Ok(json) = serde_json::to_string(&pkt) {
                         if write.send(Message::Text(json)).await.is_err() {
+                            log::warn!(
+                                "[Net] server session {} write failed ({})",
+                                peer_addr, pkt.t
+                            );
                             break;
                         }
                     }
@@ -1254,6 +1258,24 @@ impl MeshServer {
 
             let snap = state.snapshot();
             let _ = app.emit("state-change", &snap);
+        }
+    }
+
+    /// Inject one key on this computer. Kept in one place because macOS has to run both the
+    /// input-method switch and the key itself on the main thread, in that order.
+    fn inject_key(vk: u16, down: bool, ch: Option<String>, im: Option<String>) {
+        log::debug!("[KVM] inject key vk={} down={}", vk, down);
+        if down {
+            let shortcut = crate::kvm::NativeInputInjector::ctrl_or_meta_held();
+            // Only typing keys carry `ch`; an arrow key must not end an input method.
+            if ch.is_some() {
+                crate::inputmethod::incoming(im.as_deref(), shortcut);
+            }
+            let mapped = crate::keylayout::resolve(vk, ch.as_deref(), shortcut, true);
+            crate::kvm::NativeInputInjector::key_event(mapped, true, false);
+        } else {
+            let mapped = crate::keylayout::resolve(vk, None, false, false);
+            crate::kvm::NativeInputInjector::key_event(mapped, false, false);
         }
     }
 
@@ -1709,24 +1731,22 @@ impl MeshServer {
             }
             "k.kd" | "remote.kd" => {
                 if let Some(vk) = pkt.vk {
-                    let shortcut = crate::kvm::NativeInputInjector::ctrl_or_meta_held();
-                    // Only typing keys carry `ch`; an arrow key must not end an input method.
-                    if pkt.ch.is_some() {
-                        crate::inputmethod::incoming(pkt.im.as_deref(), shortcut);
+                    let ch = pkt.ch.clone();
+                    let im = pkt.im.clone();
+                    // The input-method switch and the key it applies to both run on the
+                    // main thread, in that order: macOS requires it for its text-input
+                    // services, and on Windows the worker threads are not guaranteed to
+                    // be attached to the interactive desktop, which makes SendInput fail.
+                    {
+                        let _ = app.run_on_main_thread(move || {
+                            Self::inject_key(vk as u16, true, ch, im)
+                        });
                     }
-                    let mapped = crate::keylayout::resolve(
-                        vk as u16,
-                        pkt.ch.as_deref(),
-                        shortcut,
-                        true,
-                    );
-                    crate::kvm::NativeInputInjector::key_event(mapped, true, false);
                 }
             }
             "k.ku" | "remote.ku" => {
                 if let Some(vk) = pkt.vk {
-                    let mapped = crate::keylayout::resolve(vk as u16, None, false, false);
-                    crate::kvm::NativeInputInjector::key_event(mapped, false, false);
+                    let _ = app.run_on_main_thread(move || Self::inject_key(vk as u16, false, None, None));
                 }
             }
             "clip" => {
@@ -2543,6 +2563,7 @@ impl NetworkManager {
         let client_tx = out_tx.clone();
 
         tauri::async_runtime::spawn(async move {
+            log::debug!("[Net] client session {} started", cur_id);
             let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
             let mut tracker = HeartbeatTracker::new();
 
@@ -2633,6 +2654,7 @@ impl NetworkManager {
                 }
             }
 
+            log::debug!("[Net] pair/client session {} ended", cur_id);
             let recorded_peer_id = pid_holder.read().clone();
             {
                 let mut guard = clients_lock.write();
@@ -2832,6 +2854,7 @@ impl NetworkManager {
             let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
             let mut tracker = HeartbeatTracker::new();
 
+            log::debug!("[Net] pair session {} started", cur_id);
             loop {
                 tokio::select! {
                     _ = heartbeat.tick() => {
@@ -2852,6 +2875,10 @@ impl NetworkManager {
                     Some(pkt) = out_rx.recv() => {
                         if let Ok(json) = serde_json::to_string(&pkt) {
                             if write.send(Message::Text(json)).await.is_err() {
+                                log::warn!(
+                                    "[Net] pair session {} write failed ({})",
+                                    cur_id, pkt.t
+                                );
                                 break;
                             }
                         }
@@ -2919,6 +2946,7 @@ impl NetworkManager {
                 }
             }
 
+            log::debug!("[Net] pair session {} ended", cur_id);
             let recorded_peer_id = pid_holder.read().clone();
             {
                 let mut guard = clients_lock.write();
@@ -3172,21 +3200,39 @@ impl NetworkManager {
                 | "files.batch" | "files.chunk" | "files.done" | "files.ack" | "files.cancel"
         );
 
-        let guard = self.active_clients.read();
-        for client in guard.values() {
-            let pid = client.peer_id.read().clone();
-            let matches_dest = match &target_dests {
-                Some(dests) => dests.iter().any(|d| {
-                    d == &client.id
-                        || pid.as_deref() == Some(d.as_str())
-                        || d == &client.peer_addr.ip().to_string()
-                }),
-                None => true,
-            };
+        let mut sent = 0usize;
+        let mut dropped = 0usize;
+        let mut skipped = 0usize;
+        {
+            let guard = self.active_clients.read();
+            for client in guard.values() {
+                let pid = client.peer_id.read().clone();
+                let matches_dest = match &target_dests {
+                    Some(dests) => dests.iter().any(|d| {
+                        d == &client.id
+                            || pid.as_deref() == Some(d.as_str())
+                            || d == &client.peer_addr.ip().to_string()
+                    }),
+                    None => true,
+                };
 
-            if matches_dest && (!is_sensitive || *client.authenticated.read()) {
-                let _ = client.tx.try_send(pkt.clone());
+                if matches_dest && (!is_sensitive || *client.authenticated.read()) {
+                    match client.tx.try_send(pkt.clone()) {
+                        Ok(_) => sent += 1,
+                        Err(_) => dropped += 1,
+                    }
+                } else {
+                    skipped += 1;
+                }
             }
+        }
+        if (dropped > 0 || skipped > 0)
+            && (pkt.t.starts_with("k.") || pkt.t.starts_with("remote."))
+        {
+            log::debug!(
+                "[KVM] send {} -> sent={} dropped={} skipped={}",
+                pkt.t, sent, dropped, skipped
+            );
         }
     }
 

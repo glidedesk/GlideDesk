@@ -1176,6 +1176,14 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn recenter_cursor(vx: i32, vy: i32, vw: i32, vh: i32) {
+        main_thread_input::run(move || {
+            record_injection_timestamp();
+            Self::recenter_cursor_now(vx, vy, vw, vh)
+        });
+    }
+
+#[cfg(windows)]
+    fn recenter_cursor_now(vx: i32, vy: i32, vw: i32, vh: i32) {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.warp(vx + vw / 2, vy + vh / 2);
@@ -1183,7 +1191,9 @@ impl NativeInputInjector {
         }
         use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
         unsafe {
-            let _ = SetCursorPos(vx + vw / 2, vy + vh / 2);
+            if let Err(e) = SetCursorPos(vx + vw / 2, vy + vh / 2) {
+                log::warn!("[KVM] SetCursorPos failed: {} {}", e, Self::desktop_probe());
+            }
         }
     }
 
@@ -1227,25 +1237,11 @@ impl NativeInputInjector {
     }
     #[cfg(windows)]
     pub fn sync_input_desktop() {
-        use windows::Win32::System::Threading::GetCurrentThreadId;
-        use windows::Win32::System::StationsAndDesktops::{
-            CloseDesktop, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop,
-            DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
-        };
-
-        unsafe {
-            // DESKTOP_READOBJECTS (0x0001) | DESKTOP_WRITEOBJECTS (0x0080) | DESKTOP_SWITCHDESKTOP (0x0100)
-            let access = DESKTOP_ACCESS_FLAGS(0x0001 | 0x0080 | 0x0100);
-            if let Ok(input_desktop) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, access) {
-                let cur_thread = GetCurrentThreadId();
-                if let Ok(current_desktop) = GetThreadDesktop(cur_thread) {
-                    if current_desktop != input_desktop {
-                        let _ = SetThreadDesktop(input_desktop);
-                    }
-                }
-                let _ = CloseDesktop(input_desktop);
-            }
-        }
+        // Synthetic input is marshalled onto the main thread (see `main_thread_input`),
+        // which is already attached to the interactive desktop. Re-assigning the desktop
+        // there is neither possible nor necessary: SetThreadDesktop fails for a thread
+        // that owns windows, and the handle comparison below would never match because
+        // every call returns a fresh handle.
     }
 
     #[allow(dead_code)]
@@ -1254,6 +1250,14 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn move_cursor_relative(dx: i32, dy: i32) {
+        main_thread_input::run(move || {
+            record_injection_timestamp();
+            Self::move_cursor_relative_now(dx, dy)
+        });
+    }
+
+#[cfg(windows)]
+    fn move_cursor_relative_now(dx: i32, dy: i32) {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.move_relative(dx, dy);
@@ -1279,7 +1283,13 @@ impl NativeInputInjector {
         };
 
         unsafe {
-            let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+            let sent = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+            if sent != 1 {
+                log::warn!(
+                    "[KVM] SendInput mouse move failed: dx={} dy={} sent={} err={} {}",
+                    dx, dy, sent, std::io::Error::last_os_error(), Self::desktop_probe()
+                );
+            }
         }
     }
 
@@ -1290,6 +1300,7 @@ impl NativeInputInjector {
             let _ = backend.move_relative(dx, dy);
             return;
         }
+        hook_engine::prompt_for_accessibility_once();
         use macos_ffi::*;
         unsafe {
             let dummy = CGEventCreate(std::ptr::null_mut());
@@ -1339,6 +1350,14 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn platform_mouse_button(button: MouseButton, is_down: bool) {
+        main_thread_input::run(move || {
+            record_injection_timestamp();
+            Self::platform_mouse_button_now(button, is_down)
+        });
+    }
+
+#[cfg(windows)]
+    fn platform_mouse_button_now(button: MouseButton, is_down: bool) {
         if let Some(backend) = get_custom_backend() {
             let res = backend.button(button, is_down);
             handle_injection_result(InjectionErrorKind::Button, res);
@@ -1375,7 +1394,13 @@ impl NativeInputInjector {
         };
 
         unsafe {
-            let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+            let sent = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+            if sent != 1 {
+                log::warn!(
+                    "[KVM] SendInput mouse button failed: {:?} down={} sent={} err={} {}",
+                    button, is_down, sent, std::io::Error::last_os_error(), Self::desktop_probe()
+                );
+            }
         }
     }
 
@@ -1386,6 +1411,7 @@ impl NativeInputInjector {
             handle_injection_result(InjectionErrorKind::Button, res);
             return;
         }
+        hook_engine::prompt_for_accessibility_once();
         use macos_ffi::*;
         unsafe {
             let dummy = CGEventCreate(std::ptr::null_mut());
@@ -1437,6 +1463,14 @@ impl NativeInputInjector {
 
     #[cfg(windows)]
     pub fn mouse_wheel(dx: i32, dy: i32) {
+        main_thread_input::run(move || {
+            record_injection_timestamp();
+            Self::mouse_wheel_now(dx, dy)
+        });
+    }
+
+#[cfg(windows)]
+    fn mouse_wheel_now(dx: i32, dy: i32) {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let res = backend.wheel(dx, dy);
@@ -1482,8 +1516,16 @@ impl NativeInputInjector {
         }
 
         if !inputs.is_empty() {
+            let expected = inputs.len() as u32;
             unsafe {
-                let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                if sent != expected {
+                    log::warn!(
+                        "[KVM] SendInput wheel failed: dx={} dy={} sent={}/{} err={} {}",
+                        dx, dy, sent, expected, std::io::Error::last_os_error(),
+                        Self::desktop_probe()
+                    );
+                }
             }
         }
     }
@@ -1496,6 +1538,7 @@ impl NativeInputInjector {
             handle_injection_result(InjectionErrorKind::Wheel, res);
             return;
         }
+        hook_engine::prompt_for_accessibility_once();
         use macos_ffi::*;
         unsafe {
             // dy for vertical wheel, dx for horizontal wheel
@@ -1536,8 +1579,49 @@ impl NativeInputInjector {
         }
     }
 
+    /// Which desktop this thread is attached to versus the input desktop. Only used in
+    /// diagnostics: SendInput fails with "access is denied" when they differ.
+    #[cfg(windows)]
+    fn desktop_probe() -> String {
+        use windows::Win32::System::StationsAndDesktops::{
+            CloseDesktop, GetThreadDesktop, OpenInputDesktop, DESKTOP_ACCESS_FLAGS,
+            DESKTOP_CONTROL_FLAGS,
+        };
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        unsafe {
+            let thread = match GetThreadDesktop(GetCurrentThreadId()) {
+                Ok(h) => format!("{:?}", h),
+                Err(e) => format!("err({:?})", e),
+            };
+            let (input, same) = match OpenInputDesktop(
+                DESKTOP_CONTROL_FLAGS(0),
+                false,
+                DESKTOP_ACCESS_FLAGS(0x0001 | 0x0080 | 0x0100),
+            ) {
+                Ok(h) => {
+                    let same = match GetThreadDesktop(GetCurrentThreadId()) {
+                        Ok(t) => t == h,
+                        Err(_) => false,
+                    };
+                    let _ = CloseDesktop(h);
+                    (format!("{:?}", h), same)
+                }
+                Err(e) => (format!("err({:?})", e), false),
+            };
+            format!("thread={} input={} same={}", thread, input, same)
+        }
+    }
+
     #[cfg(windows)]
     pub fn platform_key_event(vk: u16, is_down: bool, extended: bool) {
+        main_thread_input::run(move || {
+            record_injection_timestamp();
+            Self::platform_key_event_now(vk, is_down, extended)
+        });
+    }
+
+#[cfg(windows)]
+    fn platform_key_event_now(vk: u16, is_down: bool, extended: bool) {
         if let Some(backend) = get_custom_backend() {
             let res = backend.key(vk, is_down, extended);
             handle_injection_result(InjectionErrorKind::Key, res);
@@ -1566,13 +1650,21 @@ impl NativeInputInjector {
                     wScan: 0,
                     dwFlags: flags,
                     time: 0,
-                    dwExtraInfo: 0,
+                    // Marked as ours so this app's own hook passes it through instead of
+                    // forwarding it back to the other computer.
+                    dwExtraInfo: 0x474C4944,
                 },
             },
         };
 
         unsafe {
-            let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+            let sent = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+            if sent != 1 {
+                log::warn!(
+                    "[KVM] SendInput keyboard failed: vk={} down={} sent={} err={} {}",
+                    vk, is_down, sent, std::io::Error::last_os_error(), Self::desktop_probe()
+                );
+            }
         }
     }
 
@@ -1583,6 +1675,7 @@ impl NativeInputInjector {
             handle_injection_result(InjectionErrorKind::Key, res);
             return;
         }
+        hook_engine::prompt_for_accessibility_once();
         use macos_ffi::*;
         if let Some(mac_code) = keycodes::windows_vk_to_macos_keycode(vk) {
             unsafe {
@@ -1777,6 +1870,57 @@ impl ClipboardWatcher {
 }
 
 /// Global low-level hook engine for Windows mouse/keyboard capture and edge-crossing.
+/// Windows only: synthetic input is marshalled onto the Tauri main thread.
+///
+/// `SendInput` (and `SetCursorPos`) fail with `ERROR_ACCESS_DENIED` on threads that
+/// are not attached to the interactive desktop. Tauri's async worker threads and the
+/// low-level hook thread are not, so every injection started there is posted to the
+/// main thread first, which is known to work.
+#[cfg(windows)]
+pub mod main_thread_input {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
+    use tauri::AppHandle;
+
+    static MAIN_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+    static APP: Mutex<Option<AppHandle>> = Mutex::new(None);
+
+    /// Called once during startup, from the main thread.
+    pub fn register(app: AppHandle) {
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        let id = unsafe { GetCurrentThreadId() };
+        MAIN_THREAD_ID.store(id, Ordering::SeqCst);
+        *APP.lock().unwrap_or_else(|e| e.into_inner()) = Some(app);
+        log::debug!("[KVM] input injection pinned to main thread {}", id);
+    }
+
+    pub fn is_main_thread() -> bool {
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        let main = MAIN_THREAD_ID.load(Ordering::SeqCst);
+        main == 0 || unsafe { GetCurrentThreadId() } == main
+    }
+
+    /// Run `f` on the main thread, inline when already there.
+    pub fn run<F: FnOnce() + Send + 'static>(f: F) {
+        if is_main_thread() {
+            f();
+            return;
+        }
+        let app = APP
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match app {
+            Some(app) => {
+                if let Err(e) = app.run_on_main_thread(f) {
+                    log::warn!("[KVM] could not post input to the main thread: {}", e);
+                }
+            }
+            None => f(),
+        }
+    }
+}
+
 #[cfg(windows)]
 pub mod hook_engine {
     use super::*;
@@ -1817,6 +1961,7 @@ pub mod hook_engine {
 
     pub fn start_hooks(app: AppHandle, state: AppState, network: NetworkManager) {
         set_kvm_app_state(state.clone());
+        super::main_thread_input::register(app.clone());
         unsafe {
             APP_HANDLE = Some(app);
             APP_STATE = Some(state);
@@ -1831,8 +1976,9 @@ pub mod hook_engine {
                     None,
                     0,
                 );
-                if let Ok(h) = mouse_hook {
-                    MOUSE_HOOK = Some(h);
+                match mouse_hook {
+                    Ok(h) => MOUSE_HOOK = Some(h),
+                    Err(e) => log::error!("[KVM] mouse hook install failed: {}", e),
                 }
 
                 let key_hook = SetWindowsHookExW(
@@ -1841,8 +1987,9 @@ pub mod hook_engine {
                     None,
                     0,
                 );
-                if let Ok(h) = key_hook {
-                    KEYBOARD_HOOK = Some(h);
+                match key_hook {
+                    Ok(h) => KEYBOARD_HOOK = Some(h),
+                    Err(e) => log::error!("[KVM] keyboard hook install failed: {}", e),
                 }
 
                 let mut msg = MSG::default();
@@ -2049,6 +2196,12 @@ pub mod hook_engine {
             let msg = w_param.0 as u32;
             let k = *(l_param.0 as *const KBDLLHOOKSTRUCT);
 
+            // Pass on keys this app injected itself, otherwise remote keystrokes would be
+            // forwarded back to the computer they came from.
+            if k.dwExtraInfo == 0x474C4944 {
+                return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
+            }
+
             if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
                 let snap = state.snapshot();
                 let is_driving = snap.input == "driving";
@@ -2095,6 +2248,7 @@ pub mod hook_engine {
 
                 if is_driving {
                     let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                    log::debug!("[KVM] forward key vk={} down={}", k.vkCode, is_down);
                     let key_msg = WireMessage {
                         t: if is_down { "k.kd".to_string() } else { "k.ku".to_string() },
                         v: Some(1),
@@ -2126,6 +2280,16 @@ pub mod hook_engine {
     static mut VIRTUAL_REMOTE_X: f64 = 0.0;
     static mut VIRTUAL_REMOTE_Y: f64 = 0.0;
 
+    /// Is this app allowed to control the computer? Never shows anything to the user.
+    pub fn has_accessibility_permission() -> bool {
+        unsafe { AXIsProcessTrustedWithOptions(std::ptr::null_mut()) != 0 }
+    }
+
+    /// Asks the system to show its "would like to control this computer" prompt.
+    ///
+    /// That prompt is modal, has no close button, and appears once per launch, so we only
+    /// call this when the user actually tries to forward input — at launch it would just be
+    /// in the way, with nothing to act on yet.
     pub fn ensure_accessibility_permission() -> bool {
         unsafe {
             // First check if already trusted WITHOUT prompting
@@ -2149,6 +2313,20 @@ pub mod hook_engine {
             }
             trusted
         }
+    }
+
+    /// Asks for Accessibility at most once per launch, and only when input has to be
+    /// forwarded. The system prompt is modal with no close button, so opening it at launch,
+    /// before the user has asked for anything, only gets in the way.
+    pub fn prompt_for_accessibility_once() {
+        use std::sync::Once;
+        static ASKED: Once = Once::new();
+        ASKED.call_once(|| {
+            if !has_accessibility_permission() {
+                log::warn!("GlideDesk: forwarding input needs macOS Accessibility; asking for it now.");
+                let _ = ensure_accessibility_permission();
+            }
+        });
     }
 
     pub fn get_virtual_desktop_bounds() -> (i32, i32, i32, i32) {
@@ -2197,6 +2375,18 @@ pub mod hook_engine {
     }
 
     pub fn start_hooks(app: AppHandle, state: AppState, network: NetworkManager) {
+        // The hook thread cannot ask for the input method itself (macOS 27 traps a process
+        // that queries text-input services off the main thread), so the main thread reads it
+        // and the hook only copies the cached value. Twice a second is enough to follow
+        // someone switching between input methods.
+        {
+            let cache_app = app.clone();
+            std::thread::spawn(move || loop {
+                let _ = cache_app.run_on_main_thread(crate::inputmethod::refresh_cached);
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            });
+        }
+
         set_kvm_app_state(state.clone());
         unsafe {
             APP_HANDLE = Some(app);
@@ -2205,8 +2395,13 @@ pub mod hook_engine {
         }
 
         std::thread::spawn(|| {
-            if !ensure_accessibility_permission() {
-                log::warn!("GlideDesk: macOS Accessibility permissions not granted yet. Prompting user in System Settings...");
+            if !has_accessibility_permission() {
+                log::warn!(
+                    "GlideDesk: macOS Accessibility permission is off, so keyboard and mouse \
+                     forwarding is paused. Turn GlideDesk on in System Settings > Privacy & \
+                     Security > Accessibility; forwarding starts by itself once it is on, no \
+                     restart needed."
+                );
             }
 
             let mask: u64 = (1 << kCGEventMouseMoved)
@@ -2597,12 +2792,13 @@ pub mod hook_engine {
                         }
 
                         let vk = keycodes::macos_keycode_to_windows_vk(keycode);
+                        log::debug!("[KVM] forward key vk={} down={}", vk, is_down);
                         // `ch`: what this key types on our layout, so shortcuts land on
                         // the right key on the other computer. `im`: the input method we
                         // are typing with, so the other side composes with its own.
                         let ch = if is_down { mac_event_char(event, vk as u16) } else { None };
                         let im = if is_down && ch.is_some() {
-                            crate::inputmethod::current()
+                            crate::inputmethod::current_cached()
                         } else {
                             None
                         };
