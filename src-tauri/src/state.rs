@@ -163,6 +163,8 @@ pub struct NetState {
     pub ble: bool,
     #[serde(rename = "blePc")]
     pub ble_pc: bool,
+    #[serde(rename = "bleWifiOff", default = "default_true")]
+    pub ble_wifi_off: bool,
     pub transport: String,
     pub state: String,
     pub rtt: Option<u32>,
@@ -173,8 +175,10 @@ pub struct NetState {
 impl Default for NetState {
     fn default() -> Self {
         Self {
-            ble: true,
+            // Bluetooth proximity discovery is off until the user turns it on.
+            ble: false,
             ble_pc: false,
+            ble_wifi_off: true,
             transport: "wifi".to_string(),
             state: "idle".to_string(),
             rtt: None,
@@ -1646,6 +1650,27 @@ mod tests {
         assert_eq!(deserialized.kvm.pc_side.as_deref(), Some("left"));
         assert_eq!(deserialized.input, "home");
         assert_eq!(deserialized.startup, snap.startup);
+    }
+
+    #[test]
+    fn test_net_defaults_keep_bluetooth_off() {
+        let net = NetState::default();
+        assert!(!net.ble, "Bluetooth with phones must be off by default");
+        assert!(!net.ble_pc);
+        assert!(net.ble_wifi_off, "Bluetooth-off-on-Wi-Fi defaults on");
+
+        // Wire names stay stable for the frontend, and an older snapshot that
+        // predates bleWifiOff still loads with the safe default.
+        let json = serde_json::to_string(&net).expect("serialize NetState");
+        assert!(json.contains("\"ble\":false"));
+        assert!(json.contains("\"blePc\":false"));
+        assert!(json.contains("\"bleWifiOff\":true"));
+
+        let old: NetState = serde_json::from_str(
+            r#"{"ble":false,"blePc":false,"transport":"wifi","state":"idle","rtt":null}"#,
+        )
+        .expect("deserialize NetState without bleWifiOff");
+        assert!(old.ble_wifi_off);
     }
 
     #[test]

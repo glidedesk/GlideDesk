@@ -140,6 +140,7 @@ fn main() {
             commands::set_kvm,
             commands::set_layout,
             commands::set_keys,
+            commands::set_net,
             commands::set_tab,
             commands::set_clipboard,
             commands::copy_text,

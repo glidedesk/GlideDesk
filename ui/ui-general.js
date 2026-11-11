@@ -101,7 +101,7 @@ UI.tab({
       const n = s.net || {};
       const radio = n.radio === 'off' ? 'Bluetooth is off in Windows settings'
         : n.radio === 'unsupported' ? 'This PC’s Bluetooth can’t do it (needs Bluetooth LE)' : '';
-      bleSw.set(n.ble !== false);
+      bleSw.set(n.ble === true);
       bleRow.setHint(n.ble === false ? 'Only phones on this network or a USB cable connect'
         : radio || 'A phone nearby connects through Bluetooth; files and screens switch to Wi-Fi Direct for a moment');
       blePcSw.set(n.blePc === true);

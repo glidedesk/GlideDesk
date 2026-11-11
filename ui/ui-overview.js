@@ -153,7 +153,7 @@ UI.tab({
     const render = () => last && update(last);
     const update = (s) => {
       last = s;
-      bleSw.set(!s.net || s.net.ble !== false);
+      bleSw.set(!!s.net && s.net.ble === true);
       blePcSw.set(!!s.net && s.net.blePc === true);
       const l = s.link || { state: 'disconnected' };
       const connected = l.state === 'connected';

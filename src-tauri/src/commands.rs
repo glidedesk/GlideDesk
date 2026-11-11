@@ -142,6 +142,24 @@ pub fn set_keys(partial: Value, state: State<'_, AppState>, app: AppHandle) -> R
 }
 
 #[tauri::command]
+pub fn set_net(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    {
+        let mut s = state.inner.write();
+        if let Some(b) = partial.get("ble").and_then(|v| v.as_bool()) {
+            s.net.ble = b;
+        }
+        if let Some(b) = partial.get("blePc").and_then(|v| v.as_bool()) {
+            s.net.ble_pc = b;
+        }
+        if let Some(b) = partial.get("bleWifiOff").and_then(|v| v.as_bool()) {
+            s.net.ble_wifi_off = b;
+        }
+    }
+    push_state(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn set_tab(tab: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     {
         let mut s = state.inner.write();

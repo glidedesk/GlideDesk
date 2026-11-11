@@ -65,6 +65,32 @@ pub fn check_edge_crossed(side: &str, pt_x: f64, pt_y: f64, vx: i32, vy: i32, vw
     }
 }
 
+/// Where along the crossed edge the pointer left, as 0..1 (top/left = 0).
+///
+/// Sent with `kvm.take` so the other computer can put its pointer on the same spot of
+/// the edge it is entered through.
+pub fn entry_fraction(side: &str, x: f64, y: f64, vx: i32, vy: i32, vw: i32, vh: i32) -> f64 {
+    let (base, span, pos) = match side {
+        "top" | "bottom" => (vx, vw.max(2), x),
+        _ => (vy, vh.max(2), y),
+    };
+    ((pos - base as f64) / span as f64).clamp(0.0, 1.0)
+}
+
+/// Notches from a Windows wheel message.
+///
+/// `WM_MOUSEWHEEL`/`WM_MOUSEHWHEEL` carry a signed delta in the high word: +120 is
+/// one notch up, -120 one notch down. Windows and macOS both read a positive
+/// vertical notch as "scroll up", so the value is forwarded unchanged.
+pub fn wheel_notches_from_windows(vertical: bool, mouse_data: u32) -> (f64, f64) {
+    let notches = ((mouse_data >> 16) as i16) as f64 / 120.0;
+    if vertical {
+        (0.0, notches)
+    } else {
+        (notches, 0.0)
+    }
+}
+
 /// Check if cumulative remote virtual deltas indicate cursor has moved back across the seam to home.
 #[cfg(any(test, not(windows)))]
 pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: f64) -> bool {
@@ -136,6 +162,8 @@ pub mod macos_ffi {
     pub const kCGKeyboardEventKeycode: u32 = 9;
     pub const kCGScrollWheelEventDeltaAxis1: u32 = 11;
     pub const kCGScrollWheelEventDeltaAxis2: u32 = 12;
+    pub const kCGScrollWheelEventPointDeltaAxis1: u32 = 96;
+    pub const kCGScrollWheelEventPointDeltaAxis2: u32 = 97;
 
     pub const kCGEventFlagMaskAlphaShift: u64 = 0x00010000;
     pub const kCGEventFlagMaskShift: u64 = 0x00020000;
@@ -556,7 +584,7 @@ pub fn handle_injection_result(kind: InjectionErrorKind, result: Result<(), Stri
     }
 }
 
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 pub const SELF_ECHO_SUPPRESSION_WINDOW_MS: u64 = 25;
 
 pub static LAST_INJECTION_TIMESTAMP_MS: std::sync::atomic::AtomicU64 =
@@ -570,12 +598,12 @@ pub fn record_injection_timestamp() {
     LAST_INJECTION_TIMESTAMP_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
 }
 
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 pub fn should_forward_captured_event(now_ms: u64, last_injection_ms: u64) -> bool {
     should_forward_captured_event_with_window(now_ms, last_injection_ms, SELF_ECHO_SUPPRESSION_WINDOW_MS)
 }
 
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 pub fn should_forward_captured_event_with_window(
     now_ms: u64,
     last_injection_ms: u64,
@@ -1235,6 +1263,164 @@ impl NativeInputInjector {
             }
         }
     }
+    /// Absolute pointer warp. Runs on the thread that can actually move the pointer.
+    #[cfg(windows)]
+    pub fn warp_cursor(x: i32, y: i32) {
+        main_thread_input::run(move || {
+            record_injection_timestamp();
+            if let Some(backend) = get_custom_backend() {
+                let _ = backend.warp(x, y);
+                return;
+            }
+            use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+            unsafe {
+                if let Err(e) = SetCursorPos(x, y) {
+                    log::warn!("[KVM] SetCursorPos({}, {}) failed: {}", x, y, e);
+                }
+            }
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn warp_cursor(x: i32, y: i32) {
+        record_injection_timestamp();
+        if let Some(backend) = get_custom_backend() {
+            let _ = backend.warp(x, y);
+            return;
+        }
+        use macos_ffi::*;
+        unsafe {
+            let _ = CGWarpMouseCursorPosition(CGPoint { x: x as f64, y: y as f64 });
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub fn warp_cursor(x: i32, y: i32) {
+        record_injection_timestamp();
+        if let Some(backend) = get_custom_backend() {
+            let res = backend.warp(x, y);
+            handle_injection_result(InjectionErrorKind::Warp, res);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            match get_linux_backend() {
+                Ok(backend) => {
+                    let res = backend.warp(x, y);
+                    handle_injection_result(InjectionErrorKind::Warp, res);
+                }
+                Err(e) => handle_injection_result(InjectionErrorKind::Warp, Err(e)),
+            }
+        }
+    }
+
+    /// Put this computer's pointer where the other computer's pointer left its screen:
+    /// on the edge facing it, `frac` of the way along that edge.
+    ///
+    /// The driving computer starts counting movement from the point it crossed, and
+    /// returns control once the movement comes back to that point. Both computers have
+    /// to agree on where the pointer started, otherwise the pointer appears in the
+    /// middle of the screen and going back needs an arbitrary amount of travel.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn place_cursor_at_entry_edge(side: &str, frac: f64) {
+        let frac = frac.clamp(0.0, 1.0);
+        let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
+        if vw <= 1 || vh <= 1 {
+            return;
+        }
+        let along_y = vy + (frac * (vh - 1) as f64).round() as i32;
+        let along_x = vx + (frac * (vw - 1) as f64).round() as i32;
+        let (x, y) = match side {
+            "left" => (vx + 1, along_y),
+            "right" => (vx + vw - 2, along_y),
+            "top" => (along_x, vy + 1),
+            "bottom" => (along_x, vy + vh - 2),
+            _ => return,
+        };
+        Self::warp_cursor(x, y);
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub fn place_cursor_at_entry_edge(side: &str, frac: f64) {
+        let frac = frac.clamp(0.0, 1.0);
+        #[cfg(target_os = "linux")]
+        let (vw, vh) = get_linux_backend()
+            .ok()
+            .and_then(|b| b.get_viewport_dimensions().ok())
+            .unwrap_or((1920, 1080));
+        #[cfg(not(target_os = "linux"))]
+        let (vw, vh) = (1920u32, 1080u32);
+        let (vw, vh) = (vw as i32, vh as i32);
+        let along_y = (frac * (vh - 1) as f64).round() as i32;
+        let along_x = (frac * (vw - 1) as f64).round() as i32;
+        let (x, y) = match side {
+            "left" => (1, along_y),
+            "right" => (vw - 2, along_y),
+            "top" => (along_x, 1),
+            "bottom" => (along_x, vh - 2),
+            _ => return,
+        };
+        Self::warp_cursor(x, y);
+    }
+
+    /// Pull the pointer back onto a display if it was pushed just past an edge.
+    ///
+    /// The driven computer follows the other computer's pointer, and the last few pixels
+    /// of movement can land outside the screen. When control comes back here the pointer
+    /// has to be somewhere the user can see it.
+    pub fn keep_cursor_visible() {
+        let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
+        if vw <= 2 || vh <= 2 {
+            return;
+        }
+        let Some((x, y)) = Self::cursor_position() else {
+            return;
+        };
+        let min_x = vx as f64 + 1.0;
+        let max_x = (vx + vw - 2) as f64;
+        let min_y = vy as f64 + 1.0;
+        let max_y = (vy + vh - 2) as f64;
+        if x < min_x || x > max_x || y < min_y || y > max_y {
+            let cx = x.clamp(min_x, max_x).round() as i32;
+            let cy = y.clamp(min_y, max_y).round() as i32;
+            log::info!("[KVM] Pulling pointer back on screen: ({:.0}, {:.0}) -> ({}, {})", x, y, cx, cy);
+            Self::warp_cursor(cx, cy);
+        }
+    }
+
+    #[cfg(windows)]
+    fn cursor_position() -> Option<(f64, f64)> {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        unsafe {
+            let mut p = POINT::default();
+            if GetCursorPos(&mut p).is_ok() {
+                Some((p.x as f64, p.y as f64))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn cursor_position() -> Option<(f64, f64)> {
+        use macos_ffi::*;
+        unsafe {
+            let event = CGEventCreate(std::ptr::null_mut());
+            if event.is_null() {
+                return None;
+            }
+            let loc = CGEventGetLocation(event);
+            CFRelease(event as _);
+            Some((loc.x, loc.y))
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    fn cursor_position() -> Option<(f64, f64)> {
+        None
+    }
+
     #[cfg(windows)]
     pub fn sync_input_desktop() {
         // Synthetic input is marshalled onto the main thread (see `main_thread_input`),
@@ -2062,6 +2248,15 @@ pub mod hook_engine {
                         let take = WireMessage {
                             t: "kvm.take".to_string(),
                             v: Some(1),
+                            edge_at: Some(entry_fraction(
+                                &snap.layout.side,
+                                m.pt.x as f64,
+                                m.pt.y as f64,
+                                vx,
+                                vy,
+                                vw,
+                                vh,
+                            )),
                             ..Default::default()
                         };
                         net.send_packet_sync(take);
@@ -2109,7 +2304,11 @@ pub mod hook_engine {
                                     "bottom" => max_y - 12,
                                     _ => m.pt.y,
                                 };
-                                let _ = SetCursorPos(return_x, return_y);
+                                // SetCursorPos from this hook thread fails (the thread is not
+                                // attached to the interactive desktop), which used to leave the
+                                // pointer sitting on the edge so the next push produced no
+                                // movement event and the edge never re-armed.
+                                NativeInputInjector::warp_cursor(return_x, return_y);
                                 LAST_PT = POINT { x: return_x, y: return_y };
                                 return LRESULT(1);
                             }
@@ -2129,7 +2328,7 @@ pub mod hook_engine {
                                 "bottom" => max_y - 5,
                                 _ => m.pt.y,
                             };
-                            let _ = SetCursorPos(park_x, park_y);
+                            NativeInputInjector::warp_cursor(park_x, park_y);
                             LAST_PT = POINT { x: park_x, y: park_y };
                             return LRESULT(1);
                         }
@@ -2167,12 +2366,8 @@ pub mod hook_engine {
                             return LRESULT(1);
                         }
                         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
-                            let notches = ((m.mouseData >> 16) as i16) as f64 / 120.0;
-                            let (dx, dy) = if msg == WM_MOUSEHWHEEL {
-                                (notches, 0.0)
-                            } else {
-                                (0.0, -notches)
-                            };
+                            let (dx, dy) =
+                                wheel_notches_from_windows(msg == WM_MOUSEWHEEL, m.mouseData);
                             let wh_msg = WireMessage {
                                 t: "k.wh".to_string(),
                                 v: Some(1),
@@ -2239,8 +2434,7 @@ pub mod hook_engine {
                             net.send_packet_sync(home_msg);
 
                             // Center cursor on local virtual desktop
-                            let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
-                            let _ = SetCursorPos(vx + vw / 2, vy + vh / 2);
+                            NativeInputInjector::recenter_local_cursor();
                             return LRESULT(1);
                         }
                     }
@@ -2528,6 +2722,18 @@ pub mod hook_engine {
             return event;
         }
 
+        // Input this app injected (input forwarded from the other computer) is not the
+        // local user. Without this the pointer, parked on the edge by the other computer,
+        // counts as a fresh edge crossing and both computers start driving each other.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let last_injection_ms = LAST_INJECTION_TIMESTAMP_MS.load(std::sync::atomic::Ordering::Relaxed);
+        if !should_forward_captured_event(now_ms, last_injection_ms) {
+            return event;
+        }
+
         if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
             let snap = state.snapshot();
             let has_peer = snap.client.is_some() || snap.peer.is_some() || snap.link.state == "connected";
@@ -2572,6 +2778,15 @@ pub mod hook_engine {
                         let take = WireMessage {
                             t: "kvm.take".to_string(),
                             v: Some(1),
+                            edge_at: Some(entry_fraction(
+                                &snap.layout.side,
+                                pt.x,
+                                pt.y,
+                                vx,
+                                vy,
+                                vw,
+                                vh,
+                            )),
                             ..Default::default()
                         };
                         net.send_packet_sync(take);
@@ -2690,8 +2905,27 @@ pub mod hook_engine {
                         return std::ptr::null_mut();
                     }
                     kCGEventScrollWheel => {
-                        let dy = CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1) as f64;
-                        let dx = CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis2) as f64;
+                        let mut dy = CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1) as f64;
+                        let mut dx = CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis2) as f64;
+                        if dy == 0.0 && dx == 0.0 {
+                            // Trackpads and smooth-scrolling mice only report pixel
+                            // deltas; the far side works in line notches.
+                            let lines = |px: f64| {
+                                if px == 0.0 {
+                                    0.0
+                                } else {
+                                    (px / 10.0).round().max(1.0) * px.signum()
+                                }
+                            };
+                            dy = lines(CGEventGetIntegerValueField(
+                                event,
+                                kCGScrollWheelEventPointDeltaAxis1,
+                            ) as f64);
+                            dx = lines(CGEventGetIntegerValueField(
+                                event,
+                                kCGScrollWheelEventPointDeltaAxis2,
+                            ) as f64);
+                        }
                         let wh_msg = WireMessage {
                             t: "k.wh".to_string(),
                             v: Some(1),
@@ -3009,6 +3243,15 @@ fn run_linux_x11_capture_loop(
                 let take = WireMessage {
                     t: "kvm.take".to_string(),
                     v: Some(1),
+                    edge_at: Some(entry_fraction(
+                        &snap.layout.side,
+                        root_x as f64,
+                        root_y as f64,
+                        vx,
+                        vy,
+                        vw,
+                        vh,
+                    )),
                     ..Default::default()
                 };
                 network.send_packet_sync(take);
@@ -3315,6 +3558,36 @@ mod tests {
 
         // Unknown side never crosses
         assert!(!check_edge_crossed("unknown", 0.0, 0.0, vx, vy, vw, vh));
+    }
+
+    #[test]
+    fn entry_fraction_maps_the_crossing_point_onto_the_edge() {
+        // 1920x1080 screen at the origin: crossing half way down lands at 0.5.
+        assert!((entry_fraction("left", 0.0, 540.0, 0, 0, 1920, 1080) - 0.5).abs() < 1e-6);
+        assert!((entry_fraction("right", 1920.0, 0.0, 0, 0, 1920, 1080) - 0.0).abs() < 1e-6);
+        assert!(entry_fraction("right", 1920.0, 1079.0, 0, 0, 1920, 1080) > 0.999);
+        // Top/bottom edges use the horizontal position instead.
+        assert!((entry_fraction("top", 960.0, 0.0, 0, 0, 1920, 1080) - 0.5).abs() < 1e-6);
+        // Off-screen input is clamped instead of producing a wild position.
+        assert_eq!(entry_fraction("left", 0.0, -40.0, 0, 0, 1920, 1080), 0.0);
+        assert_eq!(entry_fraction("left", 0.0, 5000.0, 0, 0, 1920, 1080), 1.0);
+    }
+
+    #[test]
+    fn wheel_notches_keep_the_scroll_direction() {
+        // +120 is one notch up, -120 one notch down; the high word carries the sign.
+        assert_eq!(wheel_notches_from_windows(true, 120 << 16), (0.0, 1.0));
+        assert_eq!(
+            wheel_notches_from_windows(true, ((-120i32) as u32) << 16),
+            (0.0, -1.0)
+        );
+
+        // Six notches down stay negative instead of being flipped on the way out.
+        let raw = ((6i32 * -120i32) as u32) << 16;
+        assert_eq!(wheel_notches_from_windows(true, raw), (0.0, -6.0));
+
+        // Horizontal wheels land on the other axis.
+        assert_eq!(wheel_notches_from_windows(false, 240 << 16), (2.0, 0.0));
     }
 
     #[test]

@@ -354,6 +354,10 @@ pub struct WireMessage {
     pub im: Option<String>,
     #[serde(default)]
     pub mods: Option<u32>,
+    /// Where along the screen edge the other computer's pointer entered, 0..1.
+    /// Older peers omit it; the pointer then starts in the middle of the edge.
+    #[serde(default, rename = "edgeAt")]
+    pub edge_at: Option<f64>,
     #[serde(default)]
     pub smooth: Option<bool>,
 
@@ -486,6 +490,7 @@ impl Default for WireMessage {
             tx: None,
             im: None,
             mods: None,
+            edge_at: None,
             smooth: None,
             text: None,
             message: None,
@@ -1766,12 +1771,21 @@ impl MeshServer {
             }
             "kvm.take" => {
                 state.set_where_input("driven");
+                // The other computer counts movement from the edge it crossed and gives
+                // control back when the movement returns to that point, so this pointer
+                // has to start there too.
                 let snap = state.snapshot();
+                crate::kvm::NativeInputInjector::place_cursor_at_entry_edge(
+                    &snap.layout.side,
+                    pkt.edge_at.unwrap_or(0.5),
+                );
                 let _ = app.emit("state-change", &snap);
             }
             "kvm.home" | "kvm.release" => {
                 state.set_where_input("home");
                 crate::kvm::NativeInputInjector::release_all_keys();
+                // This computer may have followed the other pointer just past the edge.
+                crate::kvm::NativeInputInjector::keep_cursor_visible();
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
             }

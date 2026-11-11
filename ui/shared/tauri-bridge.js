@@ -159,6 +159,7 @@
     setKvm: (partial) => invoke('set_kvm', { partial }),
     setLayout: (side) => invoke('set_layout', { side }),
     setKeys: (partial) => invoke('set_keys', { partial }),
+    setNet: (partial) => invoke('set_net', { partial }),
     setApp: (partial) => invoke('set_app', { partial }),
     setUpdates: (partial) => invoke('set_updates', { partial }),
     skipUpdate: (version) => invoke('skip_update', { version }),
