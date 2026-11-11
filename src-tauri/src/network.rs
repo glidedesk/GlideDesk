@@ -246,6 +246,15 @@ pub fn commit_of(nonce_hex: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// The six digits both computers show, from inputs that are the same on both sides:
+/// `host_fp` is the *host's* TLS certificate fingerprint — the host knows it locally, the guest
+/// sees it on the wire during the handshake — `guest_nonce` is the guest's nonce (nw) and
+/// `host_nonce` the host's (nm). Hashing each side's own fingerprint instead made the two
+/// windows show different codes, so "Codes match" could never be pressed honestly.
+pub fn pair_code(host_fp: &str, guest_nonce: &str, host_nonce: &str) -> String {
+    sas_code(host_fp, guest_nonce, host_nonce)
+}
+
 pub fn sas_code(fp: &str, nw_hex: &str, nm_hex: &str) -> String {
     use sha2::{Digest, Sha256};
     let norm_fp = fp.replace(':', "").to_lowercase();
@@ -273,6 +282,11 @@ pub struct PendingPairSession {
     pub nw: Option<String>,
     pub nm: Option<String>,
     pub commit: Option<String>,
+    /// The peer's certificate fingerprint: on the guest, the one seen in the TLS handshake
+    /// (the host's, whether or not its `pair.nonce` says the same); on the host, the one the
+    /// guest claims. The pairing code hashes the host's real certificate, so a machine in the
+    /// middle (whose certificate the guest would see instead) makes the two codes differ.
+    pub peer_fp: Option<String>,
     pub code: Option<String>,
     pub confirmed: bool,
     pub allowed: bool,
@@ -1277,6 +1291,7 @@ impl MeshServer {
                             nw: None,
                             nm: Some(nm.clone()),
                             commit: Some(commit_val),
+                            peer_fp: pkt.fingerprint.clone(),
                             code: None,
                             confirmed: false,
                             allowed: false,
@@ -1304,8 +1319,13 @@ impl MeshServer {
                         if session.role == "guest" {
                             if let (Some(ref nm_val), Some(ref nw_val)) = (&pkt.nonce, &session.nw) {
                                 session.nm = Some(nm_val.clone());
-                                let fp = pkt.fingerprint.as_deref().unwrap_or("");
-                                let code = sas_code(fp, nw_val, nm_val);
+                                // The host's real certificate (seen in the handshake); only a
+                                // plaintext link, which has none, falls back to its claim.
+                                let fp = session.peer_fp.as_deref()
+                                    .filter(|f| !f.is_empty())
+                                    .or(pkt.fingerprint.as_deref())
+                                    .unwrap_or("");
+                                let code = pair_code(fp, nw_val, nm_val);
                                 session.code = Some(code.clone());
                                 should_reveal = Some((nw_val.clone(), code, session.peer_name.clone(), session.peer_os.clone()));
                             }
@@ -1358,8 +1378,10 @@ impl MeshServer {
                             if let (Some(ref nw_val), Some(ref nm_val), Some(ref commit_val)) = (&pkt.nonce, &session.nm, &session.commit) {
                                 if commit_of(nw_val).eq_ignore_ascii_case(commit_val) {
                                     session.nw = Some(nw_val.clone());
-                                    let fp = pkt.fingerprint.as_deref().unwrap_or("");
-                                    let code = sas_code(fp, nw_val, nm_val);
+                                    // The host's own certificate fingerprint, not the one the guest
+                                    // sends in reveal: the guest hashes the same certificate, which
+                                    // it saw during the handshake.
+                                    let code = pair_code(tls_fingerprint, nw_val, nm_val);
                                     session.code = Some(code.clone());
                                     verified = true;
                                     code_res = code;
@@ -2676,6 +2698,7 @@ impl NetworkManager {
                 .or_else(|| guard.paired.as_ref().and_then(|p| p.tls_fingerprint.clone()));
             (fp, pid)
         };
+        log::info!("[Pair] start_pair: target = {}, stored_fp = {:?}, target_peer_id = {:?}", target_addr, stored_fp, target_peer_id);
 
         let allow_plaintext = self.state.inner.read().net.allow_plaintext;
         let dial = dial_peer_client(
@@ -2685,8 +2708,12 @@ impl NetworkManager {
             allow_plaintext,
         ).await;
         let (ws, established_fp) = match dial {
-            Ok(v) => v,
+            Ok(v) => {
+                log::info!("[Pair] dial_peer_client succeeded to {}", target_addr);
+                v
+            }
             Err(e) => {
+                log::error!("[Pair] dial_peer_client FAILED to {}: {}", target_addr, e);
                 let reason = crate::pairlimit::limit_message("connecting", target_ip, target_ip);
                 self.fail_pairing(reason);
                 return Err(e);
@@ -2749,6 +2776,8 @@ impl NetworkManager {
                 nw: Some(nw),
                 nm: None,
                 commit: Some(commit.clone()),
+                // What the guest actually saw on the wire, not what the host claims later.
+                peer_fp: established_fp.clone(),
                 code: None,
                 confirmed: false,
                 allowed: false,
@@ -2782,7 +2811,11 @@ impl NetworkManager {
             ..Default::default()
         };
         let start_str = serde_json::to_string(&pair_start).map_err(|e| e.to_string())?;
-        write.send(Message::Text(start_str)).await.map_err(|e| e.to_string())?;
+        write.send(Message::Text(start_str)).await.map_err(|e| {
+            log::error!("[Pair] Failed to send pair.start: {}", e);
+            e.to_string()
+        })?;
+        log::info!("[Pair] Sent pair.start to {}, spawned receiver loop", target_addr);
 
         let app = self.app.clone();
         let state = self.state.clone();
@@ -3352,6 +3385,27 @@ mod tests {
         let code = sas_code("", "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210");
         assert_eq!(code, "286217");
         assert_eq!(code.len(), 6);
+    }
+
+    #[test]
+    fn test_pair_code_is_the_same_on_both_computers() {
+        let host_fp = "aa".repeat(32);
+        let guest_nonce = "01".repeat(32);
+        let host_nonce = "02".repeat(32);
+
+        let code = pair_code(&host_fp, &guest_nonce, &host_nonce);
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+        // Both roles feed these three values: the host its own certificate, the guest the one
+        // it saw on the wire. Nothing in between them, so the same certificate and the same code.
+        assert_eq!(code, sas_code(&host_fp, &guest_nonce, &host_nonce));
+
+        // Any other certificate — a middlebox's, or the guest's own (which the host used to
+        // hash) — gives different digits, and the two windows would disagree.
+        assert_ne!(code, pair_code(&"cc".repeat(32), &guest_nonce, &host_nonce));
+        assert_ne!(code, pair_code(&"bb".repeat(32), &guest_nonce, &host_nonce));
+        // Nor is it the host's nonce in the guest's place, or the other way round.
+        assert_ne!(code, pair_code(&host_fp, &host_nonce, &guest_nonce));
     }
 
     #[test]

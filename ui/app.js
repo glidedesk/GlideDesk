@@ -154,15 +154,26 @@
       console.warn('renderPhones error:', e);
     }
     // Tabs that don't apply to the peer (a phone has no terminal or screen to share to it…).
+    // One tab's answer must not stop the others: a throw here used to abort the whole render.
     for (const v of views.values()) {
-      const hide = !!(v.def.hidden && v.def.hidden(s));
+      let hide = false;
+      try {
+        hide = !!(v.def.hidden && v.def.hidden(s));
+      } catch (e) {
+        console.error('hidden(' + v.def.id + ') error:', e);
+      }
       if (v.navBtn && v.navBtn.parentElement) v.navBtn.parentElement.hidden = hide;
       if (hide && current === v) show(s.phone && s.phone.connected ? 'phone' : 'overview', false);
     }
     // A group with every tab hidden takes its gap with it.
     for (const v of views.values()) if (v.gap) v.gap.hidden = [...views.values()].every((x) => x.gap !== v.gap || !x.navBtn.parentElement || x.navBtn.parentElement.hidden);
     for (const v of views.values()) {
-      const b = v.def.badge ? v.def.badge(s) : v.def.phase ? 'P' + v.def.phase : '';
+      let b = '';
+      try {
+        b = v.def.badge ? v.def.badge(s) : v.def.phase ? 'P' + v.def.phase : '';
+      } catch (e) {
+        console.error('badge(' + v.def.id + ') error:', e);
+      }
       v.stateEl.className = 'state' + (b === 'on' ? ' on' : b === 'warn' ? ' warn' : '');
       v.stateEl.textContent = b === 'on' || b === 'warn' ? '' : b || '';
     }
@@ -278,7 +289,18 @@
   function render(s) {
     UI.state = s;
     document.body.classList.toggle('no-peer', !linked(s)); // switches of what needs a device can't be changed (shared/feature-art.js)
-    renderPeer(s);
+    // The pairing banner is drawn first, on its own: whatever one tab gets wrong, a request that
+    // needs an answer here (Allow / Codes match) must stay reachable, or pairing waits forever.
+    try {
+      renderBanner(s);
+    } catch (e) {
+      console.error('renderBanner error:', e);
+    }
+    try {
+      renderPeer(s);
+    } catch (e) {
+      console.error('renderPeer error:', e);
+    }
     try {
       UI.setup.render(s);
       UI.fillTree(UI.setup.page);
@@ -287,9 +309,18 @@
       console.warn('UI.setup.render error:', e);
       pages.hidden = false;
     }
-    renderSidebar(s);
-    renderBanner(s);
-    if (current) renderPage(current, s);
+    try {
+      renderSidebar(s);
+    } catch (e) {
+      console.error('renderSidebar error:', e);
+    }
+    if (current) {
+      try {
+        renderPage(current, s);
+      } catch (e) {
+        console.error('renderPage error:', e);
+      }
+    }
   }
 
   $('pair-match').onclick = () => (UI.state && UI.state.pairing && UI.state.pairing.role === 'host' ? api.respondPair(true) : api.confirmCode());

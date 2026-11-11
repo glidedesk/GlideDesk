@@ -5,6 +5,14 @@ All notable changes to GlideDesk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Pairing stuck on "Pairing…"**: a tab's `badge()` that assumed a runtime block the backend does not send (`terminal.server`) threw on every state push, aborting the render before the pairing banner was drawn. The Allow / Codes match buttons never appeared, so a pending request could never be answered. The Terminal badge now tolerates a missing runtime block, the banner is rendered first and independently of the rest of the page, and one tab's `hidden()`/`badge()` can no longer stop the others. Regression test: `ui/shared/test/tab-badges.js`.
+- **Pairing codes never matched**: the guest hashed the host's certificate fingerprint (received in `pair.nonce`) but the host hashed the guest's. Each side therefore showed different six digits, so "Codes match" could never be confirmed honestly. Both sides now hash the host's fingerprint — the identity the guest pins and the one the session token binds to — matching the Android guest, which already used it. Test: `test_pair_code_is_the_same_on_both_computers`.
+- **Pairing diagnostics**: `[Pair]` log lines now report the dial target, the stored TLS fingerprint, dial success/failure, and a failed `pair.start` send, so a stalled handshake can be traced from the log alone.
+
 ## [3.2.0] - 2026-11-06
 
 GlideDesk 3.2.0 delivers full core feature parity across Rust/Tauri v2, implementing all six core KVM/mesh migration modules, fast file transfer (`fx2`), two-way settings synchronization (`pairsync`), and modern Nix build support.

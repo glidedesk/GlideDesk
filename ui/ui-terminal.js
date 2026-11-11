@@ -12,7 +12,16 @@ UI.tab({
   title: 'Terminal',
   color: 'linear-gradient(#3a3a3c, #1c1c1e)',
   desc: 'Open a terminal on the other computer.',
-  badge: (s) => (s.terminal.status === 'unavailable' || s.terminal.status === 'error' ? 'warn' : s.terminal.status === 'ready' || (s.terminal.server.info && s.terminal.server.info.enabled) ? 'on' : ''),
+  // The runtime status and the SSH server block only exist once the terminal feature is wired;
+  // until then they are missing from the state and this must still answer (a throwing badge used
+  // to abort the whole render, hiding the pairing banner and its Allow / Codes match buttons).
+  badge: (s) => {
+    const t = (s && s.terminal) || {};
+    const srv = t.server || {};
+    if (t.status === 'unavailable' || t.status === 'error') return 'warn';
+    if (t.status === 'ready' || !!(srv.info && srv.info.enabled)) return 'on';
+    return '';
+  },
   build(body) {
     const { el, api } = UI;
     // Mac → PC (server here)
@@ -40,9 +49,9 @@ UI.tab({
     const SRV = { running: 'Running', stopped: 'Stopped', missing: 'Not installed', unknown: '' };
     return (s) => {
       const t = s.terminal;
-      const v = t.server;
+      const v = t.server || {}; // absent until the terminal feature is wired
       pair.update(s);
-      srvPill.textContent = v.busy ? 'Setting up…' : SRV[v.service] || v.service;
+      srvPill.textContent = v.busy ? 'Setting up…' : SRV[v.service] || v.service || '';
       srvPill.className = 'pill ' + (v.service === 'running' ? 'good' : v.busy ? 'muted' : 'bad');
       setupBtn.hidden = v.service === 'running' || v.busy || !t.allowMac;
       srvRow.setHint(v.message || (v.service === 'running' ? '' : 'Asks for administrator rights once'));
@@ -50,7 +59,7 @@ UI.tab({
       macRow.label.textContent = v.info && v.info.enabled ? 'Ready' : v.macAsked ? 'Not ready yet' : 'Waiting for {name}';
       macRow.setHint(v.macAsked && !(v.info && v.info.enabled) && v.service !== 'running' ? 'Set up the SSH server first' : '');
 
-      pill.textContent = TEXT[t.status] || t.status;
+      pill.textContent = TEXT[t.status] || t.status || '';
       pill.className = 'pill ' + (t.status === 'ready' ? 'good' : t.status === 'unavailable' || t.status === 'error' ? 'bad' : 'muted');
       openBtn.disabled = t.status !== 'ready';
       status.setHint(t.message || (t.status === 'ready' ? 'As ' + t.user : t.status === 'unavailable' ? (UI.peer(s).os === 'mac' ? 'Turn on Remote Login on {name}' : 'Set up the SSH server on {name}') : ''));
