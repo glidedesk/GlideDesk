@@ -414,67 +414,6 @@ pub fn open_notified_app(id: String) -> Result<(), String> {
 }
 
 // ==========================================
-// 4. TERMINAL / SSH
-// ==========================================
-
-#[tauri::command]
-pub fn open_terminal() -> Result<(), String> {
-    log::info!("[Terminal] Opening terminal emulator");
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .args(["-a", "Terminal"])
-            .spawn()
-            .map_err(|e| format!("Failed to open Terminal: {}", e))?;
-        return Ok(());
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/C", "start", "wt.exe"])
-            .spawn()
-            .or_else(|_| Command::new("cmd").args(["/C", "start", "powershell.exe"]).spawn())
-            .map_err(|e| format!("Failed to open Windows Terminal: {}", e))?;
-        return Ok(());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("x-terminal-emulator")
-            .spawn()
-            .or_else(|_| Command::new("gnome-terminal").spawn())
-            .map_err(|e| format!("Failed to open Linux terminal: {}", e))?;
-        return Ok(());
-    }
-    #[allow(unreachable_code)]
-    Ok(())
-}
-
-#[tauri::command]
-pub fn setup_sshd() -> Result<String, String> {
-    log::info!("[Terminal] Checking and setting up SSH daemon");
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("launchctl")
-            .args(["list", "com.openssh.sshd"])
-            .output();
-        if let Ok(out) = output {
-            if out.status.success() {
-                return Ok("SSH daemon (Remote Login) is active on this Mac.".to_string());
-            }
-        }
-        return Ok("To enable Remote Login on macOS: System Settings › General › Sharing › Remote Login: On.".to_string());
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return Ok("To enable OpenSSH Server on Windows: Settings › System › Optional features › OpenSSH Server.".to_string());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        return Ok("To enable OpenSSH on Linux: sudo systemctl enable --now sshd".to_string());
-    }
-}
-
-// ==========================================
 // 5. REMOTE SCREEN / MONITOR
 // ==========================================
 

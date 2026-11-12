@@ -26,6 +26,7 @@ mod phone;
 mod camera;
 mod parity;
 mod streaming;
+mod terminal;
 mod device_control;
 pub mod transport;
 pub mod window_manager;
@@ -105,6 +106,10 @@ fn main() {
 
             // 4. Register NetworkManager in Tauri state
             app.manage(network.clone());
+
+            // 4a. Keep the Terminal tab honest: offer this computer's key and learn
+            // whether the other side will let a shell in.
+            terminal::start(handle.clone(), network.clone());
 
             // 4b. Drain the audio and screen channels from the start, so turning on
             // sharing later cannot find them already full.
@@ -245,7 +250,7 @@ fn main() {
             parity::open_monitor,
             parity::open_notified_app,
             parity::open_received_folder,
-            parity::open_terminal,
+            terminal::open_terminal,
             parity::pin_app,
             parity::remote_screen,
             parity::reset_received_folder,
@@ -255,7 +260,7 @@ fn main() {
             parity::set_phone_remote,
             parity::set_startup,
             wol::set_wake,
-            parity::setup_sshd,
+            terminal::setup_sshd,
             parity::fix_firewall,
             parity::net_wifi,
             parity::net_location,

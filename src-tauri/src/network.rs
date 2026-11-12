@@ -420,6 +420,13 @@ pub struct WireMessage {
     #[serde(default)]
     pub address: Option<String>,
 
+    // Terminal fields: `user` is the login name on the sending computer and `ssh`
+    // the public key it offers so the receiver can let it in. Older peers omit both.
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub ssh: Option<String>,
+
     // Media & Device Action fields
     #[serde(default)]
     pub action: Option<String>,
@@ -542,6 +549,8 @@ impl Default for WireMessage {
             items: None,
             macs: None,
             address: None,
+            user: None,
+            ssh: None,
             action: None,
             pos: None,
             rezume_item: None,
@@ -1729,6 +1738,103 @@ impl MeshServer {
                             "h": pkt.height,
                         }),
                     );
+                }
+            }
+            "terminal.key" => {
+                // The other computer asking to be let in. Add its key here, then answer
+                // with this computer's login name and whether its SSH server is up —
+                // that answer is what the other side's Open Terminal needs.
+                if !*authenticated.read() {
+                    log::warn!(
+                        "[Auth] Dropping unauthenticated terminal.key packet from {}",
+                        peer_addr
+                    );
+                } else if let Some(pubkey) = pkt.ssh.as_deref() {
+                    let allow = state.inner.read().terminal.allow_mac;
+                    // Say which computer is speaking, because this line is shown on the
+                    // other computer's Terminal page.
+                    let here = {
+                        let host = state.inner.read().about.pc.host.clone();
+                        if host.is_empty() {
+                            "This computer".to_string()
+                        } else {
+                            host
+                        }
+                    };
+                    let (granted, message) = if !allow {
+                        (
+                            false,
+                            format!("{} does not let the other computer open a terminal.", here),
+                        )
+                    } else {
+                        match crate::terminal::install_authorized_key(pubkey) {
+                            Ok(()) => {
+                                let (service, svc_message) = crate::terminal::sshd_service();
+                                let running = service == "running";
+                                let accepted =
+                                    running && crate::terminal::peer_key_accepted(pubkey);
+                                {
+                                    let mut s = state.inner.write();
+                                    s.terminal.server.service = service;
+                                    s.terminal.server.message = svc_message.clone();
+                                    s.terminal.server.mac_asked = true;
+                                    s.terminal.server.info.enabled = accepted;
+                                }
+                                if accepted {
+                                    (true, String::new())
+                                } else if running {
+                                    (
+                                        false,
+                                        format!(
+                                            "{} needs its one-time setup before a terminal can open there.",
+                                            here
+                                        ),
+                                    )
+                                } else {
+                                    (false, format!("{}: {}", here, svc_message))
+                                }
+                            }
+                            Err(e) => (false, e),
+                        }
+                    };
+                    let reply = WireMessage {
+                        t: "terminal.ok".to_string(),
+                        v: Some(1),
+                        on: Some(granted),
+                        user: Some(crate::terminal::local_user()),
+                        port: Some(22),
+                        message: Some(message),
+                        ..Default::default()
+                    };
+                    let _ = out_tx.send(reply).await;
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
+                }
+            }
+            "terminal.ok" => {
+                // The other computer's answer: its login name when it will let us in,
+                // otherwise why not.
+                if !*authenticated.read() {
+                    log::warn!(
+                        "[Auth] Dropping unauthenticated terminal.ok packet from {}",
+                        peer_addr
+                    );
+                } else {
+                    let granted = pkt.on.unwrap_or(false);
+                    let user = pkt.user.clone().unwrap_or_default();
+                    let message = pkt.message.clone().unwrap_or_default();
+                    {
+                        let mut s = state.inner.write();
+                        s.terminal.user = if granted { user } else { String::new() };
+                        s.terminal.status = if granted {
+                            "ready".to_string()
+                        } else {
+                            "unavailable".to_string()
+                        };
+                        s.terminal.message = message;
+                    }
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
                 }
             }
             "screen.state" => {
@@ -3742,6 +3848,11 @@ impl NetworkManager {
     }
 
     /// Returns snapshot list of active connected clients.
+    /// This install's stable id, the one other computers know it by.
+    pub fn local_id(&self) -> &str {
+        &self.local_id
+    }
+
     pub fn get_active_clients_info(&self) -> Vec<ClientInfo> {
         let guard = self.active_clients.read();
         guard

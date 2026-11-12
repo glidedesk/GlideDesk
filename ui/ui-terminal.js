@@ -26,12 +26,27 @@ UI.tab({
     const { el, api } = UI;
     // Mac → PC (server here)
     const srvPill = el('span', { class: 'pill' });
-    const setupBtn = UI.button('Set up', () => api.setupSshd(), 'small primary');
+    const setupBtn = UI.button('Set up', async () => {
+      try {
+        await api.setupSshd();
+      } catch (e) {
+        srvRow.setHint(String((e && e.message) || e));
+      }
+    }, 'small primary');
     const srvRow = UI.row('SSH server', '', [srvPill, setupBtn]);
     const macRow = UI.row('', '');
     // PC → Mac (client here)
     const pill = el('span', { class: 'pill' });
-    const openBtn = UI.button('Open Terminal', () => api.openTerminal(), 'small primary');
+    const openBtn = UI.button('Open Terminal', async () => {
+      try {
+        const said = await api.openTerminal();
+        if (said) status.setHint(String(said));
+      } catch (e) {
+        // The other computer has not let this one in yet, or the shell could not
+        // start: say so on the row instead of only in the console.
+        status.setHint(String((e && e.message) || e));
+      }
+    }, 'small primary');
     const status = UI.row('Shell on {name}', '', [pill, openBtn]);
     const cmdRow = UI.row('In any terminal', '', [el('code', { class: 'mono', text: 'ssh glidedesk' })]);
     const pair = UI.dirCards(
@@ -51,13 +66,21 @@ UI.tab({
       const t = s.terminal;
       const v = t.server || {}; // absent until the terminal feature is wired
       pair.update(s);
-      srvPill.textContent = v.busy ? 'Setting up…' : SRV[v.service] || v.service || '';
-      srvPill.className = 'pill ' + (v.service === 'running' ? 'good' : v.busy ? 'muted' : 'bad');
-      setupBtn.hidden = v.service === 'running' || v.busy || !t.allowMac;
+      // A running server that has not let the other computer in is not "ready": on
+      // Windows an administrator's keys live in a machine-wide file that the one-time
+      // Set up writes, so the switch between the two matters here.
+      const usable = !!(v.info && v.info.enabled);
+      srvPill.textContent = v.busy
+        ? 'Setting up…'
+        : v.service === 'running'
+          ? (v.macAsked && !usable ? 'Needs setup' : 'Running')
+          : SRV[v.service] || v.service || '';
+      srvPill.className = 'pill ' + (v.busy ? 'muted' : v.service === 'running' && (!v.macAsked || usable) ? 'good' : 'bad');
+      setupBtn.hidden = v.busy || !t.allowMac || (v.service === 'running' && (!v.macAsked || usable));
       srvRow.setHint(v.message || (v.service === 'running' ? '' : 'Asks for administrator rights once'));
       macRow.hidden = !t.allowMac;
-      macRow.label.textContent = v.info && v.info.enabled ? 'Ready' : v.macAsked ? 'Not ready yet' : 'Waiting for {name}';
-      macRow.setHint(v.macAsked && !(v.info && v.info.enabled) && v.service !== 'running' ? 'Set up the SSH server first' : '');
+      macRow.label.textContent = usable ? 'Ready' : v.macAsked ? 'Not ready yet' : 'Waiting for {name}';
+      macRow.setHint(v.macAsked && !usable ? 'Set up the SSH server first' : '');
 
       pill.textContent = TEXT[t.status] || t.status || '';
       pill.className = 'pill ' + (t.status === 'ready' ? 'good' : t.status === 'unavailable' || t.status === 'error' ? 'bad' : 'muted');
