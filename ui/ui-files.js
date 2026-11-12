@@ -166,19 +166,17 @@ UI.tab({
     window.addEventListener('dragover', (e) => e.preventDefault());
     window.addEventListener('drop', (e) => e.preventDefault());
 
-    // Copy and paste files with shortcuts
-    const keysSw = sw('Copy and paste files with shortcuts', (v) => api.setFiles({ shortcuts: v }));
-    const copyRec = UI.keyRecorder((v) => api.setFiles({ copyKeys: v }));
-    const pasteRec = UI.keyRecorder((v) => api.setFiles({ pasteKeys: v }));
-    const keysRow = UI.row('Copy and paste files', '', [keysSw]);
-    const copyRow = UI.row('Copy', 'Select files in File Explorer first', [copyRec]);
-    const pasteRow = UI.row('Paste', '', [pasteRec]);
+    // Copy and paste files with shortcuts. There is nothing to configure: the
+    // gesture is Ctrl+C here and Ctrl+Alt+V on the other computer, read by the
+    // side that has the pointer (fileclip.rs). The stored copyKeys/pasteKeys are
+    // kept for older files.json files but the hook uses the fixed gesture.
+    const keysRow = UI.row('Copy and paste files', '');
     const cancelBtn = UI.button('Cancel', () => api.cancelDrop(), 'small');
     const outRow = UI.row('', '', [cancelBtn]);
     const inRow = UI.row('', '');
     body.append(
       UI.card('', [sendRow, zone], { cls: 'keep-on' }),
-      UI.card('', [keysRow, copyRow, pasteRow], { cls: 'keep-on' }),
+      UI.card('', [keysRow], { cls: 'keep-on' }),
       pair.el,
       foldersCard,
       folderCard,
@@ -204,15 +202,12 @@ UI.tab({
       sendRow.setHint(b ? (b.kind === 'paste' ? 'Pasting ' : 'Sending ') + b.name + ' to ' + (multiCount > 1 ? `all ${multiCount} devices` : p.the) + (b.files > 1 ? ' · ' + (b.index + 1) + ' of ' + b.files : '') : canSend ? (multiCount > 1 ? `To all ${multiCount} devices` : 'To ' + p.the) : '');
       // Shortcuts
       const ck = f.clip;
-      keysSw.set(f.shortcuts);
-      copyRec.set(f.copyKeys);
-      pasteRec.set(f.pasteKeys);
-      keysRow.setHint(ck.error || 'Select files, press ' + UI.keysLabel(f.copyKeys) + ', then ' + UI.keysLabel(f.pasteKeys) + ' on ' + p.the);
+      const paste = UI.keysLabel(f.pasteKeys || 'Control+Alt+V');
+      keysRow.setHint(ck.error
+        || (ck.pasting ? 'Pasting…'
+          : ck.incoming ? p.them + ' copied ' + (ck.incoming.name || ck.incoming.items + ' items') + ' · press ' + paste
+            : 'Select files and copy them here, then press ' + paste + ' on ' + p.the));
       keysRow.hint.classList.toggle('bad', !!ck.error);
-      copyRow.hidden = pasteRow.hidden = !f.shortcuts;
-      pasteRow.setHint(ck.pasting ? 'Pasting…'
-        : ck.incoming ? p.them + ' copied ' + (ck.incoming.name || ck.incoming.items + ' items') + ' · press ' + UI.keysLabel(f.pasteKeys)
-          : 'Into the app in front (a chat, a mail…), or the File Explorer folder in front, else the Desktop');
       // ---- the other computer's folder ----
       mount.set(f.mountMac);
       const other = m.peer || {};
