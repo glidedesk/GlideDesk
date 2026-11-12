@@ -16,7 +16,7 @@ UI.tab({
     const { api } = UI;
     const set = (partial) => api.setAudio(partial);
     const volume = UI.slider({ min: 0, max: 1, step: 0.05, format: (v) => Math.round(v * 100) + '%' }, (v) => set({ volume: v }));
-    const mute = UI.switch((v) => set({ muteLocal: v }), { label: 'Mute {me} while sending' });
+    const mute = UI.switch((v) => set({ muteLocal: v }), { label: 'Don’t play {name}’s sound here while sending' });
     const recvState = UI.row('', '');
     const sendState = UI.row('', '');
     const pair = UI.dirCards(
@@ -25,7 +25,7 @@ UI.tab({
         recvState,
       ] },
       { on: { get: (s) => s.audio.send, set: (v) => set({ send: v }) }, label: 'Play {me}’s sound on {name}', rows: [
-        UI.row('Mute {me} while sending', '', [mute]),
+        UI.row('Don’t play {name}’s sound here while sending', '', [mute]),
         sendState,
       ] },
     );

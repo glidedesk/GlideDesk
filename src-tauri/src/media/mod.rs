@@ -5,6 +5,6 @@ pub mod audio;
 pub mod screen;
 pub mod bridge;
 
-pub use audio::AudioEngine;
+pub use audio::{AudioEngine, AudioPlayer};
 pub use screen::ScreenEngine;
 pub use bridge::NativeBridgeManager;

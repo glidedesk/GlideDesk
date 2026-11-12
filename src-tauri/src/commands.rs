@@ -1163,6 +1163,12 @@ pub fn set_app(partial: Value, state: State<'_, AppState>, network: State<'_, Ne
     if partial.get("notifs").is_some() {
         crate::notifications::send_policy(network.inner(), &state);
     }
+    // Sound: start or stop capture and playback here, and tell the other computer
+    // whether this one plays its sound.
+    if partial.get("audio").is_some() || partial.get("on").is_some() {
+        crate::media::bridge::send_policy(network.inner(), &state);
+        crate::media::bridge::apply_audio(&app, &state);
+    }
     // The Files page's choices are the setup a person should only do once: keep them
     // for the next launch.
     if partial.get("files").is_some() {

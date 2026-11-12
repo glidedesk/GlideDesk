@@ -1,18 +1,24 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 // Pure Rust Native OS Bridge Commands (Virtual Display, Audio Capture, Gamepad Emulation)
 
-use crate::media::{AudioEngine, ScreenEngine};
+use crate::media::{AudioEngine, AudioPlayer, ScreenEngine};
 use crate::network::{NetworkManager, WireMessage};
+use crate::state::AppState;
+use base64::Engine as _;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+
+/// One wire packet carries about 50 ms of sound: the capture backends hand over
+/// 10 ms at a time, and one packet per callback would be mostly overhead.
+const AUDIO_PACKET_BYTES: usize = (48000 * 2 * 4) / 20;
 
 pub struct NativeBridgeManager {
     pub audio_engine: AudioEngine,
+    pub player: AudioPlayer,
     pub screen_engine: ScreenEngine,
-    audio_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
-    screen_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
+    audio_rx: std::sync::Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
+    screen_rx: std::sync::Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
     broadcasting_started: AtomicBool,
 }
 
@@ -23,9 +29,10 @@ impl NativeBridgeManager {
 
         Self {
             audio_engine,
+            player: AudioPlayer::new(),
             screen_engine,
-            audio_rx: Arc::new(tokio::sync::Mutex::new(Some(audio_rx))),
-            screen_rx: Arc::new(tokio::sync::Mutex::new(Some(screen_rx))),
+            audio_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(audio_rx))),
+            screen_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(screen_rx))),
             broadcasting_started: AtomicBool::new(false),
         }
     }
@@ -47,10 +54,20 @@ impl NativeBridgeManager {
             if let Some(mut rx) = rx_opt.take() {
                 drop(rx_opt);
                 log::info!("[Media] Audio forwarder running");
+                let mut pending: Vec<u8> = Vec::with_capacity(AUDIO_PACKET_BYTES * 2);
                 while let Some(bytes) = rx.recv().await {
+                    pending.extend_from_slice(&bytes);
+                    if pending.len() < AUDIO_PACKET_BYTES {
+                        continue;
+                    }
+                    let chunk = std::mem::replace(&mut pending, Vec::with_capacity(AUDIO_PACKET_BYTES * 2));
                     let msg = WireMessage {
                         t: "media.audio".to_string(),
-                        audio_bytes: Some(bytes),
+                        audio_b64: Some(
+                            base64::prelude::BASE64_STANDARD.encode(&chunk),
+                        ),
+                        audio_rate: Some(crate::media::audio::SAMPLE_RATE),
+                        audio_chs: Some(crate::media::audio::CHANNELS),
                         ..Default::default()
                     };
                     let _ = app_audio.emit("media-audio-stream", &msg);
@@ -100,13 +117,21 @@ impl NativeBridgeManager {
 
 #[tauri::command]
 pub fn start_audio_capture(bridge: State<'_, NativeBridgeManager>, app: AppHandle) -> Result<(), String> {
-    bridge.start_broadcasting(app);
-    bridge.audio_engine.start_capture()
+    bridge.start_broadcasting(app.clone());
+    bridge.audio_engine.start_capture()?;
+    if let Some(state) = app.try_state::<AppState>() {
+        crate::commands::push_state(&app, &state);
+    }
+    Ok(())
 }
 
 #[tauri::command]
-pub fn stop_audio_capture(bridge: State<'_, NativeBridgeManager>) {
+pub fn stop_audio_capture(bridge: State<'_, NativeBridgeManager>, app: AppHandle) {
     bridge.audio_engine.stop_capture();
+    bridge.player.stop();
+    if let Some(state) = app.try_state::<AppState>() {
+        crate::commands::push_state(&app, &state);
+    }
 }
 
 #[tauri::command]
@@ -137,6 +162,176 @@ pub fn emulate_gamepad_event(
         net.send_packet_sync(pkt);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sound both ways, driven by the Audio tab and the other computer's policy
+// ---------------------------------------------------------------------------
+
+/// Start or stop capture and playback to match the tab and what the other
+/// computer accepts. Called on every settings change and whenever the link
+/// opens or closes.
+pub fn apply_audio(app: &AppHandle, state: &AppState) {
+    let Some(bridge) = app.try_state::<NativeBridgeManager>() else {
+        return;
+    };
+    let (enabled, send, receive) = {
+        let s = state.inner.read();
+        (s.audio.enabled, s.audio.send, s.audio.receive)
+    };
+    let peer_accepts = app
+        .try_state::<NetworkManager>()
+        .map(|n| n.audio_accept())
+        .unwrap_or(false);
+    let connected = state.inner.read().link.state == "connected";
+    bridge.player.set_volume(playback_volume(state));
+
+    let want_send = enabled && send && peer_accepts && connected;
+    if want_send && !bridge.audio_engine.is_capturing() {
+        bridge.start_broadcasting(app.clone());
+        if let Err(e) = bridge.audio_engine.start_capture() {
+            log::warn!("[Audio] Could not send this computer's sound: {}", e);
+            let mut s = state.inner.write();
+            s.audio.error = e;
+        }
+    } else if !want_send && bridge.audio_engine.is_capturing() {
+        bridge.audio_engine.stop_capture();
+    }
+
+    if !(enabled && receive) && bridge.player.is_playing() {
+        bridge.player.stop();
+    }
+}
+
+/// A `media.audio` packet from the other computer: play it here.
+pub fn audio_incoming(app: &AppHandle, state: &AppState, pkt: &WireMessage) {
+    let (enabled, receive) = {
+        let s = state.inner.read();
+        (s.audio.enabled, s.audio.receive)
+    };
+    if !enabled || !receive {
+        return;
+    }
+    let Some(bridge) = app.try_state::<NativeBridgeManager>() else {
+        return;
+    };
+    let bytes = match (&pkt.audio_b64, &pkt.audio_bytes) {
+        (Some(b64), _) => base64::prelude::BASE64_STANDARD
+            .decode(b64.as_bytes())
+            .unwrap_or_default(),
+        (None, Some(raw)) => raw.clone(),
+        _ => return,
+    };
+    if bytes.is_empty() {
+        return;
+    }
+    bridge.player.set_volume(playback_volume(state));
+    bridge.player.start();
+    bridge.player.push(&bytes);
+    let _ = app.emit("media-audio-received", &bytes);
+}
+
+/// The player's volume: the tab's slider, unless the person asked not to hear
+/// the other computer here while this one is sending its own sound (that is what
+/// stops sound played here from being captured and sent back).
+fn playback_volume(state: &AppState) -> f64 {
+    let s = state.inner.read();
+    let quiet =
+        s.audio.mute_local && s.audio.send && s.audio.enabled && s.link.state == "connected";
+    if quiet {
+        0.0
+    } else {
+        s.audio.volume
+    }
+}
+
+/// The other computer's `audio.policy`: whether it plays our sound.
+pub fn set_peer_policy(app: &AppHandle, state: &AppState, accept: bool) {
+    if let Some(net) = app.try_state::<NetworkManager>() {
+        net.set_audio_accept(accept);
+    }
+    {
+        let mut s = state.inner.write();
+        s.audio.mac_accepts = accept;
+    }
+    log::info!(
+        "[Audio] The other computer {} our sound",
+        if accept { "plays" } else { "does not play" }
+    );
+    apply_audio(app, state);
+    crate::commands::push_state(app, state);
+}
+
+/// Tell the other computer whether this one plays its sound.
+pub fn send_policy(network: &NetworkManager, state: &AppState) {
+    let accept = {
+        let s = state.inner.read();
+        s.audio.enabled && s.audio.receive
+    };
+    network.send_packet_sync(WireMessage {
+        t: "audio.policy".to_string(),
+        v: Some(1),
+        accept: Some(accept),
+        ..Default::default()
+    });
+}
+
+/// Keep `sending` and `receiving` in step with what the devices are really
+/// doing, so the tab says "Playing X" only while sound is flowing.
+pub fn start_status(app: AppHandle, state: AppState) {
+    let thread = std::thread::Builder::new()
+        .name("glidedesk-audio-status".into())
+        .spawn(move || {
+            let mut last_log = std::time::Instant::now();
+            let mut last_packets = 0u64;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+                let Some(bridge) = app.try_state::<NativeBridgeManager>() else {
+                    continue;
+                };
+                let sending = bridge.audio_engine.is_capturing();
+                let receiving = bridge.player.is_playing();
+                let (packets, peak) = bridge.player.traffic();
+                let mut error = bridge.audio_engine.error();
+                if error.is_empty() {
+                    error = bridge.player.error();
+                }
+                if packets > last_packets && last_log.elapsed() > std::time::Duration::from_secs(10) {
+                    log::info!(
+                        "[Audio] Played {} more sound packets, peak {:.2}",
+                        packets - last_packets,
+                        peak
+                    );
+                    last_packets = packets;
+                    last_log = std::time::Instant::now();
+                    bridge.player.reset_peak();
+                }
+                let mut changed = false;
+                {
+                    let mut s = state.inner.write();
+                    if s.audio.sending != sending {
+                        s.audio.sending = sending;
+                        changed = true;
+                    }
+                    if s.audio.receiving != receiving {
+                        s.audio.receiving = receiving;
+                        changed = true;
+                    }
+                    // The devices own this line: a failure shows while it lasts and
+                    // clears once sound flows again.
+                    if s.audio.error != error {
+                        s.audio.error = error;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    crate::commands::push_state(&app, &state);
+                }
+            }
+        });
+    if let Err(e) = thread {
+        log::warn!("[Audio] Could not start the status thread: {}", e);
+    }
 }
 
 #[tauri::command]

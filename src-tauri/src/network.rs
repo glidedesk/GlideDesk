@@ -483,6 +483,13 @@ pub struct WireMessage {
     // Media & Screen streaming fields
     #[serde(default)]
     pub audio_bytes: Option<Vec<u8>>,
+    /// One packet of the sender's sound, base64 48 kHz stereo float32.
+    #[serde(rename = "audioB64", default)]
+    pub audio_b64: Option<String>,
+    #[serde(rename = "audioRate", default)]
+    pub audio_rate: Option<u32>,
+    #[serde(rename = "audioChs", default)]
+    pub audio_chs: Option<u32>,
     #[serde(default)]
     pub frame_png: Option<Vec<u8>>,
     /// One screen frame, ready for `img.src` ("data:image/jpeg;base64,…"). Much
@@ -610,6 +617,9 @@ impl Default for WireMessage {
             side: None,
             pc_side: None,
             audio_bytes: None,
+            audio_b64: None,
+            audio_rate: None,
+            audio_chs: None,
             frame_png: None,
             frame_b64: None,
             fps: None,
@@ -1306,7 +1316,9 @@ impl MeshServer {
         state.remove_client(&peer_addr.ip().to_string());
         if let Some(net) = app.try_state::<NetworkManager>() {
             net.set_notif_accept(false);
+            net.set_audio_accept(false);
         }
+        crate::media::bridge::apply_audio(&app, &state);
         let was_driving = state.inner.read().input == "driving";
         state.set_where_input("home");
         crate::kvm::NativeInputInjector::release_all_keys();
@@ -1748,8 +1760,8 @@ impl MeshServer {
             "media.audio" => {
                 if !*authenticated.read() {
                     log::warn!("[Auth] Dropping unauthenticated media.audio packet from {}", peer_addr);
-                } else if let Some(ref bytes) = pkt.audio_bytes {
-                    let _ = app.emit("media-audio-received", bytes);
+                } else {
+                    crate::media::bridge::audio_incoming(app, state, pkt);
                 }
             }
             "media.screen" => {
@@ -2105,6 +2117,20 @@ impl MeshServer {
                     })
                     .await;
 
+                // Sound: and whether this one plays the other's.
+                let audio_accept = {
+                    let s = state.inner.read();
+                    s.audio.enabled && s.audio.receive
+                };
+                let _ = out_tx
+                    .send(WireMessage {
+                        t: "audio.policy".to_string(),
+                        v: Some(1),
+                        accept: Some(audio_accept),
+                        ..Default::default()
+                    })
+                    .await;
+
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
             }
@@ -2115,7 +2141,9 @@ impl MeshServer {
                 state.remove_client(&peer_addr.ip().to_string());
                 if let Some(net) = app.try_state::<NetworkManager>() {
                     net.set_notif_accept(false);
+                    net.set_audio_accept(false);
                 }
+                crate::media::bridge::apply_audio(app, &state);
                 let was_driving = state.inner.read().input == "driving";
                 state.set_where_input("home");
                 crate::kvm::NativeInputInjector::release_all_keys();
@@ -2131,7 +2159,7 @@ impl MeshServer {
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
                 | "clip" | "clip.image" | "kvm.take" | "window.handoff.offer"
                 | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
-                | "notif" | "notif.policy"
+                | "notif" | "notif.policy" | "audio.policy"
                 | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
                 | "rz.offer" | "rz.take" | "files.batch" | "files.chunk"
                 | "files.done" | "files.ack" | "files.cancel" | "fclip.paste"
@@ -2441,6 +2469,15 @@ impl MeshServer {
             "notif.policy" => {
                 if *authenticated.read() {
                     crate::notifications::set_peer_policy(
+                        app,
+                        state,
+                        pkt.accept.unwrap_or(false),
+                    );
+                }
+            }
+            "audio.policy" => {
+                if *authenticated.read() {
+                    crate::media::bridge::set_peer_policy(
                         app,
                         state,
                         pkt.accept.unwrap_or(false),
@@ -2980,6 +3017,8 @@ pub struct NetworkManager {
     pair_limit_gen: Arc<AtomicU64>,
     /// The other computer's last `notif.policy`: whether it wants ours.
     notif_accept: Arc<AtomicBool>,
+    /// The other computer's last `audio.policy`: whether it plays our sound.
+    audio_accept: Arc<AtomicBool>,
     pub tls_identity: Arc<crate::transport::tls::LocalTlsIdentity>,
     discovery: Arc<RwLock<Option<Arc<DiscoveryService>>>>,
 }
@@ -3012,6 +3051,7 @@ impl NetworkManager {
             seq: Arc::new(Mutex::new(chrono::Utc::now().timestamp_millis() as u64)),
             pair_limit_gen: Arc::new(AtomicU64::new(0)),
             notif_accept: Arc::new(AtomicBool::new(false)),
+            audio_accept: Arc::new(AtomicBool::new(false)),
             tls_identity,
             discovery: Arc::new(RwLock::new(None)),
         }
@@ -3942,7 +3982,7 @@ impl NetworkManager {
                 | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
-                | "notif" | "notif.policy"
+                | "notif" | "notif.policy" | "audio.policy"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
                 | "files.batch" | "files.chunk" | "files.done" | "files.ack" | "files.cancel"
         );
@@ -4014,7 +4054,7 @@ impl NetworkManager {
                 | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
-                | "notif" | "notif.policy"
+                | "notif" | "notif.policy" | "audio.policy"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
                 | "files.batch" | "files.chunk" | "files.done" | "files.ack" | "files.cancel"
         );
@@ -4066,6 +4106,15 @@ impl NetworkManager {
 
     pub fn notif_accept(&self) -> bool {
         self.notif_accept.load(Ordering::Relaxed)
+    }
+
+    /// The other computer's last `audio.policy`: true when it plays our sound.
+    pub fn set_audio_accept(&self, on: bool) {
+        self.audio_accept.store(on, Ordering::Relaxed);
+    }
+
+    pub fn audio_accept(&self) -> bool {
+        self.audio_accept.load(Ordering::Relaxed)
     }
 
     pub fn get_active_clients_info(&self) -> Vec<ClientInfo> {

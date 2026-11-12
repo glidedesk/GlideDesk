@@ -114,6 +114,9 @@ fn main() {
             // 4a. Mirror this computer's notifications on the paired one.
             notifications::start(handle.clone(), state.clone(), network.clone());
 
+            // 4a. Keep the Audio tab in step with what the sound devices are doing.
+            media::bridge::start_status(handle.clone(), state.clone());
+
             // 4a. Keep the Terminal tab honest: offer this computer's key and learn
             // whether the other side will let a shell in.
             terminal::start(handle.clone(), network.clone());

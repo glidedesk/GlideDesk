@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>GlideDesk sends this computer's screen and its sound to the computer it is paired with.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>GlideDesk sends this computer's microphone to the computer it is paired with when you turn the microphone on.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>GlideDesk sends this computer's sound to the computer it is paired with.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>GlideDesk sends this computer's camera to the computer it is paired with when you turn the camera on.</string>
+</dict>
+</plist>
