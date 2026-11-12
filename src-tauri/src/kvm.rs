@@ -2546,6 +2546,7 @@ pub mod hook_engine {
     #[derive(Clone)]
     struct HookView {
         driving: bool,
+        driven: bool,
         has_peer: bool,
         keyboard: bool,
         mouse: bool,
@@ -2585,6 +2586,7 @@ pub mod hook_engine {
         };
         HookView {
             driving: s.input == "driving",
+            driven: s.input == "driven",
             has_peer: s.client.is_some() || s.peer.is_some() || s.link.state == "connected",
             keyboard: s.kvm.keyboard,
             mouse: s.kvm.mouse,
@@ -2783,6 +2785,32 @@ pub mod hook_engine {
 
                 let sharing_enabled =
                     view.mouse && view.linked && view.drive_other && !view.paused;
+
+                // A computer the other one is using gives control back as soon as its
+                // own mouse is touched. Injected input carries the marker and was
+                // passed on above, so anything left is the person at this desk. Without
+                // this both computers can end up each believing the other is driving,
+                // and then neither takes input at all.
+                if view.driven
+                    && matches!(
+                        msg,
+                        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
+                    )
+                {
+                    log::info!("[KVM] Local mouse took control back from the other computer");
+                    state.set_where_input("home");
+                    crate::fileclip::reset();
+                    NativeInputInjector::release_all_keys();
+                    let new_snap = state.snapshot();
+                    let _ = app.emit("state-change", &new_snap);
+                    let home = WireMessage {
+                        t: "kvm.home".to_string(),
+                        v: Some(1),
+                        ..Default::default()
+                    };
+                    net.send_packet_sync(home);
+                }
+
                 if !is_driving && has_peer && sharing_enabled {
                     // Edge check across the entire virtual multi-monitor desktop
                     let crossed = match view.side.as_str() {
@@ -3373,6 +3401,30 @@ pub mod hook_engine {
             let max_y = vy + vh;
 
             let sharing_enabled = snap.kvm.mouse && snap.kvm.linked && snap.kvm.drive_other && !snap.kvm_state.paused;
+
+            // A computer the other one is using gives control back as soon as its own
+            // mouse is touched: events this app injected were filtered out above, so
+            // anything left is the person at this desk. Without this both computers can
+            // end up each believing the other is driving, and neither takes input.
+            if snap.input == "driven"
+                && (r#type == kCGEventMouseMoved
+                    || r#type == kCGEventLeftMouseDown
+                    || r#type == kCGEventRightMouseDown)
+            {
+                log::info!("[KVM] Local mouse took control back from the other computer");
+                state.set_where_input("home");
+                crate::fileclip::reset();
+                NativeInputInjector::release_all_keys();
+                let new_snap = state.snapshot();
+                let _ = app.emit("state-change", &new_snap);
+                let home_msg = WireMessage {
+                    t: "kvm.home".to_string(),
+                    v: Some(1),
+                    ..Default::default()
+                };
+                net.send_packet_sync(home_msg);
+            }
+
             if !is_driving && has_peer && sharing_enabled {
                 if r#type == kCGEventMouseMoved
                     || r#type == kCGEventLeftMouseDragged

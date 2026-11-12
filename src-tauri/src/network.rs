@@ -2310,11 +2310,25 @@ impl MeshServer {
                 // direction, and the overall link must all be on. Otherwise say so, so
                 // the other computer hands control straight back instead of hiding its
                 // pointer on a screen nobody is driving.
-                let accepted = {
+                let (accepted, driving_now) = {
                     let s = state.inner.read();
-                    s.kvm.mouse && s.kvm.linked && s.kvm.be_driven
+                    (
+                        s.kvm.mouse && s.kvm.linked && s.kvm.be_driven,
+                        s.input == "driving",
+                    )
                 };
-                if !accepted {
+                if driving_now {
+                    // Both computers reached across at the same moment. The one already
+                    // driving keeps control and the other goes home, so the pair cannot
+                    // end up each waiting for the other with neither taking input.
+                    log::info!("[KVM] Ignored the other computer's pointer: this computer is already driving it");
+                    let home = WireMessage {
+                        t: "kvm.home".to_string(),
+                        v: Some(1),
+                        ..Default::default()
+                    };
+                    let _ = out_tx.send(home).await;
+                } else if !accepted {
                     log::info!("[KVM] Refused the other computer's pointer: cursor sharing is off here");
                     let home = WireMessage {
                         t: "kvm.home".to_string(),
