@@ -34,7 +34,31 @@ UI.tab({
     const zoneText = el('div', { class: 'big', text: 'Drop files or folders here' });
     const zoneHint = el('div', { class: 'hint', text: '' });
     const zone = el('div', { class: 'dropzone' }, [el('div', {}, [zoneText, zoneHint])]);
-    const sendBtn = UI.button('Choose…', () => api.chooseSendFiles(), 'small');
+    // Choose… picks files with the system dialog and sends them right away; the
+    // picked paths are only useful to the person sending, so they are not shown.
+    const baseName = (p) => String(p || '').split(/[\\/]/).pop();
+    const sayNotSent = (path, e) => {
+      const why = String((e && e.message) || e || 'could not send');
+      api.setFiles({ last: { ok: false, name: baseName(path) || 'files', text: why, at: Date.now() } })
+        .catch(() => {});
+      console.warn('[Files] Send failed', why);
+    };
+    const sendBtn = UI.button('Choose…', async () => {
+      if (!canSend) return;
+      let picked = [];
+      try {
+        picked = await api.chooseSendFiles();
+      } catch (e) {
+        sayNotSent('', e);
+        return;
+      }
+      if (!Array.isArray(picked) || !picked.length) return; // cancelled
+      try {
+        await api.sendFiles(picked);
+      } catch (e) {
+        sayNotSent(picked[0], e);
+      }
+    }, 'small');
     const sendRow = UI.row('Send files', '', [sendBtn]);
     const sendBar = el('div', { class: 'bar' }, [el('span')]);
     sendBar.hidden = true;

@@ -32,33 +32,82 @@ pub fn validate_bitrate(mbps: u32) -> Result<u32, String> {
     }
 }
 
+/// The message that describes what this computer shares right now.
+pub fn screen_state_message(state: &AppState) -> WireMessage {
+    let (on, mode, remote, name) = {
+        let s = state.inner.read();
+        (
+            s.stream.share == "on",
+            s.pc_screen.mode.clone(),
+            s.pc_screen.remote,
+            s.about.pc.host.clone(),
+        )
+    };
+    WireMessage {
+        t: "screen.state".to_string(),
+        v: Some(1),
+        on: Some(on),
+        mode: Some(if on { mode } else { "off".to_string() }),
+        remote: Some(remote),
+        modes: Some(vec!["mirror".to_string(), "extend".to_string()]),
+        name: Some(name),
+        ..Default::default()
+    }
+}
+
+/// Tell the other computer what this one shares right now, so its Receive screen
+/// page shows the same state as this Share screen page.
+pub fn announce_screen_state(state: &AppState, app: &AppHandle) {
+    if let Some(net) = app.try_state::<NetworkManager>() {
+        net.send_packet_sync(screen_state_message(state));
+    }
+}
+
+/// Start or stop sending this screen.
+///
+/// Every control that can change it (the master switch, Off/Mirror/Extend, a request
+/// from the other computer) goes through here, so the switches, the capture engine and
+/// the other computer never disagree about whether the screen is being shared.
+pub fn apply_sharing(on: bool, state: &AppState, app: &AppHandle) {
+    let (max_height, mbps) = {
+        let mut s = state.inner.write();
+        s.stream.share = if on { "on" } else { "off" }.to_string();
+        s.pc_screen.status = if on { "live" } else { "off" }.to_string();
+        if on {
+            if s.pc_screen.mode == "off" {
+                s.pc_screen.mode = "mirror".to_string();
+            }
+        } else {
+            s.pc_screen.mode = "off".to_string();
+        }
+        (s.pc_screen.max_height, s.pc_screen.mbps)
+    };
+    if let Some(bridge) = app.try_state::<NativeBridgeManager>() {
+        // The Resolution and Quality choices decide how big and how sharp each frame
+        // is, so they take effect for the frames sent from here on.
+        bridge.screen_engine.set_settings(
+            crate::media::screen::CaptureSettings::from_choices(max_height, mbps),
+        );
+        if on {
+            bridge.start_broadcasting(app.clone());
+            let _ = bridge.screen_engine.start_streaming(12);
+        } else {
+            bridge.screen_engine.stop_streaming();
+        }
+    }
+    announce_screen_state(state, app);
+    push_state(app, state);
+}
+
 #[tauri::command]
 pub fn set_sharing(
     on: bool,
     by: Option<String>,
     state: State<'_, AppState>,
-    bridge: State<'_, NativeBridgeManager>,
     app: AppHandle,
 ) -> Result<(), String> {
     log::info!("[Sharing] set_sharing: on={}, by={:?}", on, by);
-    {
-        let mut s = state.inner.write();
-        s.stream.share = if on { "on".to_string() } else { "off".to_string() };
-        s.stream.state = if on { "on".to_string() } else { "off".to_string() };
-        s.pc_screen.status = if on { "live".to_string() } else { "off".to_string() };
-        if !on {
-            s.pc_screen.mode = "off".to_string();
-        }
-    }
-
-    if on {
-        bridge.start_broadcasting(app.clone());
-        let _ = bridge.screen_engine.start_streaming(30);
-    } else {
-        bridge.screen_engine.stop_streaming();
-    }
-
-    push_state(&app, &state);
+    apply_sharing(on, &state, &app);
     Ok(())
 }
 
@@ -75,9 +124,11 @@ pub fn set_sharing_opts(
             if let Some(remote) = obj.get("remote").and_then(|v| v.as_bool()) {
                 s.pc_screen.remote = remote;
             }
-            s.stream.remote = Some(opts.clone());
         }
     }
+    // `stream.remote` describes the *other* computer, so it is only ever set from
+    // what that computer tells us; this page changes this computer's own options.
+    announce_screen_state(&state, &app);
     push_state(&app, &state);
     Ok(())
 }
@@ -160,7 +211,9 @@ pub fn set_display_mode(
             s.pc_screen.monitor = None;
         }
     }
-    push_state(&app, &state);
+    // Off stops sharing; Mirror and Extend start it. Choosing a mode is how the
+    // master switch turns sharing on, so it has to start the stream too.
+    apply_sharing(validated != "off", &state, &app);
     Ok(())
 }
 

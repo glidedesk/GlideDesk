@@ -1,5 +1,5 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Transfer Route, TLS Local Transport, and Resumable Transfer Protocol (LinkMyMac/Beam Pattern)
+// Transfer Route, TLS Local Transport, and Resumable Transfer Protocol
 
 pub mod route;
 pub mod tls;

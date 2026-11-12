@@ -1,5 +1,5 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Resumable, Chunked, Checksummed, Cancellable Batched File Transfer Protocol (LinkMyMac/Beam Pattern)
+// Resumable, Chunked, Checksummed, Cancellable Batched File Transfer Protocol
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,19 @@ pub fn default_download_dir() -> PathBuf {
     let fallback = std::env::temp_dir().join("glidedesk_downloads");
     let _ = std::fs::create_dir_all(&fallback);
     fallback
+}
+
+/// Where a file sent to this computer is saved: the folder chosen on the General
+/// page while it still exists, otherwise Downloads.
+pub fn effective_received_dir(chosen: &str) -> PathBuf {
+    let chosen = chosen.trim();
+    if !chosen.is_empty() {
+        let p = PathBuf::from(chosen);
+        if p.exists() {
+            return p;
+        }
+    }
+    default_download_dir()
 }
 
 pub fn compute_file_sha256(path: &Path) -> std::io::Result<(u64, String)> {

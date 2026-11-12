@@ -7,6 +7,7 @@ use std::process::Command;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::push_state;
+use crate::network::{NetworkManager, WireMessage};
 use crate::state::AppState;
 
 // ==========================================
@@ -201,14 +202,59 @@ pub fn open_mac_drive() -> Result<(), String> {
     Ok(())
 }
 
-fn default_received_dir() -> PathBuf {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join("Downloads/GlideDesk")
+/// Ask for a folder with the system's own picker. `None` means the person closed
+/// it without choosing, which must leave the setting as it was.
+fn pick_folder(prompt: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "POSIX path of (choose folder with prompt \"{}\")",
+            prompt.replace('"', " ")
+        );
+        let out = Command::new("osascript").arg("-e").arg(script).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return if p.is_empty() { None } else { Some(p.trim_end_matches('/').to_string()) };
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let ps = format!(
+            "[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = '{}'; if ($d.ShowDialog() -eq 'OK') {{ $d.SelectedPath }}",
+            prompt.replace('\'', " ")
+        );
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return if p.is_empty() { None } else { Some(p) };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let out = Command::new("zenity")
+            .args(["--file-selection", "--directory", "--title", prompt])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return if p.is_empty() { None } else { Some(p) };
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 #[tauri::command]
-pub fn open_received_folder() -> Result<(), String> {
-    let dir = default_received_dir();
+pub fn open_received_folder(state: State<'_, AppState>) -> Result<(), String> {
+    // Open the folder files actually land in, not one they might have moved past.
+    let chosen = state.inner.read().files.received_folder.clone();
+    let dir = crate::transport::transfer::effective_received_dir(&chosen);
     if !dir.exists() {
         std::fs::create_dir_all(&dir).ok();
     }
@@ -232,31 +278,47 @@ pub fn open_received_folder() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn choose_received_folder() -> Result<String, String> {
-    let dir = default_received_dir();
-    std::fs::create_dir_all(&dir).ok();
-    Ok(dir.to_string_lossy().to_string())
+pub fn choose_received_folder(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
+    // Change… on the General page: where files sent to this computer are saved.
+    let picked = match pick_folder("Choose where received files are saved") {
+        Some(p) => p,
+        None => return Ok(state.inner.read().files.received_folder.clone()),
+    };
+    {
+        let mut s = state.inner.write();
+        s.files.received_folder = picked.clone();
+        s.files.received = picked.clone();
+    }
+    push_state(&app, &state);
+    Ok(picked)
 }
 
 #[tauri::command]
 pub fn choose_share_folder(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
-    let dir = PathBuf::from(home).join("Public");
-    let path = dir.to_string_lossy().to_string();
+    // Choose… on the Files page: the folder this computer offers the other one.
+    let picked = match pick_folder("Choose a folder to share with the other computer") {
+        Some(p) => p,
+        None => return Ok(state.inner.read().files.path.clone()),
+    };
     {
         let mut s = state.inner.write();
-        s.files.path = path.clone();
-        s.files.smb.folder = path.clone();
+        s.files.path = picked.clone();
+        s.files.smb.folder = picked.clone();
         s.files.share_on = true;
     }
     push_state(&app, &state);
-    Ok(path)
+    Ok(picked)
 }
 
 #[tauri::command]
-pub fn reset_received_folder() -> Result<String, String> {
-    let dir = default_received_dir();
-    std::fs::create_dir_all(&dir).ok();
+pub fn reset_received_folder(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
+    let dir = crate::transport::transfer::default_download_dir();
+    {
+        let mut s = state.inner.write();
+        s.files.received_folder = String::new();
+        s.files.received = dir.to_string_lossy().to_string();
+    }
+    push_state(&app, &state);
     Ok(dir.to_string_lossy().to_string())
 }
 
@@ -417,16 +479,87 @@ pub fn setup_sshd() -> Result<String, String> {
 // ==========================================
 
 #[tauri::command]
-pub fn open_monitor(app: AppHandle) -> Result<(), String> {
+pub fn open_monitor(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     log::info!("[Monitor] Opening remote monitor / projection view");
-    if let Some(win) = app.get_webview_window("projection") {
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-        Ok(())
-    } else {
-        Err("Projection window not found in application manifest".to_string())
+    let win = app
+        .get_webview_window("projection")
+        .ok_or_else(|| "Projection window not found in application manifest".to_string())?;
+    let _ = win.show();
+    let _ = win.unminimize();
+    let _ = win.set_focus();
+
+    {
+        let mut s = state.inner.write();
+        s.stream.state = "on".to_string();
+        s.stream.watching = true;
     }
+
+    // When the other computer lets us start it, ask for the picture now; its answer
+    // (screen.state) and the frames it sends arrive on the same session.
+    let (allowed, mode) = {
+        let s = state.inner.read();
+        let remote = s.stream.remote.as_ref();
+        (
+            remote
+                .and_then(|r| r.get("remote"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            remote
+                .and_then(|r| r.get("mode"))
+                .and_then(|v| v.as_str())
+                .filter(|m| *m == "mirror" || *m == "extend")
+                .unwrap_or("mirror")
+                .to_string(),
+        )
+    };
+    if allowed {
+        if let Some(net) = app.try_state::<NetworkManager>() {
+            net.send_packet_sync(WireMessage {
+                t: "screen.ctl".to_string(),
+                v: Some(1),
+                on: Some(true),
+                mode: Some(mode),
+                ..Default::default()
+            });
+        }
+    }
+    push_state(&app, &state);
+    Ok(())
+}
+
+/// Ask the other computer to stop sharing (when we may), and stop watching here.
+pub(crate) fn stop_watching(state: &AppState, app: &AppHandle) {
+    let (allowed, was_on) = {
+        let s = state.inner.read();
+        (
+            s.stream
+                .remote
+                .as_ref()
+                .and_then(|r| r.get("remote"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            s.stream.state == "on",
+        )
+    };
+    {
+        let mut s = state.inner.write();
+        s.stream.state = "off".to_string();
+        s.stream.watching = false;
+    }
+    if allowed && was_on {
+        if let Some(net) = app.try_state::<NetworkManager>() {
+            net.send_packet_sync(WireMessage {
+                t: "screen.ctl".to_string(),
+                v: Some(1),
+                on: Some(false),
+                ..Default::default()
+            });
+        }
+    }
+    if let Some(win) = app.get_webview_window("projection") {
+        let _ = win.hide();
+    }
+    push_state(app, state);
 }
 
 #[tauri::command]
@@ -438,22 +571,21 @@ pub fn remote_screen(
 ) -> Result<(), String> {
     log::info!("[Monitor] remote_screen: share={:?}, mode={:?}", share, mode);
     if share == Some(false) {
-        if let Some(win) = app.get_webview_window("projection") {
-            let _ = win.hide();
-        }
-        {
-            let mut s = state.inner.write();
-            s.stream.state = "off".to_string();
-        }
-        push_state(&app, &state);
+        stop_watching(&state, &app);
         return Ok(());
     }
-    open_monitor(app.clone())?;
-    {
-        let mut s = state.inner.write();
-        s.stream.state = "active".to_string();
-        if let Some(m) = mode.filter(|m| !m.is_empty()) {
-            s.pc_screen.mode = m;
+    open_monitor(state.clone(), app.clone())?;
+    if let Some(m) = mode.filter(|m| m == "mirror" || m == "extend") {
+        // This is the other computer's mode, so it is only reported to it; ours stays
+        // as it is on the Share screen page.
+        if let Some(net) = app.try_state::<NetworkManager>() {
+            net.send_packet_sync(WireMessage {
+                t: "screen.ctl".to_string(),
+                v: Some(1),
+                on: Some(true),
+                mode: Some(m),
+                ..Default::default()
+            });
         }
     }
     push_state(&app, &state);
@@ -487,19 +619,79 @@ pub fn set_remote(partial: serde_json::Value, state: State<'_, AppState>, app: A
 
 #[tauri::command]
 pub fn set_pc_screen(mode: serde_json::Value, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let mode_str = if let Some(s) = mode.as_str() {
-        s.to_string()
-    } else if let Some(m) = mode.get("mode").and_then(|v| v.as_str()) {
-        m.to_string()
-    } else {
-        mode.to_string()
-    };
-    log::info!("[Monitor] Setting PC screen mode: {}", mode_str);
+    // The Share page sends one setting at a time, e.g. {"monitor": "display-0"} or
+    // {"mbps": 30}. A bare string is still accepted as the mode, for older callers.
+    log::info!("[Sharing] set_pc_screen: {}", mode);
+    let mut wants_mode: Option<String> = None;
     {
         let mut s = state.inner.write();
-        s.pc_screen.mode = mode_str;
+        if let Some(obj) = mode.as_object() {
+            if let Some(m) = obj.get("mode").and_then(|v| v.as_str()) {
+                wants_mode = Some(m.to_string());
+            }
+            if let Some(m) = obj.get("monitor").and_then(|v| v.as_str()) {
+                s.pc_screen.monitor = if m.is_empty() { None } else { Some(m.to_string()) };
+            }
+            if let Some(h) = obj
+                .get("maxHeight")
+                .or_else(|| obj.get("max_height"))
+                .and_then(|v| v.as_u64())
+            {
+                if crate::streaming::validate_stream_max_height(h as u32).is_ok() {
+                    s.pc_screen.max_height = h as u32;
+                    s.stream.max_height = h as u32;
+                }
+            }
+            if let Some(mbps) = obj.get("mbps").and_then(|v| v.as_u64()) {
+                if crate::streaming::validate_bitrate(mbps as u32).is_ok() {
+                    s.pc_screen.mbps = mbps as u32;
+                    s.stream.bitrate_mbps = mbps as u32;
+                }
+            }
+            if let Some(sound) = obj.get("sound").and_then(|v| v.as_bool()) {
+                s.pc_screen.sound = sound;
+                s.stream.audio = sound;
+            }
+            if let Some(input) = obj.get("input").and_then(|v| v.as_bool()) {
+                s.pc_screen.input = input;
+                s.stream.stream_input = input;
+            }
+            if let Some(remote) = obj.get("remote").and_then(|v| v.as_bool()) {
+                s.pc_screen.remote = remote;
+            }
+            if let Some(size) = obj.get("extendSize").and_then(|v| v.as_str()) {
+                s.pc_screen.extend_size = size.to_string();
+                s.pc_screen.extend_px = match size {
+                    "1920x1080" => (1920, 1080),
+                    "3840x2160" => (3840, 2160),
+                    _ => (2560, 1440),
+                };
+            }
+        } else if let Some(m) = mode.as_str() {
+            wants_mode = Some(m.to_string());
+        }
     }
-    push_state(&app, &state);
+    match wants_mode.as_deref() {
+        Some(m @ ("mirror" | "extend" | "off")) => {
+            state.inner.write().pc_screen.mode = m.to_string();
+            crate::streaming::apply_sharing(m != "off", &state, &app);
+        }
+        _ => {
+            // Only a detail changed: Picture settings go straight to the capture
+            // engine, and the other computer is told so its page agrees with ours.
+            if let Some(bridge) = app.try_state::<crate::media::NativeBridgeManager>() {
+                let (h, mbps) = {
+                    let s = state.inner.read();
+                    (s.pc_screen.max_height, s.pc_screen.mbps)
+                };
+                bridge.screen_engine.set_settings(
+                    crate::media::screen::CaptureSettings::from_choices(h, mbps),
+                );
+            }
+            crate::streaming::announce_screen_state(&state, &app);
+            push_state(&app, &state);
+        }
+    }
     Ok(())
 }
 

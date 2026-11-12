@@ -68,8 +68,17 @@ pub struct PairingState {
 
 impl Default for LayoutState {
     fn default() -> Self {
+        // The other computer starts out beside this one, where the two screens usually
+        // meet: a Windows PC keeps the edge it crosses on its right, a Mac on its left.
+        // A first run on the same kind of computer still settles at first contact,
+        // because the pair turns the larger-id side round when both claim one edge.
+        let side = if cfg!(target_os = "windows") {
+            "right"
+        } else {
+            "left"
+        };
         Self {
-            side: "right".to_string(),
+            side: side.to_string(),
             along: 0.0,
         }
     }
@@ -163,7 +172,10 @@ impl Default for KvmSettings {
             reverse_scroll: false,
             lock_screen: true,
             gestures: true,
-            pc_side: Some("left".to_string()),
+            // The other computer sits on the edge this one does not cross.
+            pc_side: Some(
+                if cfg!(target_os = "windows") { "left" } else { "right" }.to_string(),
+            ),
             ble: true,
             resistance_px: 0,
         }
@@ -1808,6 +1820,14 @@ impl AppState {
         initial_state.paired = paired;
         initial_state.peer_fingerprints = fingerprints;
 
+        // The screen arrangement the user last chose, so a restart does not come back
+        // on the wrong edge.
+        #[cfg(not(test))]
+        if let Some((side, along)) = crate::pairstore::load_layout() {
+            initial_state.layout.side = side;
+            initial_state.layout.along = along;
+        }
+
         Self {
             inner: Arc::new(RwLock::new(initial_state)),
         }
@@ -1883,6 +1903,54 @@ impl AppState {
         let mut s = self.inner.write();
         s.input = where_val.to_string();
         s.kvm_state.mode = where_val.to_string();
+    }
+
+    /// Remember one clipboard item for the Recent list, newest first.
+    ///
+    /// `dir` is "out" for something copied here and sent, "in" for something that
+    /// arrived from the other computer. Repeats are ignored; the list is trimmed to
+    /// the size chosen on the Clipboard tab. Returns whether anything was added, so
+    /// the caller only refreshes the window when the list really changed.
+    pub fn record_clipboard_item(
+        &self,
+        text: String,
+        dir: &str,
+        size: u64,
+        image: Option<serde_json::Value>,
+    ) -> bool {
+        let mut s = self.inner.write();
+        if let Some(prev) = s.clipboard.history.first() {
+            if prev.dir == dir && prev.text == text && prev.size == size {
+                return false;
+            }
+        }
+        let cap = s.clipboard.history_size.max(1) as usize;
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        s.clipboard.history.insert(
+            0,
+            ClipboardItem {
+                id: format!("clip_{}", now),
+                text,
+                timestamp: now,
+                dir: dir.to_string(),
+                size,
+                image,
+                ..Default::default()
+            },
+        );
+        s.clipboard.history.truncate(cap);
+        true
+    }
+
+    /// Note why the newest clipboard item was not sent, so the Clipboard tab can
+    /// say so in one line. An empty string clears the note.
+    pub fn set_clip_last_skip(&self, why: &str) -> bool {
+        let mut s = self.inner.write();
+        if s.clipboard.last_skip == why {
+            return false;
+        }
+        s.clipboard.last_skip = why.to_string();
+        true
     }
 
     pub fn set_client(&self, client: Option<PeerInfo>) {
@@ -2102,6 +2170,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn layout_defaults_put_the_pair_side_by_side() {
+        // A Windows PC and a Mac must come up on opposite edges without the user
+        // touching the layout grid: the pointer crosses to the right on Windows, to
+        // the left on a Mac. Changing one default without the other mirrors the pair.
+        let d = LayoutState::default();
+        let expected = if cfg!(target_os = "windows") { "right" } else { "left" };
+        assert_eq!(d.side, expected);
+        assert_eq!(d.along, 0.0);
+    }
+
+    #[test]
+    fn clipboard_history_keeps_newest_first_up_to_the_chosen_size() {
+        let state = AppState::new();
+        state.inner.write().clipboard.history_size = 3;
+
+        assert!(state.record_clipboard_item("one".into(), "out", 3, None));
+        assert!(state.record_clipboard_item("two".into(), "in", 3, None));
+        // A repeat of the newest item is not recorded twice.
+        assert!(!state.record_clipboard_item("two".into(), "in", 3, None));
+        assert!(state.record_clipboard_item("three".into(), "out", 5, None));
+        assert!(state.record_clipboard_item("four".into(), "out", 4, None));
+
+        let history = state.inner.read().clipboard.history.clone();
+        assert_eq!(history.len(), 3, "the list must stay at the chosen size");
+        assert_eq!(history[0].text, "four");
+        assert_eq!(history[1].text, "three");
+        assert_eq!(history[2].text, "two");
+        assert_eq!(history[0].dir, "out");
+        assert!(history[2].timestamp > 0);
+    }
+
+    #[test]
+    fn clipboard_history_records_pictures_with_a_preview() {
+        let state = AppState::new();
+        let preview = serde_json::json!({ "thumb": "data:image/png;base64,AA", "w": 10, "h": 4 });
+        assert!(state.record_clipboard_item("Picture · 10 × 4".into(), "in", 900, Some(preview)));
+
+        let history = state.inner.read().clipboard.history.clone();
+        assert_eq!(history[0].image.as_ref().unwrap()["w"], 10);
+        assert_eq!(history[0].size, 900);
+    }
+
+    #[test]
     fn test_update_found_peer_deduplication() {
         let app_state = AppState::new();
 
@@ -2230,8 +2341,10 @@ mod tests {
     fn test_layout_and_kvm_defaults_and_sync() {
         let app_state = AppState::new();
         let snap = app_state.snapshot();
-        assert_eq!(snap.layout.side, "right");
-        assert_eq!(snap.kvm.pc_side.as_deref(), Some("left"));
+        let side = if cfg!(target_os = "windows") { "right" } else { "left" };
+        let other = if side == "right" { "left" } else { "right" };
+        assert_eq!(snap.layout.side, side);
+        assert_eq!(snap.kvm.pc_side.as_deref(), Some(other));
         assert!(snap.kvm.mouse);
         assert!(snap.kvm.keyboard);
         assert!(snap.kvm.linked);
@@ -2318,16 +2431,18 @@ mod tests {
         let json = serde_json::to_string(&snap).expect("serialize FullState");
 
         // Verify key structural elements expected by JS frontend
-        assert!(json.contains("\"layout\":{\"side\":\"right\",\"along\":0.0}"));
-        assert!(json.contains("\"pcSide\":\"left\""));
+        let side = if cfg!(target_os = "windows") { "right" } else { "left" };
+        let other = if side == "right" { "left" } else { "right" };
+        assert!(json.contains(&format!("\"layout\":{{\"side\":\"{side}\",\"along\":0.0}}")));
+        assert!(json.contains(&format!("\"pcSide\":\"{other}\"")));
         assert!(json.contains("\"beDriven\":true"));
         assert!(json.contains("\"driveOther\":true"));
         assert!(json.contains("\"macName\":"));
         assert!(json.contains("\"activeTab\":\"overview\""));
 
         let deserialized: FullState = serde_json::from_str(&json).expect("deserialize FullState");
-        assert_eq!(deserialized.layout.side, "right");
-        assert_eq!(deserialized.kvm.pc_side.as_deref(), Some("left"));
+        assert_eq!(deserialized.layout.side, side);
+        assert_eq!(deserialized.kvm.pc_side.as_deref(), Some(other));
         assert_eq!(deserialized.input, "home");
         assert_eq!(deserialized.startup, snap.startup);
     }

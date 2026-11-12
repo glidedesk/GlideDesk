@@ -281,6 +281,47 @@ pub fn capture_display() -> Result<(u32, u32, Vec<u8>), String> {
 pub struct ScreenEngine {
     is_capturing: Arc<AtomicBool>,
     frame_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
+    /// The Picture settings the Share screen page offers: how large a frame is and
+    /// how much detail it keeps. The capture thread reads this for every frame.
+    settings: Arc<Mutex<CaptureSettings>>,
+}
+
+/// How much of the screen to send, and how hard to compress it.
+#[derive(Debug, Clone)]
+pub struct CaptureSettings {
+    pub max_width: u32,
+    pub max_height: u32,
+    pub quality: u8,
+}
+
+impl Default for CaptureSettings {
+    fn default() -> Self {
+        // 1080p and a middle quality: small enough to send every frame, sharp enough
+        // to read text on the other computer.
+        Self { max_width: 1600, max_height: 900, quality: 65 }
+    }
+}
+
+impl CaptureSettings {
+    /// Turn the page's Resolution and Quality choices into a frame size and a
+    /// JPEG quality. 0 means "Full size": keep every pixel the screen has.
+    pub fn from_choices(max_height: u32, mbps: u32) -> Self {
+        let (w, h) = match max_height {
+            0 => (u32::MAX, u32::MAX),
+            720 => (1280, 720),
+            1080 => (1920, 1080),
+            1440 => (2560, 1440),
+            2160 => (3840, 2160),
+            _ => (1920, 1080),
+        };
+        let quality = match mbps {
+            0..=10 => 50,
+            11..=20 => 65,
+            21..=30 => 80,
+            _ => 90,
+        };
+        Self { max_width: w, max_height: h, quality }
+    }
 }
 
 impl ScreenEngine {
@@ -290,9 +331,15 @@ impl ScreenEngine {
             Self {
                 is_capturing: Arc::new(AtomicBool::new(false)),
                 frame_tx: Arc::new(Mutex::new(Some(tx))),
+                settings: Arc::new(Mutex::new(CaptureSettings::default())),
             },
             rx,
         )
+    }
+
+    /// Change the frame size and quality for the next frames.
+    pub fn set_settings(&self, settings: CaptureSettings) {
+        *self.settings.lock() = settings;
     }
 
     pub fn start_streaming(&self, fps: u32) -> Result<(), String> {
@@ -304,6 +351,7 @@ impl ScreenEngine {
         self.is_capturing.store(true, Ordering::SeqCst);
         let capturing = self.is_capturing.clone();
         let tx = self.frame_tx.lock().clone();
+        let settings = self.settings.clone();
 
         std::thread::spawn(move || {
             let interval = std::time::Duration::from_millis(1000 / (fps.max(1) as u64));
@@ -318,20 +366,21 @@ impl ScreenEngine {
                             consecutive_failures = 0;
                             logged_error = false;
                             if let Some(rgba) = image::RgbaImage::from_raw(width, height, rgba_data) {
-                                // Downsample large Retina displays (e.g. >1920px wide) to reduce latency
-                                let dyn_img = if width > 1920 {
-                                    image::DynamicImage::ImageRgba8(rgba).thumbnail(1920, 1080)
+                                // Shrink big screens to the size chosen on the page and
+                                // send JPEG: a frame has to fit in one message many
+                                // times a second, and a PNG of a whole desktop does not.
+                                let cfg = settings.lock().clone();
+                                let dyn_img = if width > cfg.max_width || height > cfg.max_height {
+                                    image::DynamicImage::ImageRgba8(rgba)
+                                        .thumbnail(cfg.max_width, cfg.max_height)
                                 } else {
                                     image::DynamicImage::ImageRgba8(rgba)
                                 };
                                 let mut frame_data = Vec::new();
-                                if dyn_img
-                                    .write_to(
-                                        &mut std::io::Cursor::new(&mut frame_data),
-                                        image::ImageFormat::Png,
-                                    )
-                                    .is_ok()
-                                {
+                                let mut cursor = std::io::Cursor::new(&mut frame_data);
+                                let mut encoder =
+                                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, cfg.quality);
+                                if encoder.encode_image(&dyn_img).is_ok() {
                                     let _ = sender.try_send(frame_data);
                                 }
                             }
@@ -388,6 +437,27 @@ mod tests {
         let short_data = vec![10, 20, 30];
         let err = convert_x11_image_to_rgba(2, 1, 24, &short_data);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn picture_choices_set_frame_size_and_quality() {
+        // The Resolution picker is named by the height it keeps, so each choice has
+        // to give a frame of that height, in 16:9, and a sharper frame for a higher
+        // Quality (Mbps) choice.
+        let p1080 = CaptureSettings::from_choices(1080, 20);
+        assert_eq!((p1080.max_width, p1080.max_height), (1920, 1080));
+        let p1440 = CaptureSettings::from_choices(1440, 20);
+        assert_eq!((p1440.max_width, p1440.max_height), (2560, 1440));
+        // "Full size" keeps the screen as it is.
+        let full = CaptureSettings::from_choices(0, 20);
+        assert!(full.max_width >= 3840 && full.max_height >= 2160);
+        let low = CaptureSettings::from_choices(1080, 10).quality;
+        let mid = CaptureSettings::from_choices(1080, 20).quality;
+        let high = CaptureSettings::from_choices(1080, 100).quality;
+        assert!(low < mid && mid < high, "quality must rise with the Mbps choice");
+        // An unknown height falls back to the default frame size rather than 0.
+        let unknown = CaptureSettings::from_choices(1234, 20);
+        assert!(unknown.max_width > 0 && unknown.max_height > 0);
     }
 
     #[test]

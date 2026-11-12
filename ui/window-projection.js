@@ -85,6 +85,23 @@
   if (btnReturn) btnReturn.addEventListener('click', returnToSource);
   if (btnClose) btnClose.addEventListener('click', returnToSource);
 
+  // F11 fills the screen and leaves it again; Escape goes back to a window.
+  let fullScreen = false;
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'F11') {
+      e.preventDefault();
+      fullScreen = !fullScreen;
+      if (window.macshare && window.macshare.setProjectionFullscreen) {
+        window.macshare.setProjectionFullscreen(fullScreen).catch(() => {});
+      }
+    } else if (e.key === 'Escape' && fullScreen) {
+      fullScreen = false;
+      if (window.macshare && window.macshare.setProjectionFullscreen) {
+        window.macshare.setProjectionFullscreen(false).catch(() => {});
+      }
+    }
+  });
+
   // Setup input forwarding
   canvas.addEventListener('mouseenter', (e) => {
     isFocused = true;
@@ -173,6 +190,24 @@
 
   // Register Tauri event listeners
   if (window.macshare) {
+    // The other computer's screen, one picture per frame.
+    if (window.macshare.onScreenReceived) {
+      window.macshare.onScreenReceived((payload) => {
+        const src = payload && (payload.frame || payload.png || payload.data);
+        if (!src || typeof src !== 'string' || src.indexOf('data:image/') !== 0) return;
+        const img = new Image();
+        img.onload = () => {
+          if (canvas.width !== img.width || canvas.height !== img.height) {
+            canvas.width = img.width;
+            canvas.height = img.height;
+          }
+          if (ctx) ctx.drawImage(img, 0, 0);
+          if (overlay) overlay.classList.add('hidden');
+          document.title = `GlideDesk — ${currentTitle}`;
+        };
+        img.src = src;
+      });
+    }
     if (window.macshare.onProjectionSetup) {
       window.macshare.onProjectionSetup((payload) => updateProjection(payload));
     }

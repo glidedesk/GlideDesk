@@ -93,7 +93,11 @@ fn main() {
             }
 
             // 2. Start Clipboard Sync Daemon (Phase 3)
-            let clip_watcher = Arc::new(kvm::ClipboardWatcher::new(network.clone(), state.clone()));
+            let clip_watcher = Arc::new(kvm::ClipboardWatcher::new(
+                network.clone(),
+                state.clone(),
+                handle.clone(),
+            ));
             clip_watcher.start();
 
             // 3. Start Native KVM Hook Engine (Phase 3: low-level mouse/keyboard & edge detection)
@@ -101,6 +105,12 @@ fn main() {
 
             // 4. Register NetworkManager in Tauri state
             app.manage(network.clone());
+
+            // 4b. Drain the audio and screen channels from the start, so turning on
+            // sharing later cannot find them already full.
+            if let Some(bridge) = app.try_state::<NativeBridgeManager>() {
+                bridge.start_broadcasting(handle.clone());
+            }
 
             // 5. Link statistics into the log (one line every 30 s while connected)
             let stats_net = network.clone();
@@ -188,6 +198,7 @@ fn main() {
             commands::get_parked_windows,
             commands::show_projection_window,
             commands::hide_projection_window,
+            commands::set_projection_fullscreen,
             media::bridge::start_audio_capture,
             media::bridge::stop_audio_capture,
             media::bridge::start_screen_streaming,

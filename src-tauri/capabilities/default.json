@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the GlideDesk main window",
-  "windows": ["main"],
+  "description": "Default capability for the GlideDesk windows (main, and the screen window it opens)",
+  "windows": ["main", "projection"],
   "permissions": [
     "core:default",
     "shell:allow-open",

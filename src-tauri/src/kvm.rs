@@ -91,6 +91,53 @@ pub fn wheel_notches_from_windows(vertical: bool, mouse_data: u32) -> (f64, f64)
     }
 }
 
+/// Which key means "run this shortcut" on the computer being driven.
+///
+/// Windows shortcuts use Ctrl, macOS shortcuts use Command. Returns `None` while the
+/// other computer's operating system is not known, in which case keys go unchanged.
+pub fn peer_command_modifier_vk(snap: &crate::state::FullState) -> Option<u16> {
+    const VK_CONTROL: u16 = 0x11;
+    const VK_COMMAND: u16 = 0x5B; // VK_LWIN on Windows; Command on macOS
+    let os = snap
+        .peer
+        .as_ref()
+        .or(snap.client.as_ref())
+        .map(|p| p.os.to_ascii_lowercase())?;
+    if os.starts_with("mac") || os.contains("darwin") {
+        Some(VK_COMMAND)
+    } else if os.starts_with("win") {
+        Some(VK_CONTROL)
+    } else {
+        None
+    }
+}
+
+/// Rewrite this computer's shortcut modifier into the driven computer's.
+///
+/// Without this, Ctrl+C on Windows arrives on a Mac as Ctrl+C, which does nothing
+/// there, and Command+C on a Mac arrives on Windows as the Windows key. Typing keys
+/// are untouched; only the modifier that starts a shortcut changes.
+pub fn translate_modifier_vk(vk: u16, peer_modifier: Option<u16>) -> u16 {
+    const VK_CONTROL_GENERIC: u16 = 0x11;
+    const VK_LCONTROL: u16 = 0xA2;
+    const VK_RCONTROL: u16 = 0xA3;
+    const VK_LCOMMAND: u16 = 0x5B; // VK_LWIN
+    const VK_RCOMMAND: u16 = 0x5C; // VK_RWIN
+    match peer_modifier {
+        // Driving a Mac: Ctrl becomes Command.
+        Some(VK_LCOMMAND) => match vk {
+            VK_CONTROL_GENERIC | VK_LCONTROL | VK_RCONTROL => VK_LCOMMAND,
+            other => other,
+        },
+        // Driving Windows: Command becomes Ctrl.
+        Some(VK_CONTROL_GENERIC) => match vk {
+            VK_LCOMMAND | VK_RCOMMAND => VK_CONTROL_GENERIC,
+            other => other,
+        },
+        _ => vk,
+    }
+}
+
 /// Check if cumulative remote virtual deltas indicate cursor has moved back across the seam to home.
 #[cfg(any(test, not(windows)))]
 pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: f64) -> bool {
@@ -1281,6 +1328,61 @@ impl NativeInputInjector {
         });
     }
 
+    /// Move the pointer to an exact pixel as forwarded input.
+    ///
+    /// Absolute moves skip pointer acceleration, and the `dwExtraInfo` marker keeps the
+    /// low-level hook from mistaking our own injection for the local user. `SetCursorPos`
+    /// cannot carry that marker, so a pointer placed on the seam to receive the other
+    /// computer's input used to look like the user pushing into the edge — and this
+    /// computer grabbed control straight back.
+    #[cfg(windows)]
+    pub fn inject_cursor_absolute(x: i32, y: i32) {
+        main_thread_input::run(move || {
+            record_injection_timestamp();
+            if let Some(backend) = get_custom_backend() {
+                let _ = backend.warp(x, y);
+                return;
+            }
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+                MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+            };
+            let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
+            if vw <= 1 || vh <= 1 {
+                return;
+            }
+            let nx = ((x - vx) as f64 * 65_535.0 / (vw - 1) as f64).round() as i32;
+            let ny = ((y - vy) as f64 * 65_535.0 / (vh - 1) as f64).round() as i32;
+            let input = INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: nx,
+                        dy: ny,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_MOVE
+                            | MOUSEEVENTF_ABSOLUTE
+                            | MOUSEEVENTF_VIRTUALDESK,
+                        time: 0,
+                        dwExtraInfo: 0x474C4944,
+                    },
+                },
+            };
+            unsafe {
+                let sent = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+                if sent != 1 {
+                    log::warn!(
+                        "[KVM] SendInput absolute move failed: ({}, {}) sent={} err={}",
+                        x,
+                        y,
+                        sent,
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+        });
+    }
+
     #[cfg(target_os = "macos")]
     pub fn warp_cursor(x: i32, y: i32) {
         record_injection_timestamp();
@@ -1337,6 +1439,9 @@ impl NativeInputInjector {
             "bottom" => (along_x, vy + vh - 2),
             _ => return,
         };
+        #[cfg(windows)]
+        Self::inject_cursor_absolute(x, y);
+        #[cfg(target_os = "macos")]
         Self::warp_cursor(x, y);
     }
 
@@ -1450,33 +1555,20 @@ impl NativeInputInjector {
             return;
         }
         Self::sync_input_desktop();
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
+        // Relative SendInput moves go through the user's pointer acceleration
+        // ("Enhance pointer precision"), so the distance here did not match the distance
+        // the hand moved on the other computer and the two pointers drifted apart. Warp
+        // to the exact pixel instead: same distance, no acceleration.
+        let Some((x, y)) = Self::cursor_position() else {
+            return;
         };
-
-        let input = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx,
-                    dy,
-                    mouseData: 0,
-                    dwFlags: MOUSEEVENTF_MOVE,
-                    time: 0,
-                    dwExtraInfo: 0x474C4944,
-                },
-            },
-        };
-
-        unsafe {
-            let sent = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
-            if sent != 1 {
-                log::warn!(
-                    "[KVM] SendInput mouse move failed: dx={} dy={} sent={} err={} {}",
-                    dx, dy, sent, std::io::Error::last_os_error(), Self::desktop_probe()
-                );
-            }
+        let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
+        if vw <= 1 || vh <= 1 {
+            return;
         }
+        let nx = (x + dx as f64).clamp(vx as f64, (vx + vw - 1) as f64);
+        let ny = (y + dy as f64).clamp(vy as f64, (vy + vh - 1) as f64);
+        Self::inject_cursor_absolute(nx.round() as i32, ny.round() as i32);
     }
 
     #[cfg(target_os = "macos")]
@@ -1955,103 +2047,266 @@ impl NativeClipboard {
     }
 }
 
+/// The text and picture this computer last received from the other one.
+///
+/// Putting an item received from the other computer on this clipboard makes the
+/// watcher see a fresh copy, which it would send straight back. These markers let it
+/// recognise its own echo and leave the item alone.
+static LAST_REMOTE_TEXT: Mutex<Option<String>> = Mutex::new(None);
+static LAST_REMOTE_IMAGE: Mutex<Option<usize>> = Mutex::new(None);
+
+/// The other computer just put `text` on this clipboard; do not send it back.
+pub fn note_remote_clipboard_text(text: &str) {
+    *LAST_REMOTE_TEXT.lock() = Some(text.to_string());
+}
+
+/// The other computer just put a `png_len`-byte picture on this clipboard.
+pub fn note_remote_clipboard_image(png_len: usize) {
+    *LAST_REMOTE_IMAGE.lock() = Some(png_len);
+}
+
+/// True once, when `text` is the item that just arrived from the other computer.
+fn take_remote_text(text: &str) -> bool {
+    let mut guard = LAST_REMOTE_TEXT.lock();
+    if guard.as_deref() == Some(text) {
+        *guard = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// True once, when `len` is the picture that just arrived from the other computer.
+fn take_remote_image(len: usize) -> bool {
+    let mut guard = LAST_REMOTE_IMAGE.lock();
+    if *guard == Some(len) {
+        *guard = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// A small data-URL copy of a clipboard picture, for the Recent list.
+pub fn clipboard_thumb(png: &[u8], w: u32, h: u32, shot: bool) -> Option<serde_json::Value> {
+    use base64::Engine;
+    let full = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
+    let src_w = w.max(1);
+    let target_w = 96.min(src_w);
+    let target_h = ((h.max(1) as f64) * (target_w as f64) / (src_w as f64)).round().max(1.0) as u32;
+    let small = image::imageops::resize(&full, target_w, target_h, image::imageops::FilterType::Triangle);
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(small)
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .ok()?;
+    let b64 = base64::prelude::BASE64_STANDARD.encode(cursor.into_inner());
+    Some(serde_json::json!({
+        "thumb": format!("data:image/png;base64,{}", b64),
+        "w": w,
+        "h": h,
+        "shot": shot,
+        "copy": true,
+    }))
+}
+
 /// Real-time clipboard watcher polling system clipboard and broadcasting changes.
+///
+/// It is the sending half of clipboard sync: it only sends when the master switch and
+/// the "copy here, paste there" direction are both on. Anything that arrives is written
+/// by the network side, which also records the echo marker used here.
 pub struct ClipboardWatcher {
     network: NetworkManager,
     state: AppState,
+    app: tauri::AppHandle,
     last_text: Arc<Mutex<String>>,
     last_image_len: Arc<Mutex<usize>>,
+    /// Something was copied while the pointer was still on this computer, and the
+    /// "When you switch" timing is selected.
+    pending_switch: Arc<Mutex<bool>>,
 }
 
 impl ClipboardWatcher {
-    pub fn new(network: NetworkManager, state: AppState) -> Self {
+    pub fn new(network: NetworkManager, state: AppState, app: tauri::AppHandle) -> Self {
+        // Start from what is already on the clipboard, so launching the app does not
+        // push an old item to the other computer.
+        let seen = NativeClipboard::new().get_text().unwrap_or_default();
         Self {
             network,
             state,
-            last_text: Arc::new(Mutex::new(String::new())),
+            app,
+            last_text: Arc::new(Mutex::new(seen)),
             last_image_len: Arc::new(Mutex::new(0)),
+            pending_switch: Arc::new(Mutex::new(false)),
         }
     }
 
-    pub fn start(self: Arc<Self>) {
+    async fn send_text(&self, text: String) {
+        let msg = WireMessage {
+            t: "clip".to_string(),
+            v: Some(1),
+            text: Some(text),
+            ts: Some(chrono::Utc::now().timestamp_millis() as u64),
+            ..Default::default()
+        };
+        self.network.send_packet(msg).await;
+    }
+
+    async fn send_image(&self, png: &[u8], w: u32, h: u32, shot: bool) {
         use base64::Engine;
+        let b64 = base64::prelude::BASE64_STANDARD.encode(png);
+        let msg = WireMessage {
+            t: "clip.image".to_string(),
+            v: Some(1),
+            id: Some(format!("img_{}", chrono::Utc::now().timestamp_millis())),
+            ts: Some(chrono::Utc::now().timestamp_millis() as u64),
+            png: Some(b64),
+            w: Some(w),
+            height: Some(h),
+            bytes: Some(png.len()),
+            parts: Some(1),
+            shot: Some(shot),
+            ..Default::default()
+        };
+        self.network.send_packet(msg).await;
+    }
+
+    pub fn start(self: Arc<Self>) {
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(400));
-            let mut img_counter = 0;
+            let mut ticks: u64 = 0;
 
             loop {
                 interval.tick().await;
 
-                // Respect clipboard master switch: stop polling and broadcasting when disabled
-                if !self.state.inner.read().clipboard.enabled || !self.state.inner.read().clipboard.share {
+                let (on, send, images, max_kb, mode, driven) = {
+                    let s = self.state.inner.read();
+                    (
+                        s.clipboard.enabled,
+                        s.clipboard.send,
+                        s.clipboard.images,
+                        s.clipboard.max_kb.max(1),
+                        s.clipboard.mode.clone(),
+                        s.input == "driven",
+                    )
+                };
+
+                // Master switch off: nothing is copied, watched or sent.
+                if !on {
+                    *self.pending_switch.lock() = false;
                     continue;
                 }
 
-                img_counter += 1;
-
+                ticks += 1;
                 let mut cb = NativeClipboard::new();
-                let text_opt = cb.get_text();
+                let mut saw_text = false;
 
-                let mut sent_text = false;
-                if let Some(text) = text_opt {
-                    let should_send = {
+                if let Some(text) = cb.get_text() {
+                    let changed = {
                         let mut last = self.last_text.lock();
-                        if !text.is_empty() && *last != text {
+                        if *last != text {
                             *last = text.clone();
                             true
                         } else {
                             false
                         }
                     };
-
-                    if should_send {
-                        sent_text = true;
-                        let msg = WireMessage {
-                            t: "clip".to_string(),
-                            v: Some(1),
-                            text: Some(text),
-                            ts: Some(chrono::Utc::now().timestamp_millis() as u64),
-                            ..Default::default()
-                        };
-                        self.network.send_packet(msg).await;
+                    // An item the other computer just delivered is already on this
+                    // clipboard; sending it back would loop for ever.
+                    let echo = take_remote_text(&text);
+                    if changed && !text.is_empty() {
+                        saw_text = true;
+                        if !echo {
+                            self.handle_local_text(text, send, &mode, driven, max_kb).await;
+                        }
                     }
                 }
 
-                // If no text was sent and every 2 cycles (~800ms), check for clipboard pictures/screenshots
-                if !sent_text && img_counter % 2 == 0 {
+                // If no text changed and every 2 cycles (~800 ms), look for pictures.
+                if !saw_text && ticks % 2 == 0 && images {
                     if let Some((png, w, h)) = cb.get_image_png() {
                         let len = png.len();
-                        let should_send_img = {
-                            let mut last_len = self.last_image_len.lock();
-                            if len > 0 && len <= 10 * 1024 * 1024 && *last_len != len {
-                                *last_len = len;
+                        let changed = {
+                            let mut last = self.last_image_len.lock();
+                            if len > 0 && *last != len {
+                                *last = len;
                                 true
                             } else {
                                 false
                             }
                         };
+                        let echo = take_remote_image(len);
+                        if changed && !echo && send && (mode != "switch" || driven) && len <= 10 * 1024 * 1024 {
+                            self.send_image(&png, w, h, true).await;
+                            let thumb = clipboard_thumb(&png, w, h, true);
+                            if self.state.record_clipboard_item(
+                                format!("Picture · {} × {}", w, h),
+                                "out",
+                                len as u64,
+                                thumb,
+                            ) {
+                                crate::commands::push_state(&self.app, &self.state);
+                            }
+                        }
+                    }
+                }
 
-                        if should_send_img {
-                            let b64 = base64::prelude::BASE64_STANDARD.encode(&png);
-                            let msg = WireMessage {
-                                t: "clip.image".to_string(),
-                                v: Some(1),
-                                id: Some(format!("img_{}", chrono::Utc::now().timestamp_millis())),
-                                ts: Some(chrono::Utc::now().timestamp_millis() as u64),
-                                png: Some(b64),
-                                w: Some(w),
-                                height: Some(h),
-                                bytes: Some(len),
-                                parts: Some(1),
-                                shot: Some(true),
-                                ..Default::default()
-                            };
-                            self.network.send_packet(msg).await;
+                // "When you switch": the item copied while the pointer was still here
+                // crosses the moment the pointer lands on the other computer.
+                if send && mode == "switch" && driven {
+                    let pending = {
+                        let mut p = self.pending_switch.lock();
+                        let was = *p;
+                        *p = false;
+                        was
+                    };
+                    if pending {
+                        if let Some(text) = cb.get_text().filter(|t| !t.is_empty()) {
+                            if text.len() as u32 <= max_kb * 1024 {
+                                self.send_text(text.clone()).await;
+                                if self.state.record_clipboard_item(
+                                    text.clone(),
+                                    "out",
+                                    text.len() as u64,
+                                    None,
+                                ) {
+                                    crate::commands::push_state(&self.app, &self.state);
+                                }
+                            }
                         }
                     }
                 }
             }
         });
+    }
+
+    /// A copy made on this computer: send it, or hold it for the next switch.
+    async fn handle_local_text(
+        &self,
+        text: String,
+        send: bool,
+        mode: &str,
+        driven: bool,
+        max_kb: u32,
+    ) {
+        if !send {
+            return;
+        }
+        let bytes = text.len() as u64;
+        if bytes > max_kb as u64 * 1024 {
+            if self.state.set_clip_last_skip(&format!("over {} KB", max_kb)) {
+                crate::commands::push_state(&self.app, &self.state);
+            }
+            return;
+        }
+        self.state.set_clip_last_skip("");
+        if mode == "switch" && !driven {
+            *self.pending_switch.lock() = true;
+            return;
+        }
+        self.send_text(text.clone()).await;
+        if self.state.record_clipboard_item(text.clone(), "out", bytes, None) {
+            crate::commands::push_state(&self.app, &self.state);
+        }
     }
 }
 
@@ -2163,7 +2418,10 @@ pub mod hook_engine {
                     0,
                 );
                 match mouse_hook {
-                    Ok(h) => MOUSE_HOOK = Some(h),
+                    Ok(h) => {
+                        MOUSE_HOOK = Some(h);
+                        log::info!("[KVM] Windows mouse hook installed");
+                    }
                     Err(e) => log::error!("[KVM] mouse hook install failed: {}", e),
                 }
 
@@ -2174,7 +2432,10 @@ pub mod hook_engine {
                     0,
                 );
                 match key_hook {
-                    Ok(h) => KEYBOARD_HOOK = Some(h),
+                    Ok(h) => {
+                        KEYBOARD_HOOK = Some(h);
+                        log::info!("[KVM] Windows keyboard hook installed");
+                    }
                     Err(e) => log::error!("[KVM] keyboard hook install failed: {}", e),
                 }
 
@@ -2260,6 +2521,24 @@ pub mod hook_engine {
                             ..Default::default()
                         };
                         net.send_packet_sync(take);
+
+                        // The crossing event is swallowed, so the pointer never actually
+                        // reached the edge; stop it just inside the seam and count the next
+                        // movement from there. Without this the first delta after taking was
+                        // the whole distance from the real pointer, which read as a huge
+                        // movement the other way and handed control straight back.
+                        let park_x = match snap.layout.side.as_str() {
+                            "right" => max_x - 5,
+                            "left" => vx + 5,
+                            _ => m.pt.x,
+                        };
+                        let park_y = match snap.layout.side.as_str() {
+                            "top" => vy + 5,
+                            "bottom" => max_y - 5,
+                            _ => m.pt.y,
+                        };
+                        NativeInputInjector::warp_cursor(park_x, park_y);
+                        LAST_PT = POINT { x: park_x, y: park_y };
                         return LRESULT(1);
                     }
                 } else if is_driving {
@@ -2317,19 +2596,32 @@ pub mod hook_engine {
                                 net.send_motion(dx, dy);
                             }
 
-                            // Keep cursor parked near edge of the virtual desktop
-                            let park_x = match snap.layout.side.as_str() {
-                                "right" => max_x - 5,
-                                "left" => vx + 5,
-                                _ => m.pt.x,
-                            };
-                            let park_y = match snap.layout.side.as_str() {
-                                "top" => vy + 5,
-                                "bottom" => max_y - 5,
-                                _ => m.pt.y,
-                            };
-                            NativeInputInjector::warp_cursor(park_x, park_y);
-                            LAST_PT = POINT { x: park_x, y: park_y };
+                            // Keep the pointer inside the desktop so relative moves never
+                            // clamp at a screen edge, but only pull it back when it actually
+                            // gets close: warping on every event raced the next move (the
+                            // warp is posted to the app's main thread), and a delayed warp
+                            // turned a 10 px hand movement into a 250 px jump.
+                            const EDGE_MARGIN: i32 = 24;
+                            let at_edge = m.pt.x >= max_x - EDGE_MARGIN
+                                || m.pt.x <= vx + EDGE_MARGIN
+                                || m.pt.y >= max_y - EDGE_MARGIN
+                                || m.pt.y <= vy + EDGE_MARGIN;
+                            if at_edge {
+                                let park_x = match snap.layout.side.as_str() {
+                                    "right" => max_x - 5,
+                                    "left" => vx + 5,
+                                    _ => m.pt.x,
+                                };
+                                let park_y = match snap.layout.side.as_str() {
+                                    "top" => vy + 5,
+                                    "bottom" => max_y - 5,
+                                    _ => m.pt.y,
+                                };
+                                NativeInputInjector::warp_cursor(park_x, park_y);
+                                LAST_PT = POINT { x: park_x, y: park_y };
+                            } else {
+                                LAST_PT = m.pt;
+                            }
                             return LRESULT(1);
                         }
                         WM_LBUTTONDOWN | WM_LBUTTONUP => {
@@ -2442,16 +2734,23 @@ pub mod hook_engine {
 
                 if is_driving {
                     let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-                    log::debug!("[KVM] forward key vk={} down={}", k.vkCode, is_down);
+                    // Keyboard sharing off: keys typed here stay here. Releases are
+                    // still forwarded so nothing stays held on the other computer.
+                    if !snap.kvm.keyboard && is_down {
+                        return LRESULT(1);
+                    }
+                    // Ctrl here is Command on the driven computer, so Ctrl+C there is a copy.
+                    let vk = translate_modifier_vk(k.vkCode as u16, peer_command_modifier_vk(&snap)) as u32;
                     let key_msg = WireMessage {
                         t: if is_down { "k.kd".to_string() } else { "k.ku".to_string() },
                         v: Some(1),
-                        vk: Some(k.vkCode),
+                        vk: Some(vk),
                         ..Default::default()
                     };
                     net.send_packet_sync(key_msg);
                     return LRESULT(1);
                 }
+
             }
         }
 
@@ -2926,6 +3225,7 @@ pub mod hook_engine {
                                 kCGScrollWheelEventPointDeltaAxis2,
                             ) as f64);
                         }
+                        log::debug!("[KVM] forward wheel dx={} dy={}", dx, dy);
                         let wh_msg = WireMessage {
                             t: "k.wh".to_string(),
                             v: Some(1),
@@ -2947,6 +3247,11 @@ pub mod hook_engine {
                             57 => (flags & kCGEventFlagMaskAlphaShift) != 0,
                             _ => false,
                         };
+
+                        // Sharing off: presses stay here, releases pass so nothing sticks.
+                        if !snap.kvm.keyboard && is_down {
+                            return std::ptr::null_mut();
+                        }
 
                         // Release hotkeys: Double-tap Right Option (61), Right Command (54), Right Control (62)
                         if (keycode == 61 || keycode == 54 || keycode == 62) && is_down {
@@ -2989,11 +3294,14 @@ pub mod hook_engine {
                             }
                         }
 
-                        let vk = keycodes::macos_keycode_to_windows_vk(keycode);
+                        let vk = translate_modifier_vk(
+                            keycodes::macos_keycode_to_windows_vk(keycode) as u16,
+                            peer_command_modifier_vk(&snap),
+                        );
                         let key_msg = WireMessage {
                             t: if is_down { "k.kd".to_string() } else { "k.ku".to_string() },
                             v: Some(1),
-                            vk: Some(vk),
+                            vk: Some(vk as u32),
                             ..Default::default()
                         };
                         net.send_packet_sync(key_msg);
@@ -3002,6 +3310,11 @@ pub mod hook_engine {
                     kCGEventKeyDown | kCGEventKeyUp => {
                         let keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) as u16;
                         let is_down = r#type == kCGEventKeyDown;
+
+                        // Sharing off: presses stay here, releases pass so nothing sticks.
+                        if !snap.kvm.keyboard && is_down {
+                            return std::ptr::null_mut();
+                        }
 
                         // Release hotkey check
                         if (keycode == 61 || keycode == 62) && is_down {
@@ -3025,8 +3338,10 @@ pub mod hook_engine {
                             return std::ptr::null_mut();
                         }
 
-                        let vk = keycodes::macos_keycode_to_windows_vk(keycode);
-                        log::debug!("[KVM] forward key vk={} down={}", vk, is_down);
+                        let vk = translate_modifier_vk(
+                            keycodes::macos_keycode_to_windows_vk(keycode) as u16,
+                            peer_command_modifier_vk(&snap),
+                        ) as u32;
                         // `ch`: what this key types on our layout, so shortcuts land on
                         // the right key on the other computer. `im`: the input method we
                         // are typing with, so the other side composes with its own.
@@ -3481,6 +3796,46 @@ mod tests {
     static TEST_MUTEX: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
+    fn remote_clipboard_echo_is_swallowed_once() {
+        // The other computer put this on our clipboard: the watcher must not send it
+        // back, and must not keep suppressing the same text after that one look.
+        note_remote_clipboard_text("from the other computer");
+        assert!(take_remote_text("from the other computer"));
+        assert!(!take_remote_text("from the other computer"));
+
+        // A genuinely new local copy is never mistaken for an echo.
+        assert!(!take_remote_text("typed here"));
+    }
+
+    #[test]
+    fn remote_clipboard_picture_echo_is_swallowed_once() {
+        note_remote_clipboard_image(4096);
+        assert!(take_remote_image(4096));
+        assert!(!take_remote_image(4096));
+        assert!(!take_remote_image(1024));
+    }
+
+    #[test]
+    fn clipboard_thumb_is_a_small_data_url() {
+        // A 400 x 200 red picture becomes a 96 px wide preview, still a PNG data URL.
+        let img = image::RgbaImage::from_pixel(400, 200, image::Rgba([255, 0, 0, 255]));
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        let png = cursor.into_inner();
+
+        let thumb = clipboard_thumb(&png, 400, 200, true).expect("a thumbnail");
+        assert_eq!(thumb["w"], 400);
+        assert_eq!(thumb["h"], 200);
+        assert_eq!(thumb["shot"], true);
+        let url = thumb["thumb"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        // Far smaller than the original, so the Recent list stays light.
+        assert!(url.len() < png.len() * 2);
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn test_macos_keycodes_bidirectional() {
         use keycodes::*;
@@ -3849,6 +4204,28 @@ mod tests {
         assert_eq!(mouse_wheel_to_x11_pulses(-4, 0), (Some((6, 4)), None)); // Left
         assert_eq!(mouse_wheel_to_x11_pulses(0, 100), (None, Some((4, 10)))); // Clamped
         assert_eq!(mouse_wheel_to_x11_pulses(0, 0), (None, None));
+    }
+
+    #[test]
+    fn shortcut_modifier_follows_the_driven_computer() {
+        const CTRL: u16 = 0x11;
+        const LCTRL: u16 = 0xA2;
+        const COMMAND: u16 = 0x5B;
+        const RCOMMAND: u16 = 0x5C;
+
+        // Driving a Mac: Ctrl becomes Command, so Ctrl+C is a copy there.
+        assert_eq!(translate_modifier_vk(CTRL, Some(COMMAND)), COMMAND);
+        assert_eq!(translate_modifier_vk(LCTRL, Some(COMMAND)), COMMAND);
+
+        // Driving Windows: Command becomes Ctrl, so Command+C is a copy there.
+        assert_eq!(translate_modifier_vk(COMMAND, Some(CTRL)), CTRL);
+        assert_eq!(translate_modifier_vk(RCOMMAND, Some(CTRL)), CTRL);
+
+        // Typing keys never change, and an unknown peer leaves keys alone.
+        assert_eq!(translate_modifier_vk(0x43, Some(COMMAND)), 0x43);
+        assert_eq!(translate_modifier_vk(0x43, Some(CTRL)), 0x43);
+        assert_eq!(translate_modifier_vk(CTRL, Some(CTRL)), CTRL);
+        assert_eq!(translate_modifier_vk(CTRL, None), CTRL);
     }
 
     #[test]

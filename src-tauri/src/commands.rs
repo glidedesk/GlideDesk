@@ -120,13 +120,16 @@ pub fn set_layout(side: String, along: Option<f64>, state: State<'_, AppState>, 
         s.layout.along = along_val;
         s.kvm.pc_side = Some(opp.to_string());
     }
+    crate::pairstore::save_layout(&side, along_val);
     push_state(&app, &state);
 
+    // The other computer flips this to work out where we sit on its screen, so send the
+    // side we chose here unchanged.
     network.send_packet_sync(crate::network::WireMessage {
         t: "kvm.layout".to_string(),
         v: Some(1),
-        side: Some(opp.to_string()),
-        pc_side: Some(opp.to_string()),
+        side: Some(side.clone()),
+        pc_side: Some(side),
         ..Default::default()
     });
     Ok(())
@@ -1115,6 +1118,20 @@ pub fn set_app(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Re
             if let Some(b) = files.get("edgeDrag").and_then(|v| v.as_bool()) { s.files.edge_drag = b; }
             if let Some(k) = files.get("copyKeys").and_then(|v| v.as_str()) { s.files.copy_keys = k.to_string(); }
             if let Some(k) = files.get("pasteKeys").and_then(|v| v.as_str()) { s.files.paste_keys = k.to_string(); }
+            // A send that could not start is reported here, so the Files page can say
+            // why instead of only the transfer bar going quiet.
+            if let Some(last) = files.get("last") {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                s.files.last = Some(crate::state::FilesEvent {
+                    ok: last.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                    name: last.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    text: last.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    at: last.get("at").and_then(|v| v.as_u64()).unwrap_or(now),
+                });
+            }
         }
         if let Some(notifs) = partial.get("notifs") {
             if let Some(b) = notifs.get("enabled").and_then(|v| v.as_bool()) { s.notifs.enabled = b; }
@@ -1527,6 +1544,39 @@ pub async fn send_files(
         }),
     );
 
+    // Say on the Files page what was sent and where it went, so the bar that only
+    // shows during the transfer is not the only sign it happened.
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let name = files
+            .first()
+            .map(|f| {
+                std::path::Path::new(f)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| f.clone())
+            })
+            .unwrap_or_default();
+        let shown = if files.len() > 1 {
+            format!("{} and {} more", name, files.len() - 1)
+        } else {
+            name.clone()
+        };
+        {
+            let mut s = state.inner.write();
+            s.files.last = Some(crate::state::FilesEvent {
+                ok: true,
+                name: shown,
+                text: format!("to {}", dest[0]),
+                at: now,
+            });
+        }
+        push_state(&app, &state);
+    }
+
     Ok(batch_id)
 }
 
@@ -1583,6 +1633,7 @@ pub fn choose_send_files(_app: AppHandle) -> Result<Vec<String>, String> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        log::info!("[ChooseFiles] dialog returned {} path(s): {:?}", files.len(), files);
         return Ok(files);
     }
 
@@ -1708,15 +1759,36 @@ pub async fn show_projection_window(
 }
 
 #[tauri::command]
-pub async fn hide_projection_window(app: AppHandle) -> Result<(), String> {
+pub async fn hide_projection_window(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    // Closing the screen window stops watching, and stops the other computer sharing
+    // when it lets us ask, so nothing keeps encoding in the background.
+    crate::parity::stop_watching(&state, &app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_projection_fullscreen(on: bool, app: AppHandle) -> Result<(), String> {
+    // F11 in the screen window: fill the screen, or go back to a window.
     use tauri::Manager;
     if let Some(win) = app.get_webview_window("projection") {
-        let _ = win.hide();
+        win.set_fullscreen(on).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 pub fn push_state(app: &AppHandle, state: &AppState) {
+    {
+        // Keep the shown received folder equal to where files really go, so the
+        // General page never promises a folder that is not used.
+        let mut s = state.inner.write();
+        let chosen = s.files.received_folder.clone();
+        s.files.received = crate::transport::transfer::effective_received_dir(&chosen)
+            .to_string_lossy()
+            .to_string();
+    }
     let snapshot = state.snapshot();
     let _ = app.emit("state-change", &snapshot);
 }

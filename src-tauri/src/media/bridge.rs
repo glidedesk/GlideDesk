@@ -30,18 +30,23 @@ impl NativeBridgeManager {
         }
     }
 
+    /// Starts the one task that drains the audio and screen channels this computer
+    /// produces and sends them over the link. Called once at startup and again on
+    /// every command that might begin sharing, so a late start cannot leave the
+    /// channels filling up unread.
     pub fn start_broadcasting(&self, app: AppHandle) {
-        if self.broadcasting_started.load(Ordering::SeqCst) {
+        if self.broadcasting_started.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.broadcasting_started.store(true, Ordering::SeqCst);
+        log::info!("[Media] Broadcasting task starting");
 
         let audio_rx = self.audio_rx.clone();
         let app_audio = app.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut rx_opt = audio_rx.lock().await;
             if let Some(mut rx) = rx_opt.take() {
                 drop(rx_opt);
+                log::info!("[Media] Audio forwarder running");
                 while let Some(bytes) = rx.recv().await {
                     let msg = WireMessage {
                         t: "media.audio".to_string(),
@@ -58,19 +63,32 @@ impl NativeBridgeManager {
 
         let screen_rx = self.screen_rx.clone();
         let app_screen = app.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
+            use base64::Engine;
             let mut rx_opt = screen_rx.lock().await;
             if let Some(mut rx) = rx_opt.take() {
                 drop(rx_opt);
+                log::info!("[Media] Screen forwarder running");
+                let mut sent = 0u64;
                 while let Some(frame) = rx.recv().await {
+                    sent += 1;
+                    if sent == 1 || sent % 60 == 0 {
+                        log::info!("[ScreenShare] sending frame #{} ({} bytes)", sent, frame.len());
+                    }
+                    // The capture thread hands back one JPEG. Ship it as a data URL:
+                    // the other window can put it straight in `img.src`, and it takes
+                    // far less room on the wire than a byte array.
+                    let size = frame.len();
                     let msg = WireMessage {
                         t: "media.screen".to_string(),
-                        frame_png: Some(frame),
-                        fps: Some(30),
+                        frame_b64: Some(format!(
+                            "data:image/jpeg;base64,{}",
+                            base64::prelude::BASE64_STANDARD.encode(&frame)
+                        )),
+                        bytes: Some(size),
+                        fps: Some(12),
                         ..Default::default()
                     };
-                    let _ = app_screen.emit("media-screen-stream", &msg);
-                    let _ = app_screen.emit("media-screen-received", &msg);
                     if let Some(net) = app_screen.try_state::<NetworkManager>() {
                         net.send_packet(msg).await;
                     }

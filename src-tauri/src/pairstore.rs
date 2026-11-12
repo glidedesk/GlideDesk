@@ -97,6 +97,62 @@ pub fn identity_path() -> PathBuf {
     p
 }
 
+/// Where the screen arrangement is kept: the edge this computer shares with the other
+/// one. Without it the pair would fall back to its default on every launch and could
+/// come up mirrored, with the pointer crossing towards the wall.
+pub fn layout_path() -> PathBuf {
+    let mut p = store_path();
+    p.set_file_name("layout.json");
+    p
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LayoutFile {
+    #[serde(default = "default_layout_side")]
+    side: String,
+    #[serde(default)]
+    along: f64,
+}
+
+fn default_layout_side() -> String {
+    // Matches LayoutState::default: Windows keeps the pointer's right edge, a Mac the
+    // left one, so the two screens meet where they physically sit.
+    if cfg!(target_os = "windows") {
+        "right".to_string()
+    } else {
+        "left".to_string()
+    }
+}
+
+/// The last arrangement chosen, if one was ever chosen.
+pub fn load_layout() -> Option<(String, f64)> {
+    let text = std::fs::read_to_string(layout_path()).ok()?;
+    match serde_json::from_str::<LayoutFile>(&text) {
+        Ok(f) => Some((f.side, f.along)),
+        Err(e) => {
+            log::warn!("[Layout] Ignoring unreadable layout file: {}", e);
+            None
+        }
+    }
+}
+
+/// Remember the arrangement, so a restart comes back on the same edge.
+pub fn save_layout(side: &str, along: f64) {
+    if cfg!(test) {
+        return; // tests never touch the developer's real files
+    }
+    let path = layout_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = LayoutFile { side: side.to_string(), along };
+    if let Ok(text) = serde_json::to_string_pretty(&file) {
+        if let Err(e) = std::fs::write(&path, text) {
+            log::warn!("[Layout] Could not write {}: {}", path.display(), e);
+        }
+    }
+}
+
 fn read_file() -> PairFile {
     let path = store_path();
     let Ok(text) = std::fs::read_to_string(&path) else {

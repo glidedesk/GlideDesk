@@ -461,8 +461,23 @@ pub struct WireMessage {
     pub audio_bytes: Option<Vec<u8>>,
     #[serde(default)]
     pub frame_png: Option<Vec<u8>>,
+    /// One screen frame, ready for `img.src` ("data:image/jpeg;base64,…"). Much
+    /// smaller than `frame_png`, which is only kept for older peers.
+    #[serde(rename = "frameB64", default)]
+    pub frame_b64: Option<String>,
     #[serde(default)]
     pub fps: Option<u32>,
+
+    // Screen sharing state (screen.state / screen.ctl)
+    /// mirror | extend | off
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Whether the sharing computer lets the other one start and switch it.
+    #[serde(default)]
+    pub remote: Option<bool>,
+    /// The modes the sharing computer can be switched to.
+    #[serde(default)]
+    pub modes: Option<Vec<String>>,
 
     // Pairing & Layout fields
     #[serde(default)]
@@ -550,7 +565,11 @@ impl Default for WireMessage {
             pc_side: None,
             audio_bytes: None,
             frame_png: None,
+            frame_b64: None,
             fps: None,
+            mode: None,
+            remote: None,
+            modes: None,
         }
     }
 }
@@ -870,22 +889,55 @@ pub fn resolve_file_dest(target: Option<&str>, active: &[ClientInfo]) -> Result<
             Err(format!("target peer '{}' is not connected", t))
         }
     } else {
-        if active.is_empty() {
-            return Err("no peers connected".to_string());
-        }
-        let auth_clients: Vec<&ClientInfo> = active.iter().filter(|c| c.authenticated).collect();
-        if auth_clients.is_empty() {
-            return Err("no peers connected".to_string());
-        } else if auth_clients.len() == 1 {
-            if let Some(ref pid) = auth_clients[0].peer_id {
-                Ok(vec![pid.clone()])
-            } else {
-                Err(format!("target peer '{}' has not identified itself yet", auth_clients[0].id))
+        // Two computers that dialled each other can hold two sessions at once, so
+        // count peers, not sessions: one computer is still one destination.
+        let mut peers: Vec<String> = Vec::new();
+        let mut unidentified: Option<String> = None;
+        for client in active.iter().filter(|c| c.authenticated) {
+            match client.peer_id.as_deref().filter(|p| !p.is_empty()) {
+                Some(pid) => {
+                    if !peers.iter().any(|p| p == pid) {
+                        peers.push(pid.to_string());
+                    }
+                }
+                None => unidentified = Some(client.id.clone()),
             }
+        }
+        if peers.is_empty() {
+            match unidentified {
+                Some(id) => Err(format!("target peer '{}' has not identified itself yet", id)),
+                None => Err("no peers connected".to_string()),
+            }
+        } else if peers.len() == 1 {
+            Ok(peers)
         } else {
             Err("send_files requires a target peer (multiple peers connected)".to_string())
         }
     }
+}
+
+/// Which side this computer should sit on, given what the other computer just said.
+///
+/// `ours` is the edge we cross, `peer_claim` the edge the other computer says it
+/// crosses. The two must be opposite: if the other computer is on our left, we are
+/// on its right. When both computers claim the same edge (a fresh launch, or a
+/// choice made on both sides at once) the computer with the smaller id keeps its
+/// choice and the other one turns round, so a pair settles instead of swapping for
+/// ever. Returns `Some(side)` only when our side has to change.
+pub fn layout_side_to_adopt(
+    local_id: &str,
+    peer_id: &str,
+    ours: &str,
+    peer_claim: &str,
+) -> Option<&'static str> {
+    let expected = crate::commands::opposite_direction(peer_claim);
+    if expected == ours {
+        return None; // the two screens already meet at the right edge
+    }
+    if peer_claim == ours && local_id < peer_id {
+        return None; // both claim the same edge: the smaller id keeps it
+    }
+    Some(expected)
 }
 
 /// Active client connection to a remote host or guest peer in the mesh.
@@ -895,6 +947,59 @@ pub struct ActiveClientSession {
     pub peer_addr: SocketAddr,
     pub tx: mpsc::Sender<WireMessage>,
     pub authenticated: Arc<RwLock<bool>>,
+    /// True when this side dialled the other computer, false when it accepted the call.
+    pub outbound: bool,
+}
+
+/// Which sessions to actually send on, out of a set that may hold two per peer.
+///
+/// Two computers can dial each other at the same moment, which leaves a pair of
+/// sessions; sending on both would deliver every pointer move and keystroke twice.
+/// Both ends keep the session dialled by the computer with the smaller id, a choice
+/// each side can make on its own and still agree with the other.
+pub fn preferred_session_ids(
+    local_id: &str,
+    clients: &HashMap<String, ActiveClientSession>,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashMap as Map;
+    let mut chosen: Map<String, &ActiveClientSession> = Map::new();
+    for client in clients.values() {
+        let peer_id = match client.peer_id.read().clone() {
+            Some(pid) if !pid.is_empty() => pid,
+            _ => continue, // has not introduced itself yet; it carries no input
+        };
+        let wanted = (local_id < peer_id.as_str()) == client.outbound;
+        match chosen.get(&peer_id) {
+            Some(current) => {
+                let current_wanted = (local_id < peer_id.as_str()) == current.outbound;
+                let better = if wanted != current_wanted {
+                    wanted // the agreed direction beats a leftover
+                } else {
+                    client.id < current.id // a stable tie-break
+                };
+                if better {
+                    chosen.insert(peer_id, client);
+                }
+            }
+            None => {
+                chosen.insert(peer_id, client);
+            }
+        }
+    }
+
+    let mut keep: std::collections::HashSet<String> =
+        clients.values().map(|c| c.id.clone()).collect();
+    for client in clients.values() {
+        let Some(peer_id) = client.peer_id.read().clone().filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        if let Some(keep_client) = chosen.get(&peer_id) {
+            if keep_client.id != client.id {
+                keep.remove(&client.id);
+            }
+        }
+    }
+    keep
 }
 
 /// Mesh WebSocket Server listening for incoming KVM sessions.
@@ -1044,6 +1149,7 @@ impl MeshServer {
                     peer_addr,
                     tx: out_tx.clone(),
                     authenticated: Arc::clone(&authenticated),
+                    outbound: false,
                 },
             );
         }
@@ -1275,19 +1381,14 @@ impl MeshServer {
             };
             let _ = sess.tx.send(welcome).await;
 
-            // Synchronize opposite layout to the connecting guest
-            let opp = match state.inner.read().layout.side.as_str() {
-                "right" => "left",
-                "left" => "right",
-                "top" => "bottom",
-                "bottom" => "top",
-                _ => "left",
-            };
+            // Tell the connecting guest which side we are on; it puts us on the opposite
+            // side of its own screen.
+            let side = state.inner.read().layout.side.clone();
             let layout_sync = WireMessage {
                 t: "kvm.layout".to_string(),
                 v: Some(1),
-                side: Some(opp.to_string()),
-                pc_side: Some(opp.to_string()),
+                side: Some(side.clone()),
+                pc_side: Some(side),
                 ..Default::default()
             };
             let _ = sess.tx.send(layout_sync).await;
@@ -1563,22 +1664,36 @@ impl MeshServer {
             }
             "kvm.layout" => {
                 let side = pkt.side.clone().or_else(|| pkt.pc_side.clone());
-                if let Some(s_val) = side {
-                    log::info!("[KVM] Remote layout updated: side = {}", s_val);
-                    let opp = match s_val.as_str() {
-                        "right" => "left",
-                        "left" => "right",
-                        "top" => "bottom",
-                        "bottom" => "top",
-                        _ => "left",
-                    };
-                    {
-                        let mut s = state.inner.write();
-                        s.layout.side = s_val;
-                        s.kvm.pc_side = Some(opp.to_string());
+                if let Some(peer_side) = side {
+                    let peer_id = pkt.o.clone().unwrap_or_default();
+                    let ours = state.inner.read().layout.side.clone();
+                    match layout_side_to_adopt(local_id, &peer_id, &ours, &peer_side) {
+                        None => {}
+                        Some(new_side) => {
+                            log::info!(
+                                "[KVM] The other computer is on our {}, so we sit on its {}",
+                                peer_side,
+                                new_side
+                            );
+                            {
+                                let mut s = state.inner.write();
+                                s.layout.side = new_side.to_string();
+                                s.kvm.pc_side = Some(peer_side.clone());
+                            }
+                            crate::pairstore::save_layout(new_side, state.inner.read().layout.along);
+                            // Tell the other computer where we ended up, so both agree.
+                            let sync = WireMessage {
+                                t: "kvm.layout".to_string(),
+                                v: Some(1),
+                                side: Some(new_side.to_string()),
+                                pc_side: Some(new_side.to_string()),
+                                ..Default::default()
+                            };
+                            let _ = out_tx.send(sync).await;
+                            let snap = state.snapshot();
+                            let _ = app.emit("state-change", &snap);
+                        }
                     }
-                    let snap = state.snapshot();
-                    let _ = app.emit("state-change", &snap);
                 }
             }
             "media.audio" => {
@@ -1591,8 +1706,87 @@ impl MeshServer {
             "media.screen" => {
                 if !*authenticated.read() {
                     log::warn!("[Auth] Dropping unauthenticated media.screen packet from {}", peer_addr);
+                } else if let Some(ref data) = pkt.frame_b64 {
+                    log::info!("[ScreenShare] frame received ({} bytes)", data.len());
+                    let _ = app.emit(
+                        "media-screen-received",
+                        serde_json::json!({
+                            "frame": data,
+                            "w": pkt.w,
+                            "h": pkt.height,
+                            "fps": pkt.fps,
+                        }),
+                    );
                 } else if let Some(ref frame) = pkt.frame_png {
-                    let _ = app.emit("media-screen-received", frame);
+                    // Older peers send the picture as bytes; wrap it the same way.
+                    use base64::Engine;
+                    let b64 = base64::prelude::BASE64_STANDARD.encode(frame);
+                    let _ = app.emit(
+                        "media-screen-received",
+                        serde_json::json!({
+                            "frame": format!("data:image/png;base64,{}", b64),
+                            "w": pkt.w,
+                            "h": pkt.height,
+                        }),
+                    );
+                }
+            }
+            "screen.state" => {
+                // What the other computer is sharing, so this page shows the same
+                // thing its Share screen page shows.
+                if !*authenticated.read() {
+                    log::warn!("[Auth] Dropping unauthenticated screen.state packet from {}", peer_addr);
+                } else {
+                    let on = pkt.on.unwrap_or(false);
+                    let mode = if on {
+                        pkt.mode.clone().unwrap_or_else(|| "mirror".to_string())
+                    } else {
+                        "off".to_string()
+                    };
+                    let remote = pkt.remote.unwrap_or(true);
+                    let modes = pkt
+                        .modes
+                        .clone()
+                        .unwrap_or_else(|| vec!["mirror".to_string(), "extend".to_string()]);
+                    {
+                        let mut s = state.inner.write();
+                        if let Some(ref name) = pkt.name {
+                            if !name.is_empty() {
+                                s.stream.name = name.clone();
+                            }
+                        }
+                        s.stream.remote = Some(serde_json::json!({
+                            "on": on,
+                            "mode": mode,
+                            "remote": remote,
+                            "modes": modes,
+                        }));
+                    }
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
+                }
+            }
+            "screen.ctl" => {
+                // The other computer asking to start, stop or switch this screen.
+                if !*authenticated.read() {
+                    log::warn!("[Auth] Dropping unauthenticated screen.ctl packet from {}", peer_addr);
+                } else {
+                    let want_on = pkt.on.unwrap_or(false);
+                    let allowed = state.inner.read().pc_screen.remote;
+                    if want_on && !allowed {
+                        log::info!("[Sharing] Refused a screen request: remote start is off here");
+                        // Say where we stand, so the other page stops waiting.
+                        crate::streaming::announce_screen_state(state, app);
+                    } else {
+                        if want_on {
+                            if let Some(ref mode) = pkt.mode {
+                                if mode == "mirror" || mode == "extend" {
+                                    state.inner.write().pc_screen.mode = mode.clone();
+                                }
+                            }
+                        }
+                        crate::streaming::apply_sharing(want_on, state, app);
+                    }
                 }
             }
             "hello" | "welcome" => {
@@ -1677,22 +1871,21 @@ impl MeshServer {
                     };
                     let _ = out_tx.send(welcome).await;
 
-                    // Synchronize opposite layout to the connecting peer
-                    let opp = match state.inner.read().layout.side.as_str() {
-                        "right" => "left",
-                        "left" => "right",
-                        "top" => "bottom",
-                        "bottom" => "top",
-                        _ => "left",
-                    };
+                    // Tell the connecting peer which side we are on; it flips it for itself.
+                    let side = state.inner.read().layout.side.clone();
                     let layout_sync = WireMessage {
                         t: "kvm.layout".to_string(),
                         v: Some(1),
-                        side: Some(opp.to_string()),
-                        pc_side: Some(opp.to_string()),
+                        side: Some(side.clone()),
+                        pc_side: Some(side),
                         ..Default::default()
                     };
                     let _ = out_tx.send(layout_sync).await;
+
+                    // And what we share, so its Receive screen page starts out right.
+                    let _ = out_tx
+                        .send(crate::streaming::screen_state_message(state))
+                        .await;
                 }
 
                 let snap = state.snapshot();
@@ -1776,7 +1969,14 @@ impl MeshServer {
                 crate::kvm::NativeInputInjector::mouse_wheel(dx, dy);
             }
             "k.kd" | "remote.kd" => {
-                if let Some(vk) = pkt.vk {
+                // Typing arrives only while this computer is set to accept it.
+                let accepted = {
+                    let s = state.inner.read();
+                    s.kvm.keyboard && s.kvm.linked && s.kvm.be_driven
+                };
+                if !accepted {
+                    log::debug!("[KVM] Ignoring a key: keyboard sharing is off here");
+                } else if let Some(vk) = pkt.vk {
                     let ch = pkt.ch.clone();
                     let im = pkt.im.clone();
                     // The input-method switch and the key it applies to both run on the
@@ -1796,31 +1996,105 @@ impl MeshServer {
                 }
             }
             "clip" => {
-                if let Some(ref text) = pkt.text {
-                    let mut cb = crate::kvm::NativeClipboard::new();
-                    cb.set_text(text);
+                if !*authenticated.read() {
+                    log::warn!("[Auth] Dropping unauthenticated clip packet from {}", peer_addr);
+                } else if let Some(ref text) = pkt.text {
+                    let (on, receive, max_kb) = {
+                        let s = state.inner.read();
+                        (s.clipboard.enabled, s.clipboard.receive, s.clipboard.max_kb.max(1))
+                    };
+                    if !on || !receive {
+                        log::debug!(
+                            "[Clipboard] Ignoring incoming text: clipboard off or receive direction off"
+                        );
+                    } else if text.len() as u64 > max_kb as u64 * 1024 {
+                        log::debug!(
+                            "[Clipboard] Ignoring incoming text of {} bytes (limit {} KB)",
+                            text.len(),
+                            max_kb
+                        );
+                    } else {
+                        let mut cb = crate::kvm::NativeClipboard::new();
+                        cb.set_text(text);
+                        // Let the watcher know this is not a fresh local copy.
+                        crate::kvm::note_remote_clipboard_text(text);
+                        if state.record_clipboard_item(text.clone(), "in", text.len() as u64, None) {
+                            let snap = state.snapshot();
+                            let _ = app.emit("state-change", &snap);
+                        }
+                    }
                 }
             }
             "clip.image" => {
-                if let Some(ref b64) = pkt.png {
-                    use base64::Engine;
-                    if let Ok(png_bytes) = base64::prelude::BASE64_STANDARD.decode(b64) {
-                        let mut cb = crate::kvm::NativeClipboard::new();
-                        cb.set_image_png(&png_bytes);
+                if !*authenticated.read() {
+                    log::warn!("[Auth] Dropping unauthenticated clip.image packet from {}", peer_addr);
+                } else if let Some(ref b64) = pkt.png {
+                    let (on, receive, images) = {
+                        let s = state.inner.read();
+                        (s.clipboard.enabled, s.clipboard.receive, s.clipboard.images)
+                    };
+                    if !on || !receive || !images {
+                        log::debug!(
+                            "[Clipboard] Ignoring incoming picture: off, direction off, or pictures off"
+                        );
+                    } else {
+                        use base64::Engine;
+                        if let Ok(png_bytes) = base64::prelude::BASE64_STANDARD.decode(b64) {
+                            let mut cb = crate::kvm::NativeClipboard::new();
+                            if cb.set_image_png(&png_bytes) {
+                                crate::kvm::note_remote_clipboard_image(png_bytes.len());
+                                let w = pkt.w.unwrap_or(0);
+                                let h = pkt.height.unwrap_or(0);
+                                let thumb = crate::kvm::clipboard_thumb(
+                                    &png_bytes,
+                                    w,
+                                    h,
+                                    pkt.shot.unwrap_or(false),
+                                );
+                                if state.record_clipboard_item(
+                                    format!("Picture · {} × {}", w, h),
+                                    "in",
+                                    png_bytes.len() as u64,
+                                    thumb,
+                                ) {
+                                    let snap = state.snapshot();
+                                    let _ = app.emit("state-change", &snap);
+                                }
+                            }
+                        }
                     }
                 }
             }
             "kvm.take" => {
-                state.set_where_input("driven");
-                // The other computer counts movement from the edge it crossed and gives
-                // control back when the movement returns to that point, so this pointer
-                // has to start there too.
-                let snap = state.snapshot();
-                crate::kvm::NativeInputInjector::place_cursor_at_entry_edge(
-                    &snap.layout.side,
-                    pkt.edge_at.unwrap_or(0.5),
-                );
-                let _ = app.emit("state-change", &snap);
+                // Only take the pointer when this computer is set to accept it: the
+                // Cursor master switch, the "use the other computer's mouse here"
+                // direction, and the overall link must all be on. Otherwise say so, so
+                // the other computer hands control straight back instead of hiding its
+                // pointer on a screen nobody is driving.
+                let accepted = {
+                    let s = state.inner.read();
+                    s.kvm.mouse && s.kvm.linked && s.kvm.be_driven
+                };
+                if !accepted {
+                    log::info!("[KVM] Refused the other computer's pointer: cursor sharing is off here");
+                    let home = WireMessage {
+                        t: "kvm.home".to_string(),
+                        v: Some(1),
+                        ..Default::default()
+                    };
+                    let _ = out_tx.send(home).await;
+                } else {
+                    state.set_where_input("driven");
+                    // The other computer counts movement from the edge it crossed and
+                    // gives control back when the movement returns to that point, so
+                    // this pointer has to start there too.
+                    let snap = state.snapshot();
+                    crate::kvm::NativeInputInjector::place_cursor_at_entry_edge(
+                        &snap.layout.side,
+                        pkt.edge_at.unwrap_or(0.5),
+                    );
+                    let _ = app.emit("state-change", &snap);
+                }
             }
             "kvm.home" | "kvm.release" => {
                 state.set_where_input("home");
@@ -2161,7 +2435,14 @@ impl MeshServer {
                 match computed_res {
                     Ok((_size, actual_total_hash)) => {
                         if actual_total_hash.to_lowercase() == sender_total_hash {
-                            let dl_dir = crate::transport::transfer::default_download_dir();
+                            let chosen = {
+                                let s = app.state::<crate::state::AppState>();
+                                let dir = s.inner.read().files.received_folder.clone();
+                                dir
+                            };
+                            let dl_dir =
+                                crate::transport::transfer::effective_received_dir(&chosen);
+                            let _ = std::fs::create_dir_all(&dl_dir);
                             let dest_path = dl_dir.join(&filename);
                             let _ = std::fs::rename(&temp_path_buf, &dest_path)
                                 .or_else(|_| {
@@ -2178,6 +2459,30 @@ impl MeshServer {
                                         &sender_total_hash,
                                     );
                                 }
+                            }
+
+                            // The Files page shows what arrived, so the person who was
+                            // sent the file can find it again after the bar is gone.
+                            {
+                                let app_state = app.state::<crate::state::AppState>();
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0);
+                                let name = dest_path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                {
+                                    let mut s = app_state.inner.write();
+                                    s.files.incoming.last = Some(crate::state::FilesEvent {
+                                        ok: true,
+                                        name,
+                                        text: dest_path.to_string_lossy().to_string(),
+                                        at: now,
+                                    });
+                                }
+                                crate::commands::push_state(&app, &app_state);
                             }
 
                             let _ = app.emit(
@@ -2653,6 +2958,7 @@ impl NetworkManager {
                     peer_addr: resolved_addr,
                     tx: out_tx.clone(),
                     authenticated: Arc::clone(&authenticated),
+                    outbound: true,
                 },
             );
         }
@@ -2894,6 +3200,7 @@ impl NetworkManager {
                     peer_addr: resolved_addr,
                     tx: out_tx.clone(),
                     authenticated: Arc::clone(&authenticated),
+                    outbound: true,
                 },
             );
         }
@@ -3327,7 +3634,20 @@ impl NetworkManager {
         let mut skipped = 0usize;
         {
             let guard = self.active_clients.read();
+            // Two computers that dialled each other at the same moment hold a pair of
+            // sessions; use only the one both ends agree on.
+            let preferred = if target_dests.is_none() {
+                Some(preferred_session_ids(&self.local_id, &guard))
+            } else {
+                None
+            };
             for client in guard.values() {
+                if let Some(ref keep) = preferred {
+                    if !keep.contains(&client.id) {
+                        skipped += 1;
+                        continue;
+                    }
+                }
                 let pid = client.peer_id.read().clone();
                 let matches_dest = match &target_dests {
                     Some(dests) => dests.iter().any(|d| {
@@ -3387,8 +3707,15 @@ impl NetworkManager {
 
         let senders: Vec<mpsc::Sender<WireMessage>> = {
             let guard = self.active_clients.read();
+            // One session per peer; see `preferred_session_ids`.
+            let preferred = if target_dests.is_none() {
+                Some(preferred_session_ids(&self.local_id, &guard))
+            } else {
+                None
+            };
             guard
                 .values()
+                .filter(|c| preferred.as_ref().map(|keep| keep.contains(&c.id)).unwrap_or(true))
                 .filter_map(|c| {
                     let pid = c.peer_id.read().clone();
                     let matches_dest = match &target_dests {
@@ -3710,6 +4037,91 @@ mod tests {
     }
 
     #[test]
+    fn layout_sync_puts_each_screen_on_its_own_side() {
+        use crate::commands::opposite_direction;
+        // Each computer sends the side it sits on; the other flips it once, so the two
+        // screens meet at the edge they share and never end up on the same side.
+        for ours in ["left", "right", "top", "bottom"] {
+            let theirs = opposite_direction(ours);
+            assert_ne!(theirs, ours, "{ours} must not put both screens on one side");
+            assert_eq!(opposite_direction(theirs), ours);
+        }
+        assert_eq!(opposite_direction("left"), "right");
+        assert_eq!(opposite_direction("top"), "bottom");
+    }
+
+    #[test]
+    fn layout_converges_when_both_sides_claim_the_same_edge() {
+        // Already consistent: the other computer is on our right, so we are on its
+        // left. Nothing changes however the ids compare.
+        assert_eq!(layout_side_to_adopt("aaa", "zzz", "left", "right"), None);
+        assert_eq!(layout_side_to_adopt("zzz", "aaa", "left", "right"), None);
+
+        // Both computers claim "left" (a fresh launch). The smaller id keeps its
+        // choice; the larger id turns round, so the pair stops swapping.
+        assert_eq!(layout_side_to_adopt("aaa", "zzz", "left", "left"), None);
+        assert_eq!(layout_side_to_adopt("zzz", "aaa", "left", "left"), Some("right"));
+        // Same rule from the other side of the pair.
+        assert_eq!(layout_side_to_adopt("aaa", "zzz", "right", "right"), None);
+        assert_eq!(layout_side_to_adopt("zzz", "aaa", "right", "right"), Some("left"));
+
+        // A real rearrangement (the other computer moved above us) is always followed.
+        assert_eq!(layout_side_to_adopt("aaa", "zzz", "left", "top"), Some("bottom"));
+        assert_eq!(layout_side_to_adopt("zzz", "aaa", "left", "top"), Some("bottom"));
+
+        // An unknown peer id still lets the claim through.
+        assert_eq!(layout_side_to_adopt("aaa", "", "right", "right"), Some("left"));
+    }
+
+    #[test]
+    fn two_sessions_to_one_peer_use_one_of_them() {
+        // Receivers are kept alive for as long as the sessions exist.
+        let mut held: Vec<mpsc::Receiver<WireMessage>> = Vec::new();
+        fn session(
+            id: &str,
+            peer: Option<&str>,
+            outbound: bool,
+            held: &mut Vec<mpsc::Receiver<WireMessage>>,
+        ) -> ActiveClientSession {
+            let (tx, rx) = mpsc::channel::<WireMessage>(4);
+            held.push(rx);
+            ActiveClientSession {
+                id: id.to_string(),
+                peer_id: Arc::new(RwLock::new(peer.map(|p| p.to_string()))),
+                peer_addr: "192.168.4.9:47800".parse().unwrap(),
+                tx,
+                authenticated: Arc::new(RwLock::new(true)),
+                outbound,
+            }
+        }
+
+        // Both computers dialled at the same moment: one session each way.
+        let mut clients = HashMap::new();
+        clients.insert("inbound".to_string(), session("192.168.4.9:50123", Some("peer"), false, &mut held));
+        clients.insert("outbound".to_string(), session("192.168.4.9:47800", Some("peer"), true, &mut held));
+
+        // The computer with the smaller id dials, so it keeps its outbound session.
+        let ours = preferred_session_ids("aaa", &clients);
+        assert_eq!(ours.len(), 1);
+        assert!(ours.contains("192.168.4.9:47800"));
+
+        // The other computer keeps its inbound session, which is the same connection.
+        let theirs = preferred_session_ids("zzz", &clients);
+        assert_eq!(theirs.len(), 1);
+        assert!(theirs.contains("192.168.4.9:50123"));
+
+        // A single session is always used, whatever the ids.
+        let mut one = HashMap::new();
+        one.insert("only".to_string(), session("192.168.4.9:50123", Some("peer"), false, &mut held));
+        assert!(preferred_session_ids("aaa", &one).contains("192.168.4.9:50123"));
+
+        // Sessions that have not introduced themselves are left alone.
+        let mut unknown = HashMap::new();
+        unknown.insert("fresh".to_string(), session("192.168.4.8:50001", None, false, &mut held));
+        assert!(preferred_session_ids("aaa", &unknown).contains("192.168.4.8:50001"));
+    }
+
+    #[test]
     fn test_active_session_auth_gate_and_pairing_token() {
         let auth_flag = Arc::new(RwLock::new(false));
         let (tx, _rx) = mpsc::channel::<WireMessage>(10);
@@ -3719,6 +4131,7 @@ mod tests {
             peer_addr: "192.168.4.15:47800".parse().unwrap(),
             tx,
             authenticated: Arc::clone(&auth_flag),
+            outbound: false,
         };
 
         // 1. Session begins unauthenticated
@@ -3799,6 +4212,24 @@ mod tests {
             resolve_file_dest(None, &clients),
             Err("send_files requires a target peer (multiple peers connected)".to_string())
         );
+
+        // 11. None + two sessions with the same computer (both dialled at once) ->
+        //     still one destination, not "multiple peers connected".
+        let two_sessions_one_peer = vec![
+            ClientInfo::new("192.168.1.102:47800", Some("peer_beta".into()), "192.168.1.102", true),
+            ClientInfo::new("192.168.1.102:50123", Some("peer_beta".into()), "192.168.1.102", true),
+        ];
+        assert_eq!(
+            resolve_file_dest(None, &two_sessions_one_peer),
+            Ok(vec!["peer_beta".to_string()])
+        );
+
+        // 12. Two different computers are still ambiguous.
+        let two_peers = vec![
+            ClientInfo::new("192.168.1.102:47800", Some("peer_beta".into()), "192.168.1.102", true),
+            ClientInfo::new("192.168.1.104:47800", Some("peer_delta".into()), "192.168.1.104", true),
+        ];
+        assert!(resolve_file_dest(None, &two_peers).is_err());
     }
 
     #[test]
@@ -3875,6 +4306,7 @@ mod tests {
             peer_addr: "192.168.1.102:47800".parse().unwrap(),
             tx: tx_b,
             authenticated: Arc::new(RwLock::new(true)),
+            outbound: false,
         };
 
         let session_c = ActiveClientSession {
@@ -3883,6 +4315,7 @@ mod tests {
             peer_addr: "192.168.1.103:47800".parse().unwrap(),
             tx: tx_c,
             authenticated: Arc::new(RwLock::new(true)),
+            outbound: false,
         };
 
         let active_map = Arc::new(RwLock::new(HashMap::new()));
@@ -3994,6 +4427,7 @@ mod tests {
             peer_addr: "192.168.1.102:47800".parse().unwrap(),
             tx: tx_b,
             authenticated: Arc::new(RwLock::new(true)),
+            outbound: false,
         };
 
         let session_c = ActiveClientSession {
@@ -4002,6 +4436,7 @@ mod tests {
             peer_addr: "192.168.1.103:47800".parse().unwrap(),
             tx: tx_c,
             authenticated: Arc::new(RwLock::new(true)),
+            outbound: false,
         };
 
         let active_map = Arc::new(RwLock::new(HashMap::new()));
@@ -4159,6 +4594,7 @@ mod tests {
                 peer_addr: addr_alpha,
                 tx: tx_a_in,
                 authenticated: Arc::new(RwLock::new(true)),
+                outbound: false,
             };
 
             let session_beta = ActiveClientSession {
@@ -4167,6 +4603,7 @@ mod tests {
                 peer_addr: addr_beta,
                 tx: tx_b_in,
                 authenticated: Arc::new(RwLock::new(true)),
+                outbound: false,
             };
 
             let active_clients = Arc::new(RwLock::new(HashMap::new()));
