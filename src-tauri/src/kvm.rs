@@ -138,6 +138,27 @@ pub fn translate_modifier_vk(vk: u16, peer_modifier: Option<u16>) -> u16 {
     }
 }
 
+/// Put the side back on a modifier the keyboard reported generically.
+///
+/// Some keyboards and adapters report a right-hand Shift, Ctrl or Alt as the
+/// generic code (0x10, 0x11, 0x12) and mark the right-hand one only in the scan
+/// code, so the far computer would see the left-hand key: right Shift + 4 types
+/// "4" instead of "$" (#212). The scan code says which side it was.
+pub fn side_specific_modifier(vk: u16, scan: u32, extended: bool) -> u16 {
+    const VK_SHIFT: u16 = 0x10;
+    const VK_CONTROL: u16 = 0x11;
+    const VK_MENU: u16 = 0x12;
+    const SCAN_RSHIFT: u32 = 0x36;
+    match vk {
+        // Right Shift is scan 0x36; its left twin is 0x2A.
+        VK_SHIFT if scan == SCAN_RSHIFT => 0xA1, // VK_RSHIFT
+        // Ctrl and Alt are only distinguished by the E0 prefix.
+        VK_CONTROL if extended => 0xA3, // VK_RCONTROL
+        VK_MENU if extended => 0xA5,    // VK_RMENU
+        other => other,
+    }
+}
+
 /// Check if cumulative remote virtual deltas indicate cursor has moved back across the seam to home.
 #[cfg(any(test, not(windows)))]
 pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: f64) -> bool {
@@ -2866,8 +2887,26 @@ pub mod hook_engine {
                     if !snap.kvm.keyboard && is_down {
                         return LRESULT(1);
                     }
-                    // Ctrl here is Command on the driven computer, so Ctrl+C there is a copy.
-                    let vk = translate_modifier_vk(k.vkCode as u16, peer_command_modifier_vk(&snap)) as u32;
+                    // A right Shift, Ctrl or Alt reported generically keeps its side,
+                    // then Ctrl here is Command on the driven computer, so Ctrl+C there
+                    // is a copy.
+                    const LLKHF_EXTENDED: u32 = 0x01;
+                    let raw_vk = k.vkCode as u16;
+                    let vk = side_specific_modifier(
+                        raw_vk,
+                        k.scanCode,
+                        k.flags.0 & LLKHF_EXTENDED != 0,
+                    );
+                    if vk != raw_vk {
+                        log::info!(
+                            "[KVM] adapter reported a generic modifier: vk=0x{:02X} scan=0x{:02X} ext={} forwarded as 0x{:02X}",
+                            raw_vk,
+                            k.scanCode,
+                            k.flags.0 & LLKHF_EXTENDED != 0,
+                            vk
+                        );
+                    }
+                    let vk = translate_modifier_vk(vk, peer_command_modifier_vk(&snap)) as u32;
                     let key_msg = WireMessage {
                         t: if is_down { "k.kd".to_string() } else { "k.ku".to_string() },
                         v: Some(1),
@@ -4353,6 +4392,25 @@ mod tests {
         assert_eq!(translate_modifier_vk(0x43, Some(CTRL)), 0x43);
         assert_eq!(translate_modifier_vk(CTRL, Some(CTRL)), CTRL);
         assert_eq!(translate_modifier_vk(CTRL, None), CTRL);
+    }
+
+    #[test]
+    fn right_shift_is_identified_even_when_the_adapter_flags_it_extended() {
+        const SHIFT: u16 = 0x10;
+        const CONTROL: u16 = 0x11;
+        const MENU: u16 = 0x12;
+
+        // Adapters that report the generic code: the scan code still says "right".
+        assert_eq!(side_specific_modifier(SHIFT, 0x36, false), 0xA1); // VK_RSHIFT
+        assert_eq!(side_specific_modifier(SHIFT, 0x2A, false), SHIFT); // left Shift
+        assert_eq!(side_specific_modifier(CONTROL, 0x1D, true), 0xA3); // VK_RCONTROL
+        assert_eq!(side_specific_modifier(CONTROL, 0x1D, false), CONTROL);
+        assert_eq!(side_specific_modifier(MENU, 0x38, true), 0xA5); // VK_RMENU
+        assert_eq!(side_specific_modifier(MENU, 0x38, false), MENU);
+
+        // Already side-specific or an ordinary key: leave it alone.
+        assert_eq!(side_specific_modifier(0xA1, 0x36, false), 0xA1);
+        assert_eq!(side_specific_modifier(0x34, 0x36, false), 0x34); // the Shift key's neighbour
     }
 
     #[test]
