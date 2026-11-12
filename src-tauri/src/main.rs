@@ -19,6 +19,7 @@ mod fastfile;
 mod media;
 mod network;
 mod pairlimit;
+mod pairstore;
 mod state;
 mod tray;
 mod phone;
@@ -80,6 +81,16 @@ fn main() {
 
             // 1. Start Async Networking Engine (Phase 2: UDP discovery & WS mesh server)
             network.start();
+
+            // 1b. A paired computer comes back on its own after a restart.
+            {
+                let net = network.clone();
+                tauri::async_runtime::spawn(async move {
+                    // Let discovery and the listener settle before dialing.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    net.connect_last_paired().await;
+                });
+            }
 
             // 2. Start Clipboard Sync Daemon (Phase 3)
             let clip_watcher = Arc::new(kvm::ClipboardWatcher::new(network.clone(), state.clone()));

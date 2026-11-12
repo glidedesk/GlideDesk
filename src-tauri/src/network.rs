@@ -30,6 +30,23 @@ const MOTION_BACKLOG_LIMIT: u64 = 64 * 1024;
 const MOTION_MAX_WAIT: Duration = Duration::from_millis(20);
 const MOTION_RETRY_MS: u64 = 2;
 
+/// Peer ids are host names; macOS uses typographic apostrophes in some names while
+/// the same computer can report a straight one elsewhere. Compare them leniently.
+fn same_peer_id(a: &str, b: &str) -> bool {
+    fn norm(s: &str) -> String {
+        s.trim()
+            .chars()
+            .map(|c| match c {
+                '\u{2018}' | '\u{2019}' | '\u{02BC}' | '\u{2032}' => '\'',
+                '\u{201C}' | '\u{201D}' => '"',
+                _ => c,
+            })
+            .collect::<String>()
+            .to_lowercase()
+    }
+    a.eq_ignore_ascii_case(b) || norm(a) == norm(b)
+}
+
 pub fn current_os() -> &'static str {
     #[cfg(target_os = "macos")]
     return "mac";
@@ -1179,6 +1196,8 @@ impl MeshServer {
         if let Some(sess) = session {
             let raw_token = random_hex(16);
             let token = crate::transport::tls::format_beam_auth_token(&raw_token, tls_fingerprint);
+            // The guest's address, so this side can reconnect on its own next launch.
+            let mut peer_ip: Option<String> = None;
             if let Some(clients_map) = active_clients {
                 let guard = clients_map.read();
                 for client in guard.values() {
@@ -1188,6 +1207,9 @@ impl MeshServer {
                         || client.peer_addr.ip().to_string() == sess.peer_id
                     {
                         *client.authenticated.write() = true;
+                        if peer_ip.is_none() {
+                            peer_ip = Some(client.peer_addr.ip().to_string());
+                        }
                     }
                 }
             }
@@ -1195,6 +1217,7 @@ impl MeshServer {
                 let mut s = state.inner.write();
                 s.pairing = None;
                 s.link.state = "connected".to_string();
+                s.link.manual_off = false;
                 s.link.mac_name = Some(sess.peer_name.clone());
                 s.link.peer_name = Some(sess.peer_name.clone());
                 let peer = PeerInfo {
@@ -1210,17 +1233,25 @@ impl MeshServer {
                     s.guests.push(peer.clone());
                 }
                 let fp = s.peer_fingerprints.get(&sess.peer_id).cloned();
+                let addr = peer_ip.clone().or_else(|| {
+                    s.found
+                        .iter()
+                        .find(|f| same_peer_id(&f.id, &sess.peer_id))
+                        .and_then(|f| f.address.clone())
+                });
                 s.paired = Some(crate::state::PairedPeer {
                     mac_id: sess.peer_id.clone(),
                     mac_name: sess.peer_name.clone(),
                     os: sess.peer_os.clone(),
-                    address: None,
+                    address: addr,
                     token: Some(token.clone()),
                     tls_fingerprint: fp,
                 });
                 s.peer = Some(peer.clone());
                 s.client = Some(peer);
             }
+            // Paired for good: write it down so the next launch comes up paired.
+            state.persist_pairs();
             let ok_msg = WireMessage {
                 t: "pair.ok".to_string(),
                 v: Some(1),
@@ -1473,6 +1504,7 @@ impl MeshServer {
                     let mut s = state.inner.write();
                     s.pairing = None;
                     s.link.state = "connected".to_string();
+                    s.link.manual_off = false;
                     s.link.mac_name = Some(host_name.clone());
                     s.link.peer_name = Some(host_name.clone());
                     let p_info = PeerInfo {
@@ -1497,6 +1529,8 @@ impl MeshServer {
                     });
                 }
                 *authenticated.write() = true;
+                // Paired for good: write it down so the next launch comes up paired.
+                state.persist_pairs();
                 {
                     let mut pair_guard = pending_pair.write();
                     *pair_guard = None;
@@ -1570,7 +1604,9 @@ impl MeshServer {
                 let is_auth = {
                     let guard = state.inner.read();
                     if let Some(ref paired) = guard.paired {
-                        let id_match = pkt.id.as_deref().map(|id| id.eq_ignore_ascii_case(&paired.mac_id)).unwrap_or(false)
+                        let id_match = pkt.id.as_deref()
+                            .map(|id| same_peer_id(id, &paired.mac_id))
+                            .unwrap_or(false)
                             || peer_addr.ip().to_string() == paired.mac_id;
                         let token_match = match (&paired.token, &pkt.token) {
                             (Some(exp), Some(recv)) => {
@@ -1624,6 +1660,10 @@ impl MeshServer {
                 }
 
                 if pkt.t == "hello" {
+                    // Prove who we are as well: the peer checks this token against the
+                    // pairing it stored, the same way we checked theirs. Without it, a
+                    // reconnecting pair cannot authenticate each other from a bare welcome.
+                    let our_token = state.inner.read().paired.as_ref().and_then(|p| p.token.clone());
                     let welcome = WireMessage {
                         t: "welcome".to_string(),
                         v: Some(1),
@@ -1632,6 +1672,7 @@ impl MeshServer {
                         os: Some(current_os().to_string()),
                         port: Some(DEFAULT_PORT),
                         role: Some("host".to_string()),
+                        token: our_token,
                         ..Default::default()
                     };
                     let _ = out_tx.send(welcome).await;
@@ -2328,7 +2369,7 @@ impl NetworkManager {
         let local_name = state.inner.read().about.pc.host.clone();
         let pending_pair = Arc::new(RwLock::new(None));
         let tls_identity = Arc::new(
-            crate::transport::tls::LocalTlsIdentity::generate()
+            crate::transport::tls::LocalTlsIdentity::load_or_generate()
                 .unwrap_or_else(|e| {
                     log::warn!("[TLS] Fallback TLS identity: {}", e);
                     crate::transport::tls::LocalTlsIdentity {
@@ -2485,9 +2526,76 @@ impl NetworkManager {
         }
     }
 
+    /// Dial the computer paired last time, and keep it connected: called once at startup.
+    /// After a restart, or after the other computer sleeps, GlideDesk comes back by itself
+    /// instead of asking for a new pairing code (or sitting on "Connecting…" for ever).
+    pub async fn connect_last_paired(&self) {
+        loop {
+            // Let discovery and the listener settle on the very first pass.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let (target, connected, pairing, manual_off) = {
+                let s = self.state.inner.read();
+                // The stored address, else where discovery last saw that computer.
+                let addr = s.paired.as_ref().and_then(|p| {
+                    p.address.clone().or_else(|| {
+                        s.found
+                            .iter()
+                            .find(|f| same_peer_id(&f.id, &p.mac_id) || f.name.eq_ignore_ascii_case(&p.mac_name))
+                            .and_then(|f| f.address.clone())
+                    })
+                });
+                (
+                    addr,
+                    s.link.state == "connected",
+                    s.pairing.is_some(),
+                    s.link.manual_off,
+                )
+            };
+            let Some(addr) = target else {
+                return; // forgotten: nothing to reconnect to
+            };
+            if pairing || manual_off {
+                // A user-started pairing is in charge, or the user chose Disconnect.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+            if !connected {
+                let addr = if addr.contains(':') { addr } else { format!("{}:{}", addr, DEFAULT_PORT) };
+                match self.connect_to(&addr).await {
+                    Ok(()) => log::info!("[Startup] Reconnected to the paired computer at {}", addr),
+                    Err(e) => {
+                        log::info!("[Startup] Could not reconnect to {} yet: {}", addr, e);
+                        if e.contains("fingerprint changed") {
+                            // The other computer's certificate is not the one we trust:
+                            // say so instead of retrying quietly, until it is paired again.
+                            {
+                                let mut s = self.state.inner.write();
+                                s.link.state = "identity_changed".to_string();
+                                s.link.message = Some(e.clone());
+                            }
+                            let _ = self.app.emit("state-change", self.state.snapshot());
+                        }
+                    }
+                }
+            }
+            // Check again soon while it's down, and now and then once it's up, so a
+            // dropped link (the other computer slept, Wi-Fi changed) comes back.
+            let wait = if connected { 20 } else { 8 };
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        }
+    }
+
     pub async fn connect_to(&self, target_addr: &str) -> Result<(), String> {
         let clean_addr = target_addr.trim_start_matches("ws://").trim_start_matches("wss://");
         let target_ip = clean_addr.split(':').next().unwrap_or(clean_addr);
+
+        // Somebody asked to connect (the user, or our own retry): not "stay disconnected" any more.
+        self.state.inner.write().link.manual_off = false;
+
+        // The other computer may already have dialled us; don't open a second session.
+        if self.state.inner.read().link.state == "connected" {
+            return Ok(());
+        }
 
         // Avoid duplicate concurrent connection if already connected to this peer
         {
@@ -3357,6 +3465,8 @@ impl NetworkManager {
         self.state.set_client(None);
         self.state.set_pairing(None);
         self.state.set_where_input("home");
+        // An explicit Disconnect stays disconnected until the user connects again.
+        self.state.inner.write().link.manual_off = true;
         let snap = self.state.snapshot();
         let _ = self.app.emit("state-change", &snap);
     }

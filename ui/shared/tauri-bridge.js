@@ -174,11 +174,11 @@
     clearHistory: () => invoke('clear_history'),
     setTab: (tab) => invoke('set_tab', { tab }),
     setMulti: (on) => invoke('set_multi', { on }),
-    setAudio: (partial) => invoke('set_app', { partial }).catch(() => {}),
-    setFiles: (partial) => invoke('set_app', { partial }).catch(() => {}),
-    setNotifs: (partial) => invoke('set_app', { partial }).catch(() => {}),
-    setTerminal: (partial) => invoke('set_app', { partial }).catch(() => {}),
-    setPcApps: (allow) => invoke('set_app', { partial: { allow } }).catch(() => {}),
+    setAudio: (partial) => invoke('set_app', { partial: { audio: partial || {} } }).catch(() => {}),
+    setFiles: (partial) => invoke('set_app', { partial: { files: partial || {} } }).catch(() => {}),
+    setNotifs: (partial) => invoke('set_app', { partial: { notifs: partial || {} } }).catch(() => {}),
+    setTerminal: (partial) => invoke('set_app', { partial: { terminal: partial || {} } }).catch(() => {}),
+    setPcApps: (allow) => invoke('set_app', { partial: { allow: !!(allow && typeof allow === 'object' ? allow.allow : allow) } }).catch(() => {}),
     setSharing: (on, by) => invoke('set_sharing', { on: !!on, by: by ? String(by) : null }),
     setSharingOpts: (opts) => invoke('set_sharing_opts', { opts: opts || {} }),
     setStreamInput: (on) => invoke('set_stream_input', { on: !!on }),
@@ -190,7 +190,7 @@
     setScreenSound: (on) => invoke('set_screen_sound', { on: !!on }),
     openSharingSettings: () => invoke('open_sharing_settings'),
     setPcScreenMode: (mode) => invoke('set_display_mode', { mode: String(mode || '') }),
-    setShareOn: (on) => invoke('set_sharing', { on: !!on, by: null }),
+    setShareOn: (on) => invoke('set_app', { partial: { files: { shareOn: !!on } } }).catch(() => {}),
     setOverview: (overview) => invoke('set_overview', { overview: overview || {} }),
     deviceDo: (c) => invoke('device_do', { c: c || {} }),
     showHud: (kind, text, sub) => invoke('show_hud', { kind: String(kind || ''), text: String(text || ''), sub: sub ? String(sub) : null }),
@@ -228,7 +228,13 @@
     },
     fixFirewall: () => invoke('fix_firewall'),
     netCancel: () => invoke('net_cancel'),
-    netJoinHotspot: (ssid, key) => invoke('net_join_hotspot', { ssid: String(ssid || ''), key: String(key || '') }),
+    netJoinHotspot: (ssid, key) => {
+      const o = ssid && typeof ssid === 'object' ? ssid : { ssid, key };
+      return invoke('net_join_hotspot', {
+        ssid: String(o.ssid || ''),
+        key: String(o.key != null ? o.key : (o.pass || '')),
+      });
+    },
     netLocation: () => invoke('net_location'),
     netWifi: (arg) => invoke('net_wifi', { arg: arg || {} }),
 
@@ -285,7 +291,8 @@
     listApps: () => invoke('list_apps'),
     muteNotifApp: (arg) => {
       const app = typeof arg === 'object' && arg ? (arg.app || arg.appName || '') : String(arg || '');
-      return invoke('mute_notif_app', { app: app, app_name: app });
+      const muted = typeof arg === 'object' && arg && typeof arg.muted === 'boolean' ? arg.muted : null;
+      return invoke('mute_notif_app', { app: app, app_name: app, muted: muted });
     },
     openBluetoothSettings: () => invoke('open_bluetooth_settings'),
     openMacDrive: () => invoke('open_mac_drive'),
@@ -302,8 +309,10 @@
     phoneInstallFull: () => invoke('phone_install_full'),
     phoneListCameras: () => invoke('phone_list_cameras'),
     phoneMedia: (action) => {
-      const act = typeof action === 'object' && action ? (action.a || JSON.stringify(action)) : String(action || '');
-      return invoke('phone_media', { action: act });
+      // Pass the whole request through: the phone's own media actions are an object
+      // ({a: 'seek', pos}) as well as a plain action name.
+      const o = typeof action === 'object' && action ? action : { a: String(action || '') };
+      return invoke('phone_media', { action: o });
     },
     phoneMount: () => invoke('phone_mount'),
     phoneOpenApp: (arg) => {
@@ -312,7 +321,10 @@
     },
     phoneUnmount: () => invoke('phone_unmount'),
     pinApp: (name) => invoke('pin_app', { name: String(name || '') }),
-    remoteScreen: () => invoke('remote_screen'),
+    remoteScreen: (o) => invoke('remote_screen', {
+      share: !!(o && o.share),
+      mode: String((o && o.mode) || ''),
+    }),
     removeVdd: () => invoke('remove_vdd'),
     resetReceivedFolder: () => invoke('reset_received_folder'),
     setMacApps: (partial) => invoke('set_mac_apps', { partial: partial || {} }),

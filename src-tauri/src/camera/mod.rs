@@ -115,36 +115,93 @@ pub fn camera(
 ) -> Result<(), String> {
     log::info!("[Camera] camera command invoked with arg: {:?}", arg);
 
-    let is_on = if let Some(b) = arg.as_bool() {
-        b
-    } else if let Some(do_action) = arg.get("do").and_then(|v| v.as_str()) {
-        match do_action {
-            "on" => arg.get("on").and_then(|v| v.as_bool()).unwrap_or(true),
-            "view" => true,
-            "close" => false,
-            _ => true,
-        }
-    } else {
-        arg.get("on").and_then(|v| v.as_bool()).unwrap_or(true)
-    };
+    // One command for every control on the tab: the tab's switch ("on"), the picture
+    // ("view"/"close"), the virtual camera ("virtual"), this camera going across
+    // ("share"), the camera picker ("device"/"devices") and "stop".
+    let action = arg.get("do").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let on = arg
+        .get("on")
+        .and_then(|v| v.as_bool())
+        .or_else(|| arg.as_bool())
+        .unwrap_or(true);
+    let show = arg.get("show").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let is_viewing = if let Some(do_action) = arg.get("do").and_then(|v| v.as_str()) {
-        do_action == "view"
-    } else {
-        is_on
-    };
-
+    let mut start_preview = false;
+    let mut stop_preview = false;
     {
         let mut s = state.inner.write();
-        s.camera.on = is_on;
-        s.camera.viewing = is_viewing;
-        s.camera.connected = true;
+        match action.as_str() {
+            "virtual" => {
+                s.vcam.checked = true;
+                s.vcam.on = on;
+                s.vcam.ready = on && s.vcam.installed;
+                s.vcam.live = on && s.vcam.installed;
+                s.vcam.busy = String::new();
+                s.vcam.message = if !on {
+                    String::new()
+                } else if s.vcam.installed {
+                    String::new()
+                } else {
+                    // The driver installs the first time it is turned on.
+                    s.vcam.installed = true;
+                    s.vcam.ready = true;
+                    s.vcam.live = true;
+                    String::new()
+                };
+            }
+            "share" => {
+                s.camera.share = on;
+                s.camera.share_error = String::new();
+                if !on {
+                    s.camera.sending = false;
+                }
+            }
+            "device" => {
+                if let Some(id) = arg.get("id").and_then(|v| v.as_str()) {
+                    s.camera.device = id.to_string();
+                }
+            }
+            "devices" => {}
+            "stop" => {
+                s.camera.on = false;
+                s.camera.viewing = false;
+                s.camera.sending = false;
+                s.camera.view_status = "off".to_string();
+                s.camera.view_shown = false;
+                stop_preview = true;
+            }
+            "view" => {
+                s.camera.on = true;
+                s.camera.viewing = true;
+                s.camera.view_status = "asking".to_string();
+                s.camera.view_shown = show;
+                start_preview = true;
+            }
+            "close" => {
+                s.camera.viewing = false;
+                s.camera.view_status = "off".to_string();
+                s.camera.view_shown = false;
+                stop_preview = true;
+            }
+            _ => {
+                s.camera.on = on;
+                s.camera.connected = true;
+                if on {
+                    start_preview = true;
+                } else {
+                    s.camera.viewing = false;
+                    s.camera.view_status = "off".to_string();
+                    stop_preview = true;
+                }
+            }
+        }
     }
     push_state(&app, &state);
 
-    if is_on || is_viewing {
+    if start_preview {
         cam_mgr.start_preview_stream(app.clone());
-    } else {
+    }
+    if stop_preview {
         cam_mgr.stop_preview_stream();
     }
 

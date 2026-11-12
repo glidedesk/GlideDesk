@@ -72,9 +72,27 @@ pub fn scan_installed_apps() -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn list_apps() -> Result<Vec<String>, String> {
+pub fn list_apps(state: State<'_, AppState>, app: AppHandle) -> Result<Vec<String>, String> {
     let apps = scan_installed_apps();
     log::info!("[Apps] Discovered {} installed applications on system", apps.len());
+    {
+        let mut s = state.inner.write();
+        s.apps.loading = false;
+        s.apps.message = if apps.is_empty() {
+            "No applications were found on this computer yet".to_string()
+        } else {
+            String::new()
+        };
+        s.apps.list = apps
+            .iter()
+            .map(|name| crate::state::AppEntry {
+                id: name.clone(),
+                name: name.clone(),
+                icon: String::new(),
+            })
+            .collect();
+    }
+    push_state(&app, &state);
     Ok(apps)
 }
 
@@ -221,10 +239,18 @@ pub fn choose_received_folder() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn choose_share_folder() -> Result<String, String> {
+pub fn choose_share_folder(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
     let dir = PathBuf::from(home).join("Public");
-    Ok(dir.to_string_lossy().to_string())
+    let path = dir.to_string_lossy().to_string();
+    {
+        let mut s = state.inner.write();
+        s.files.path = path.clone();
+        s.files.smb.folder = path.clone();
+        s.files.share_on = true;
+    }
+    push_state(&app, &state);
+    Ok(path)
 }
 
 #[tauri::command]
@@ -276,6 +302,7 @@ pub fn toggle_app_mute(muted: &mut Vec<String>, name: &str) -> bool {
 pub fn mute_notif_app(
     app: Option<serde_json::Value>,
     app_name: Option<String>,
+    muted: Option<bool>,
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
@@ -296,10 +323,22 @@ pub fn mute_notif_app(
         return Err("App name cannot be empty".to_string());
     }
 
-    log::info!("[Notifs] Toggling mute state for app notifications: {}", name);
+    log::info!("[Notifs] Setting mute state for app notifications: {}", name);
     {
         let mut s = state.inner.write();
-        let is_muted = toggle_app_mute(&mut s.notifs.muted, &name);
+        // The switch says which way it should end up (muted / not muted); without it, toggle.
+        let is_muted = match muted {
+            Some(want) => {
+                let has = s.notifs.muted.iter().any(|x| x.eq_ignore_ascii_case(&name));
+                if want && !has {
+                    s.notifs.muted.push(name.clone());
+                } else if !want && has {
+                    s.notifs.muted.retain(|x| !x.eq_ignore_ascii_case(&name));
+                }
+                want
+            }
+            None => toggle_app_mute(&mut s.notifs.muted, &name),
+        };
         log::info!("[Notifs] App '{}' is now {}", name, if is_muted { "muted" } else { "unmuted" });
     }
     push_state(&app_handle, &state);
@@ -391,12 +430,31 @@ pub fn open_monitor(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn remote_screen(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    log::info!("[Monitor] Toggling remote screen");
+pub fn remote_screen(
+    share: Option<bool>,
+    mode: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    log::info!("[Monitor] remote_screen: share={:?}, mode={:?}", share, mode);
+    if share == Some(false) {
+        if let Some(win) = app.get_webview_window("projection") {
+            let _ = win.hide();
+        }
+        {
+            let mut s = state.inner.write();
+            s.stream.state = "off".to_string();
+        }
+        push_state(&app, &state);
+        return Ok(());
+    }
     open_monitor(app.clone())?;
     {
         let mut s = state.inner.write();
         s.stream.state = "active".to_string();
+        if let Some(m) = mode.filter(|m| !m.is_empty()) {
+            s.pc_screen.mode = m;
+        }
     }
     push_state(&app, &state);
     Ok(())
@@ -409,6 +467,18 @@ pub fn set_remote(partial: serde_json::Value, state: State<'_, AppState>, app: A
         let mut s = state.inner.write();
         if let Some(active) = partial.get("active").and_then(|v| v.as_bool()) {
             s.stream.state = if active { "active".to_string() } else { "off".to_string() };
+        }
+        if let Some(allow) = partial.get("allow").and_then(|v| v.as_bool()) {
+            s.remote.allow = allow;
+            if !allow {
+                s.remote.using = false;
+            }
+            s.remote.why = String::new();
+        }
+        if let Some(pad) = partial.get("pad").and_then(|v| v.as_bool()) {
+            s.remote.pad.on = pad;
+            s.remote.pad.busy = String::new();
+            s.remote.pad.live = pad && s.remote.pad.supported;
         }
     }
     push_state(&app, &state);
@@ -449,20 +519,19 @@ pub fn set_phone_remote(on: bool, state: State<'_, AppState>, app: AppHandle) ->
 // ==========================================
 
 #[tauri::command]
-pub fn check_firewall() -> Result<serde_json::Value, String> {
+pub fn check_firewall(state: State<'_, AppState>, app: AppHandle) -> Result<serde_json::Value, String> {
     log::info!("[Firewall] Checking system firewall configuration");
+    let mut active = false;
+    let mut status = String::new();
     #[cfg(target_os = "macos")]
     {
         let out = Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
             .arg("--getglobalstate")
             .output();
         if let Ok(o) = out {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let active = s.contains("enabled");
-            return Ok(serde_json::json!({
-                "active": active,
-                "status": s.trim()
-            }));
+            let text = String::from_utf8_lossy(&o.stdout);
+            active = text.contains("enabled");
+            status = text.trim().to_string();
         }
     }
     #[cfg(target_os = "windows")]
@@ -471,14 +540,27 @@ pub fn check_firewall() -> Result<serde_json::Value, String> {
             .args(["advfirewall", "show", "currentprofile", "state"])
             .output();
         if let Ok(o) = out {
-            let s = String::from_utf8_lossy(&o.stdout);
-            return Ok(serde_json::json!({
-                "active": s.contains("ON"),
-                "status": s.trim()
-            }));
+            let text = String::from_utf8_lossy(&o.stdout);
+            active = text.contains("ON");
+            status = text.trim().to_string();
         }
     }
-    Ok(serde_json::json!({ "active": false, "status": "ok" }))
+    {
+        let mut s = state.inner.write();
+        s.firewall.checking = false;
+        s.firewall.ok = true;
+        s.firewall.message = if active {
+            "The firewall is on and GlideDesk is allowed through".to_string()
+        } else {
+            "The firewall is off".to_string()
+        };
+        s.firewall.error = String::new();
+    }
+    push_state(&app, &state);
+    Ok(serde_json::json!({
+        "active": active,
+        "status": status
+    }))
 }
 
 #[tauri::command]
@@ -726,12 +808,12 @@ pub fn net_location() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn net_join_hotspot(ssid: String, _key: String) -> Result<(), String> {
+pub fn net_join_hotspot(ssid: String, key: String) -> Result<(), String> {
     log::info!("[Network] Joining hotspot: ssid={}", ssid);
     #[cfg(target_os = "macos")]
     {
         Command::new("networksetup")
-            .args(["-setairportnetwork", "en0", &ssid, &_key])
+            .args(["-setairportnetwork", "en0", &ssid, &key])
             .spawn()
             .map_err(|e| format!("Failed to join hotspot: {}", e))?;
         return Ok(());

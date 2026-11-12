@@ -147,6 +147,7 @@
     else if (s.pairing) text = 'Pairing…';
     else if (l.state === 'connecting' || l.state === 'reconnecting') text = 'Reconnecting…';
     else if (l.state === 'identity_changed') text = 'Identity changed';
+    else if (s.paired) text = ((s.paired.macName || s.paired.mac_name) || 'Paired') + ' · Offline';
     $('peer-text').textContent = text;
     try {
       renderPhones(s);

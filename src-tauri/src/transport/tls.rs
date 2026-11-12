@@ -8,8 +8,22 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::client::danger::{ServerCertVerifier, HandshakeSignatureValid, ServerCertVerified};
 use rustls::{DigitallySignedStruct, Error, SignatureScheme, ServerConfig, ClientConfig};
 
-pub struct LocalTlsIdentity {
-    pub cert_der: Vec<u8>,
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    let clean = s.trim();
+    if clean.len() % 2 != 0 {
+        return None;
+    }
+    (0..clean.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).ok())
+        .collect()
+}
+
+pub struct LocalTlsIdentity {    pub cert_der: Vec<u8>,
     pub key_der: Vec<u8>,
     pub fingerprint_sha256: String,
 }
@@ -29,7 +43,10 @@ impl LocalTlsIdentity {
 
         let cert_der = certified.cert.der().to_vec();
         let key_der = certified.signing_key.serialized_der().to_vec();
+        Ok(Self::from_der(cert_der, key_der))
+    }
 
+    fn from_der(cert_der: Vec<u8>, key_der: Vec<u8>) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(&cert_der);
         let hash = hasher.finalize();
@@ -39,11 +56,45 @@ impl LocalTlsIdentity {
             .collect::<Vec<_>>()
             .join(":");
 
-        Ok(Self {
+        Self {
             cert_der,
             key_der,
             fingerprint_sha256: fingerprint,
+        }
+    }
+
+    /// This install's identity: made once, then kept. A fresh certificate on every launch
+    /// would break the pin a paired computer stored, so the pair could never reconnect.
+    pub fn load_or_generate() -> Result<Self, String> {
+        let path = crate::pairstore::identity_path();
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
+            let cert = parsed.as_ref().and_then(|v| v.get("cert")).and_then(|v| v.as_str()).and_then(hex_decode);
+            let key = parsed.as_ref().and_then(|v| v.get("key")).and_then(|v| v.as_str()).and_then(hex_decode);
+            if let (Some(cert_der), Some(key_der)) = (cert, key) {
+                return Ok(Self::from_der(cert_der, key_der));
+            }
+            log::warn!("[TLS] Ignoring unreadable identity at {}", path.display());
+        }
+        let id = Self::generate()?;
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let body = serde_json::json!({
+            "cert": hex_encode(&id.cert_der),
+            "key": hex_encode(&id.key_der),
         })
+        .to_string();
+        if let Err(e) = std::fs::write(&path, body) {
+            log::warn!("[TLS] Could not save identity to {}: {}", path.display(), e);
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+        Ok(id)
     }
 
     pub fn server_config(&self) -> Result<ServerConfig, String> {

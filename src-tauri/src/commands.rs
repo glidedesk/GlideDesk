@@ -61,6 +61,12 @@ pub fn set_kvm(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Re
         if let Some(hotkey_switch) = partial.get("hotkeySwitch").and_then(|v| v.as_bool()) {
             s.kvm.hotkey_switch = hotkey_switch;
         }
+        if let Some(ble) = partial.get("ble").and_then(|v| v.as_bool()) {
+            s.kvm.ble = ble;
+        }
+        if let Some(px) = partial.get("resistancePx").and_then(|v| v.as_u64()) {
+            s.kvm.resistance_px = px.min(u32::MAX as u64) as u32;
+        }
     }
     push_state(&app, &state);
     Ok(())
@@ -136,6 +142,12 @@ pub fn set_keys(partial: Value, state: State<'_, AppState>, app: AppHandle) -> R
         if let Some(edge) = partial.get("switchOnEdge").and_then(|v| v.as_bool()) {
             s.keys.switch_on_edge = edge;
         }
+        if let Some(swap) = partial.get("swapCtrlCmd").and_then(|v| v.as_bool()) {
+            s.keys.swap_ctrl_cmd = swap;
+        }
+        if let Some(keys) = partial.get("lockKeys").and_then(|v| v.as_str()) {
+            s.keys.lock_keys = keys.to_string();
+        }
     }
     push_state(&app, &state);
     Ok(())
@@ -176,21 +188,46 @@ pub fn set_clipboard(
     network: State<'_, NetworkManager>,
     app: AppHandle,
 ) -> Result<(), String> {
+    log::info!("[Clipboard] set: {:?}", partial);
+    // The master switch (and its legacy name "share"). A direction switch (`send`/`receive`)
+    // must never turn the whole tab off: `send` is only one of the two ways clipboard crosses.
     if let Some(enabled) = partial
         .get("enabled")
         .or_else(|| partial.get("share"))
-        .or_else(|| partial.get("send"))
         .or_else(|| partial.get("on"))
         .and_then(|v| v.as_bool())
     {
         let mut s = state.inner.write();
         s.clipboard.enabled = enabled;
         s.clipboard.share = enabled;
-        s.clipboard.send = enabled;
+    }
+    if let Some(send) = partial.get("send").and_then(|v| v.as_bool()) {
+        let mut s = state.inner.write();
+        s.clipboard.send = send;
     }
     if let Some(receive) = partial.get("receive").and_then(|v| v.as_bool()) {
         let mut s = state.inner.write();
         s.clipboard.receive = receive;
+    }
+    if let Some(mode) = partial.get("mode").and_then(|v| v.as_str()) {
+        let mut s = state.inner.write();
+        s.clipboard.mode = mode.to_string();
+    }
+    if let Some(b) = partial.get("skipConcealed").and_then(|v| v.as_bool()) {
+        let mut s = state.inner.write();
+        s.clipboard.skip_concealed = b;
+    }
+    if let Some(n) = partial.get("maxKB").and_then(|v| v.as_u64()) {
+        let mut s = state.inner.write();
+        s.clipboard.max_kb = n.min(u32::MAX as u64) as u32;
+    }
+    if let Some(n) = partial.get("historySize").and_then(|v| v.as_u64()) {
+        let mut s = state.inner.write();
+        s.clipboard.history_size = n.min(u32::MAX as u64) as u32;
+    }
+    if let Some(b) = partial.get("images").and_then(|v| v.as_bool()) {
+        let mut s = state.inner.write();
+        s.clipboard.images = b;
     }
     if let Some(text) = partial.get("text").and_then(|v| v.as_str()) {
         let mut cb = crate::kvm::NativeClipboard::new();
@@ -1058,24 +1095,47 @@ pub fn set_app(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Re
             if let Some(b) = audio.get("receive").and_then(|v| v.as_bool()) { s.audio.receive = b; }
             if let Some(b) = audio.get("share").and_then(|v| v.as_bool()) { s.audio.share = b; }
             if let Some(b) = audio.get("send").and_then(|v| v.as_bool()) { s.audio.send = b; }
+            if let Some(b) = audio.get("enabled").and_then(|v| v.as_bool()) { s.audio.enabled = b; }
+            if let Some(b) = audio.get("on").and_then(|v| v.as_bool()) { s.audio.enabled = b; }
+            if let Some(b) = audio.get("muteLocal").and_then(|v| v.as_bool()) { s.audio.mute_local = b; }
+            if let Some(v) = audio.get("volume").and_then(|v| v.as_f64()) { s.audio.volume = v.clamp(0.0, 1.0); }
+            if let Some(b) = audio.get("phoneMedia").and_then(|v| v.as_bool()) { s.audio.phone_media = b; }
+            if let Some(b) = audio.get("phoneBt").and_then(|v| v.as_bool()) { s.audio.phone_bt = b; }
         }
         if let Some(files) = partial.get("files") {
             if let Some(b) = files.get("receive").and_then(|v| v.as_bool()) { s.files.receive = b; }
             if let Some(b) = files.get("share").and_then(|v| v.as_bool()) { s.files.share = b; }
             if let Some(p) = files.get("path").and_then(|v| v.as_str()) { s.files.path = p.to_string(); }
+            if let Some(b) = files.get("mountMac").and_then(|v| v.as_bool()) { s.files.mount_mac = b; }
+            if let Some(b) = files.get("shareMac").and_then(|v| v.as_bool()) { s.files.share_mac = b; }
+            if let Some(b) = files.get("shareOn").and_then(|v| v.as_bool()) { s.files.share_on = b; }
+            if let Some(b) = files.get("acceptFromMac").and_then(|v| v.as_bool()) { s.files.accept_from_mac = b; }
+            if let Some(b) = files.get("dropToMac").and_then(|v| v.as_bool()) { s.files.drop_to_mac = b; }
+            if let Some(b) = files.get("shortcuts").and_then(|v| v.as_bool()) { s.files.shortcuts = b; }
+            if let Some(b) = files.get("edgeDrag").and_then(|v| v.as_bool()) { s.files.edge_drag = b; }
+            if let Some(k) = files.get("copyKeys").and_then(|v| v.as_str()) { s.files.copy_keys = k.to_string(); }
+            if let Some(k) = files.get("pasteKeys").and_then(|v| v.as_str()) { s.files.paste_keys = k.to_string(); }
         }
         if let Some(notifs) = partial.get("notifs") {
             if let Some(b) = notifs.get("enabled").and_then(|v| v.as_bool()) { s.notifs.enabled = b; }
             if let Some(b) = notifs.get("receive").and_then(|v| v.as_bool()) { s.notifs.receive = b; }
+            if let Some(b) = notifs.get("send").and_then(|v| v.as_bool()) { s.notifs.send = b; }
+            if let Some(b) = notifs.get("share").and_then(|v| v.as_bool()) { s.notifs.share = b; }
+            if let Some(b) = notifs.get("hideText").and_then(|v| v.as_bool()) { s.notifs.hide_text = b; }
         }
         if let Some(terminal) = partial.get("terminal") {
             if let Some(t) = terminal.get("theme").and_then(|v| v.as_str()) { s.terminal.theme = t.to_string(); }
+            if let Some(b) = terminal.get("allowMac").and_then(|v| v.as_bool()) { s.terminal.allow_mac = b; }
+            if let Some(b) = terminal.get("enabled").and_then(|v| v.as_bool()) { s.terminal.enabled = b; }
         }
         if let Some(mode) = partial.get("mode").and_then(|v| v.as_str()) {
             s.pc_screen.mode = mode.to_string();
         }
         if let Some(allow) = partial.get("allow").and_then(|v| v.as_bool()) {
             s.pc_apps.allow = allow;
+        }
+        if let Some(hud) = partial.get("hud").and_then(|v| v.as_bool()) {
+            s.app.hud = hud;
         }
         if let Some(on) = partial.get("on").and_then(|v| v.as_bool()) {
             s.audio.enabled = on;
@@ -1092,6 +1152,18 @@ pub fn set_monitor(partial: Value, state: State<'_, AppState>, app: AppHandle) -
         let mut s = state.inner.write();
         if let Some(mode) = partial.get("mode").and_then(|v| v.as_str()) {
             s.pc_screen.mode = mode.to_string();
+        }
+        if let Some(mute) = partial.get("mute").and_then(|v| v.as_bool()) {
+            s.monitor.mute = mute;
+        }
+        if let Some(volume) = partial.get("volume").and_then(|v| v.as_f64()) {
+            s.monitor.volume = volume.clamp(0.0, 1.0);
+        }
+        if let Some(framegen) = partial.get("framegen").and_then(|v| v.as_bool()) {
+            s.monitor.framegen = framegen;
+        }
+        if let Some(pacing) = partial.get("pacing").and_then(|v| v.as_str()) {
+            s.monitor.pacing = pacing.to_string();
         }
     }
     push_state(&app, &state);
@@ -1167,6 +1239,7 @@ pub fn forget(_id: String, state: State<'_, AppState>, app: AppHandle) -> Result
         let mut s = state.inner.write();
         s.paired = None;
     }
+    state.persist_pairs();
     push_state(&app, &state);
     Ok(())
 }
@@ -1880,10 +1953,29 @@ mod tests {
             if let Some(enabled) = clip_payload.get("enabled").and_then(|v| v.as_bool()) {
                 s.clipboard.enabled = enabled;
                 s.clipboard.share = enabled;
-                s.clipboard.send = enabled;
             }
             assert!(!s.clipboard.enabled);
             assert!(!s.clipboard.share);
+
+            // 3. A direction switch is not the master: turning "Copy on this PC,
+            //    paste on the other one" off must leave the tab on (regression: it
+            //    used to fall through the master chain and hide the whole tab).
+            s.clipboard.enabled = true;
+            s.clipboard.share = true;
+            let dir_payload = serde_json::json!({ "send": false });
+            if let Some(enabled) = dir_payload
+                .get("enabled")
+                .or_else(|| dir_payload.get("share"))
+                .or_else(|| dir_payload.get("on"))
+                .and_then(|v| v.as_bool())
+            {
+                s.clipboard.enabled = enabled;
+                s.clipboard.share = enabled;
+            }
+            if let Some(send) = dir_payload.get("send").and_then(|v| v.as_bool()) {
+                s.clipboard.send = send;
+            }
+            assert!(s.clipboard.enabled);
             assert!(!s.clipboard.send);
         }
     }

@@ -320,12 +320,25 @@ pub fn set_wake(
     log::info!("[WoL] Setting Wake-on-LAN: {} (iface={:?})", on, iface);
     let os = crate::network::current_os();
     let effective_iface = iface.or_else(|| detect_active_adapter(os));
+    let mut error = String::new();
     if let Ok((cmd, args)) = build_wake_config_command(os, on, effective_iface.as_deref()) {
-        let _ = std::process::Command::new(&cmd).args(&args).output();
+        match std::process::Command::new(&cmd).args(&args).output() {
+            Ok(out) if !out.status.success() => {
+                error = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            }
+            Err(e) => error = format!("Could not change the adapter setting: {}", e),
+            _ => {}
+        }
+    } else {
+        error = "No network adapter here can wake this computer".to_string();
     }
 
     {
         let mut s = state.inner.write();
+        s.wake.on = Some(on);
+        s.wake.checked = true;
+        s.wake.busy = false;
+        s.wake.error = error;
         s.wake.waking = if on {
             Some("active".to_string())
         } else {

@@ -82,6 +82,8 @@ pub struct KeysState {
     pub switch_on_edge: bool,
     #[serde(rename = "lockKeys")]
     pub lock_keys: String,
+    #[serde(rename = "swapCtrlCmd", default)]
+    pub swap_ctrl_cmd: bool,
 }
 
 impl Default for KeysState {
@@ -90,6 +92,7 @@ impl Default for KeysState {
             hotkey: "AltRight".to_string(),
             switch_on_edge: true,
             lock_keys: String::new(),
+            swap_ctrl_cmd: false,
         }
     }
 }
@@ -102,6 +105,8 @@ pub struct KvmRuntimeState {
     pub paused: bool,
     pub helper: String,
     pub message: String,
+    #[serde(rename = "lockError", default)]
+    pub lock_error: String,
 }
 
 impl Default for KvmRuntimeState {
@@ -113,6 +118,7 @@ impl Default for KvmRuntimeState {
             paused: false,
             helper: String::new(),
             message: String::new(),
+            lock_error: String::new(),
         }
     }
 }
@@ -137,6 +143,10 @@ pub struct KvmSettings {
     pub gestures: bool,
     #[serde(rename = "pcSide", default)]
     pub pc_side: Option<String>,
+    #[serde(default = "default_true")]
+    pub ble: bool,
+    #[serde(rename = "resistancePx", default)]
+    pub resistance_px: u32,
 }
 
 impl Default for KvmSettings {
@@ -154,6 +164,8 @@ impl Default for KvmSettings {
             lock_screen: true,
             gestures: true,
             pc_side: Some("left".to_string()),
+            ble: true,
+            resistance_px: 0,
         }
     }
 }
@@ -170,6 +182,25 @@ pub struct NetState {
     pub rtt: Option<u32>,
     #[serde(rename = "allowPlaintext", default)]
     pub allow_plaintext: bool,
+    /// "on" | "off" | "unsupported" | "" (not checked yet)
+    #[serde(default)]
+    pub radio: String,
+    #[serde(rename = "bleOff", default)]
+    pub ble_off: bool,
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub ssid: String,
+    #[serde(default)]
+    pub linked: bool,
+    #[serde(default)]
+    pub why: Vec<String>,
+    #[serde(rename = "hotspotSsid", default)]
+    pub hotspot_ssid: String,
+    #[serde(rename = "hotspotSaved", default)]
+    pub hotspot_saved: bool,
+    #[serde(default)]
+    pub location: bool,
 }
 
 impl Default for NetState {
@@ -185,6 +216,15 @@ impl Default for NetState {
             allow_plaintext: std::env::var("GLIDEDESK_ALLOW_PLAINTEXT")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            radio: String::new(),
+            ble_off: false,
+            error: String::new(),
+            ssid: String::new(),
+            linked: false,
+            why: Vec::new(),
+            hotspot_ssid: String::new(),
+            hotspot_saved: false,
+            location: false,
         }
     }
 }
@@ -218,6 +258,12 @@ pub struct StreamState {
     pub stream_input: bool,
     #[serde(default)]
     pub remote: Option<serde_json::Value>,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub stats: Option<serde_json::Value>,
 }
 
 impl Default for StreamState {
@@ -233,16 +279,79 @@ impl Default for StreamState {
             audio: false,
             stream_input: true,
             remote: None,
+            width: 0,
+            height: 0,
+            stats: None,
         }
+    }
+}
+
+/// The screen being watched here: sound, playback and frame generation settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorViewState {
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default = "default_volume")]
+    pub volume: f64,
+    #[serde(default = "default_true")]
+    pub framegen: bool,
+    #[serde(default = "default_pacing")]
+    pub pacing: String,
+}
+
+impl Default for MonitorViewState {
+    fn default() -> Self {
+        Self { mute: false, volume: 1.0, framegen: true, pacing: default_pacing() }
+    }
+}
+
+/// App-level UI settings kept in the state so switches survive a restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUiState {
+    #[serde(default = "default_true")]
+    pub hud: bool,
+}
+
+impl Default for AppUiState {
+    fn default() -> Self {
+        Self { hud: true }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClipboardItem {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
     pub text: String,
+    #[serde(rename = "at", default)]
     pub timestamp: u64,
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub image: Option<serde_json::Value>,
+    #[serde(default)]
+    pub app: String,
+    #[serde(rename = "appName", default)]
+    pub app_name: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: String,
+    #[serde(default)]
+    pub body: String,
 }
 
+fn default_clip_mode() -> String { "instant".to_string() }
+fn default_max_kb() -> u32 { 64 }
+fn default_history_size() -> u32 { 20 }
+fn default_volume() -> f64 { 1.0 }
+fn default_pacing() -> String { "fast".to_string() }
+
+/// Settings shared by the audio, clipboard and notification tabs. The three tabs
+/// each read their own subset; the extra fields are harmless to the others.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureToggleState {
     pub receive: bool,
@@ -255,6 +364,65 @@ pub struct FeatureToggleState {
     pub history: Vec<ClipboardItem>,
     #[serde(default)]
     pub muted: Vec<String>,
+
+    // Clipboard
+    #[serde(default = "default_clip_mode")]
+    pub mode: String,
+    #[serde(rename = "skipConcealed", default)]
+    pub skip_concealed: bool,
+    #[serde(rename = "maxKB", default = "default_max_kb")]
+    pub max_kb: u32,
+    #[serde(rename = "historySize", default = "default_history_size")]
+    pub history_size: u32,
+    #[serde(default = "default_true")]
+    pub images: bool,
+    #[serde(rename = "imageSupport", default = "default_true")]
+    pub image_support: bool,
+    #[serde(rename = "peerAccepts", default = "default_true")]
+    pub peer_accepts: bool,
+    #[serde(rename = "lastSkip", default)]
+    pub last_skip: String,
+
+    // Audio
+    #[serde(default = "default_volume")]
+    pub volume: f64,
+    #[serde(rename = "muteLocal", default)]
+    pub mute_local: bool,
+    #[serde(default)]
+    pub receiving: bool,
+    #[serde(default)]
+    pub sending: bool,
+    #[serde(rename = "macAccepts", default = "default_true")]
+    pub mac_accepts: bool,
+    #[serde(default)]
+    pub error: String,
+    /// The phone's media controls on the Phone page (General and Audio).
+    #[serde(rename = "phoneMedia", default = "default_true")]
+    pub phone_media: bool,
+    /// Play a paired phone's sound here over Bluetooth.
+    #[serde(rename = "phoneBt", default = "default_true")]
+    pub phone_bt: bool,
+
+    // Notifications
+    #[serde(rename = "hideText", default)]
+    pub hide_text: bool,
+    #[serde(default = "default_true")]
+    pub readable: bool,
+    #[serde(default)]
+    pub sent: u32,
+    #[serde(default)]
+    pub shown: u32,
+    #[serde(rename = "historyIcons", default)]
+    pub history_icons: HashMap<String, String>,
+    #[serde(default)]
+    pub apps: Vec<NotifApp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotifApp {
+    pub app: String,
+    #[serde(rename = "appName", default)]
+    pub app_name: String,
 }
 
 impl Default for FeatureToggleState {
@@ -266,6 +434,28 @@ impl Default for FeatureToggleState {
             send: true,
             history: Vec::new(),
             muted: Vec::new(),
+            mode: default_clip_mode(),
+            skip_concealed: false,
+            max_kb: default_max_kb(),
+            history_size: default_history_size(),
+            images: true,
+            image_support: true,
+            peer_accepts: true,
+            last_skip: String::new(),
+            volume: default_volume(),
+            mute_local: false,
+            receiving: false,
+            sending: false,
+            mac_accepts: true,
+            error: String::new(),
+            phone_media: true,
+            phone_bt: true,
+            hide_text: false,
+            readable: true,
+            sent: 0,
+            shown: 0,
+            history_icons: HashMap::new(),
+            apps: Vec::new(),
         }
     }
 }
@@ -282,6 +472,146 @@ pub struct FilesState {
     pub share: bool,
     #[serde(default)]
     pub path: String,
+    #[serde(rename = "shareOn", default)]
+    pub share_on: bool,
+    #[serde(default)]
+    pub shortcuts: bool,
+    #[serde(rename = "copyKeys", default)]
+    pub copy_keys: String,
+    #[serde(rename = "pasteKeys", default)]
+    pub paste_keys: String,
+    #[serde(rename = "edgeDrag", default)]
+    pub edge_drag: bool,
+    #[serde(rename = "macDrags", default = "default_true")]
+    pub mac_drags: bool,
+    #[serde(rename = "acceptFromMac", default = "default_true")]
+    pub accept_from_mac: bool,
+    #[serde(rename = "dropToMac", default = "default_true")]
+    pub drop_to_mac: bool,
+    #[serde(default)]
+    pub received: String,
+    #[serde(rename = "receivedFolder", default)]
+    pub received_folder: String,
+    #[serde(default)]
+    pub smb: SmbState,
+    #[serde(default)]
+    pub batch: Option<FilesBatch>,
+    #[serde(default)]
+    pub clip: FilesClip,
+    #[serde(default)]
+    pub current: Option<FilesCurrent>,
+    #[serde(default)]
+    pub queued: u32,
+    #[serde(default)]
+    pub last: Option<FilesEvent>,
+    #[serde(default)]
+    pub incoming: FilesIncoming,
+    #[serde(default)]
+    pub drag: FilesDrag,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SmbState {
+    #[serde(default)]
+    pub drive: String,
+    #[serde(default)]
+    pub wifi: bool,
+    #[serde(rename = "mountMessage", default)]
+    pub mount_message: String,
+    #[serde(default)]
+    pub busy: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub folder: String,
+    #[serde(default)]
+    pub peer: Option<SmbPeer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SmbPeer {
+    #[serde(default)]
+    pub mounted: bool,
+    #[serde(default)]
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilesBatch {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub files: u32,
+    #[serde(default)]
+    pub index: u32,
+    #[serde(default)]
+    pub sent: u64,
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilesClip {
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub pasting: bool,
+    #[serde(default)]
+    pub incoming: Option<FilesClipIncoming>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilesClipIncoming {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub items: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilesCurrent {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub index: u32,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub sent: u64,
+    #[serde(default)]
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilesEvent {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilesIncoming {
+    #[serde(default)]
+    pub receiving: u32,
+    #[serde(default)]
+    pub last: Option<FilesEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilesDrag {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub last: Option<FilesEvent>,
 }
 
 impl Default for FilesState {
@@ -292,6 +622,24 @@ impl Default for FilesState {
             receive: true,
             share: true,
             path: String::new(),
+            share_on: false,
+            shortcuts: false,
+            copy_keys: String::new(),
+            paste_keys: String::new(),
+            edge_drag: false,
+            mac_drags: true,
+            accept_from_mac: true,
+            drop_to_mac: true,
+            received: "Downloads".to_string(),
+            received_folder: String::new(),
+            smb: SmbState::default(),
+            batch: None,
+            clip: FilesClip::default(),
+            current: None,
+            queued: 0,
+            last: None,
+            incoming: FilesIncoming::default(),
+            drag: FilesDrag::default(),
         }
     }
 }
@@ -426,12 +774,22 @@ pub struct PhoneState {
     pub settings: PhoneSettingsData,
     pub apps: Vec<PhoneAppItem>,
     pub windows: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub assets: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeState {
     pub peers: HashMap<String, serde_json::Value>,
     pub waking: Option<String>,
+    #[serde(default)]
+    pub on: Option<bool>,
+    #[serde(default = "default_true")]
+    pub checked: bool,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default)]
+    pub error: String,
 }
 
 impl Default for WakeState {
@@ -439,6 +797,10 @@ impl Default for WakeState {
         Self {
             peers: HashMap::new(),
             waking: None,
+            on: Some(false),
+            checked: true,
+            busy: false,
+            error: String::new(),
         }
     }
 }
@@ -450,11 +812,49 @@ pub struct TerminalState {
     pub enabled: bool,
     #[serde(default)]
     pub theme: String,
+    /// "off" | "no_mac" | "waiting" | "ready" | "unavailable" | "error"
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub server: TerminalServerState,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TerminalServerState {
+    #[serde(default)]
+    pub busy: bool,
+    /// "running" | "stopped" | "missing" | "unknown"
+    #[serde(default)]
+    pub service: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub info: TerminalServerInfo,
+    #[serde(rename = "macAsked", default)]
+    pub mac_asked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TerminalServerInfo {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Default for TerminalState {
     fn default() -> Self {
-        Self { allow_mac: true, enabled: true, theme: String::new() }
+        Self {
+            allow_mac: true,
+            enabled: true,
+            theme: String::new(),
+            status: "unavailable".to_string(),
+            server: TerminalServerState::default(),
+            user: String::new(),
+            message: String::new(),
+        }
     }
 }
 
@@ -463,12 +863,36 @@ pub struct AppsState {
     pub open: u32,
     #[serde(default)]
     pub pinned: Vec<String>,
+    #[serde(default)]
+    pub list: Vec<AppEntry>,
+    #[serde(default)]
+    pub loading: bool,
+    #[serde(default)]
+    pub message: String,
+    #[serde(rename = "peerPc", default)]
+    pub peer_pc: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VddInfo {
     #[serde(default)]
     pub installed: bool,
+    #[serde(default = "default_true")]
+    pub checked: bool,
+    #[serde(default)]
+    pub busy: String,
+    #[serde(default)]
+    pub message: String,
 }
 
 impl Default for VddInfo {
@@ -480,6 +904,9 @@ impl Default for VddInfo {
             installed: std::path::Path::new("C:\\Windows\\System32\\drivers\\IddCx.sys").exists(),
             #[cfg(target_os = "linux")]
             installed: std::path::Path::new("/dev/video0").exists(),
+            checked: true,
+            busy: String::new(),
+            message: String::new(),
         }
     }
 }
@@ -586,11 +1013,19 @@ impl Default for PcScreenState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PcAppsState {
     pub allow: bool,
+    #[serde(rename = "macAccepts", default = "default_true")]
+    pub mac_accepts: bool,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub open: u32,
+    #[serde(default)]
+    pub streaming: u32,
 }
 
 impl Default for PcAppsState {
     fn default() -> Self {
-        Self { allow: true }
+        Self { allow: true, mac_accepts: true, message: String::new(), open: 0, streaming: 0 }
     }
 }
 
@@ -616,6 +1051,8 @@ pub struct MountState {
     pub message: String,
     #[serde(default)]
     pub drive: String,
+    #[serde(default)]
+    pub via: String,
 }
 
 impl Default for MountState {
@@ -626,6 +1063,7 @@ impl Default for MountState {
             busy: String::new(),
             message: String::new(),
             drive: String::new(),
+            via: String::new(),
         }
     }
 }
@@ -634,11 +1072,15 @@ impl Default for MountState {
 pub struct FirewallState {
     pub ok: bool,
     pub checking: bool,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub error: String,
 }
 
 impl Default for FirewallState {
     fn default() -> Self {
-        Self { ok: true, checking: false }
+        Self { ok: true, checking: false, message: String::new(), error: String::new() }
     }
 }
 
@@ -801,6 +1243,12 @@ pub struct LinkState {
     pub mac_name: Option<String>,
     #[serde(rename = "peerName", default)]
     pub peer_name: Option<String>,
+    /// Who is holding the session when this computer can't have it, e.g. "In use on the other computer".
+    #[serde(default)]
+    pub busy: String,
+    /// The user pressed Disconnect: don't redial by ourselves until they connect again.
+    #[serde(rename = "manualOff", default)]
+    pub manual_off: bool,
 }
 
 impl Default for LinkState {
@@ -811,6 +1259,8 @@ impl Default for LinkState {
             message: None,
             mac_name: None,
             peer_name: None,
+            busy: String::new(),
+            manual_off: false,
         }
     }
 }
@@ -840,6 +1290,133 @@ pub struct CameraState {
     pub virtual_cam: bool,
     pub rotate: u32,
     pub target: String,
+    /// "Let the other computer see this camera" (settings.camera.share).
+    #[serde(default)]
+    pub share: bool,
+    #[serde(rename = "shareError", default)]
+    pub share_error: String,
+    /// The cameras this computer has, for the picker.
+    #[serde(default)]
+    pub devices: Vec<CameraDeviceInfo>,
+    #[serde(default)]
+    pub device: String,
+    /// "off" | "asking" | "live" | "refused" | "failed" | "ended"
+    #[serde(rename = "viewStatus", default)]
+    pub view_status: String,
+    #[serde(rename = "viewError", default)]
+    pub view_error: String,
+    #[serde(rename = "viewShown", default)]
+    pub view_shown: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CameraDeviceInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// The virtual camera other apps can pick ("GlideDesk camera").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcamState {
+    #[serde(default = "default_vcam_name")]
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub checked: bool,
+    #[serde(default = "default_true")]
+    pub supported: bool,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub busy: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default)]
+    pub live: bool,
+    #[serde(default)]
+    pub on: bool,
+    #[serde(default)]
+    pub removable: bool,
+    #[serde(default)]
+    pub targets: Vec<VcamTargetInfo>,
+    #[serde(default = "default_vcam_target")]
+    pub target: String,
+    #[serde(default)]
+    pub rotate: u32,
+    #[serde(default)]
+    pub picture: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcamTargetInfo {
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+fn default_vcam_name() -> String { "GlideDesk camera".to_string() }
+fn default_vcam_target() -> String { "glidedesk".to_string() }
+
+impl Default for VcamState {
+    fn default() -> Self {
+        Self {
+            name: default_vcam_name(),
+            checked: true,
+            supported: true,
+            installed: false,
+            busy: String::new(),
+            message: String::new(),
+            ready: false,
+            live: false,
+            on: false,
+            removable: true,
+            targets: Vec::new(),
+            target: default_vcam_target(),
+            rotate: 0,
+            picture: false,
+        }
+    }
+}
+
+/// A phone used as this computer's remote (the Remote tab). Only while a phone is connected.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RemoteState {
+    #[serde(default = "default_true")]
+    pub allow: bool,
+    #[serde(default)]
+    pub using: bool,
+    #[serde(default)]
+    pub opened: bool,
+    #[serde(default)]
+    pub why: String,
+    #[serde(default)]
+    pub pad: RemotePadState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemotePadState {
+    #[serde(default)]
+    pub on: bool,
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub busy: String,
+    #[serde(default)]
+    pub live: bool,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+impl Default for RemotePadState {
+    fn default() -> Self {
+        Self { on: false, supported: false, busy: String::new(), live: false, name: String::new(), message: String::new() }
+    }
 }
 
 impl Default for CameraState {
@@ -854,6 +1431,13 @@ impl Default for CameraState {
             virtual_cam: false,
             rotate: 0,
             target: "obs".to_string(),
+            share: false,
+            share_error: String::new(),
+            devices: Vec::new(),
+            device: String::new(),
+            view_status: "off".to_string(),
+            view_error: String::new(),
+            view_shown: false,
         }
     }
 }
@@ -1070,6 +1654,12 @@ pub struct FullState {
     pub kvm: KvmSettings,
     pub net: NetState,
     pub stream: StreamState,
+    #[serde(default)]
+    pub monitor: MonitorViewState,
+    #[serde(rename = "macInput", default = "default_true")]
+    pub mac_input: bool,
+    #[serde(default)]
+    pub app: AppUiState,
     pub audio: FeatureToggleState,
     pub clipboard: FeatureToggleState,
     pub notifs: FeatureToggleState,
@@ -1093,6 +1683,10 @@ pub struct FullState {
     pub multi: MultiState,
     #[serde(default)]
     pub camera: CameraState,
+    #[serde(default)]
+    pub vcam: VcamState,
+    #[serde(default)]
+    pub remote: RemoteState,
     #[serde(rename = "adbQr", default)]
     pub adb_qr: Option<AdbQrState>,
     #[serde(default)]
@@ -1171,6 +1765,9 @@ impl AppState {
             kvm: KvmSettings::default(),
             net: NetState::default(),
             stream: StreamState::default(),
+            monitor: MonitorViewState::default(),
+            mac_input: true,
+            app: AppUiState::default(),
             audio: FeatureToggleState::default(),
             clipboard: FeatureToggleState::default(),
             notifs: FeatureToggleState::default(),
@@ -1187,6 +1784,8 @@ impl AppState {
             setup: SetupState::default(),
             multi: MultiState::default(),
             camera: CameraState::default(),
+            vcam: VcamState::default(),
+            remote: RemoteState::default(),
             adb_qr: None,
             overview: OverviewSettings::default(),
             ui: UiSettings::default(),
@@ -1197,6 +1796,17 @@ impl AppState {
             peer_fingerprints: std::collections::HashMap::new(),
             startup: crate::parity::is_startup_enabled(),
         };
+
+        // A paired computer stays paired: the token and fingerprints come back from
+        // the last run instead of asking for a new code on every launch. Tests stay
+        // hermetic: they never read (or write) the developer's real pairing file.
+        #[cfg(not(test))]
+        let (paired, fingerprints) = crate::pairstore::load();
+        #[cfg(test)]
+        let (paired, fingerprints) = (None, std::collections::HashMap::new());
+        let mut initial_state = initial_state;
+        initial_state.paired = paired;
+        initial_state.peer_fingerprints = fingerprints;
 
         Self {
             inner: Arc::new(RwLock::new(initial_state)),
@@ -1282,14 +1892,18 @@ impl AppState {
         if let Some(c) = client {
             s.peer = Some(c.clone());
             let fp = s.peer_fingerprints.get(&c.id).cloned();
-            s.paired = Some(PairedPeer {
-                mac_id: c.id.clone(),
-                mac_name: c.name.clone(),
-                os: c.os.clone(),
-                address: c.address.clone(),
-                token: None,
-                tls_fingerprint: fp,
-            });
+            // A live client only fills in who is here; it must never overwrite a pairing
+            // (that would throw away its token and leave the pair unable to reconnect).
+            if s.paired.is_none() {
+                s.paired = Some(PairedPeer {
+                    mac_id: c.id.clone(),
+                    mac_name: c.name.clone(),
+                    os: c.os.clone(),
+                    address: c.address.clone(),
+                    token: None,
+                    tls_fingerprint: fp,
+                });
+            }
             s.link.state = "connected".to_string();
             s.link.mac_name = Some(c.name.clone());
             s.link.peer_name = Some(c.name.clone());
@@ -1298,7 +1912,7 @@ impl AppState {
             }
         } else {
             s.peer = None;
-            s.paired = None;
+            // The pairing stays: a disconnect is not a "forget".
             s.link = LinkState::default();
             s.clients.clear();
         }
@@ -1346,8 +1960,8 @@ impl AppState {
                     s.link.mac_name = Some(name.clone());
                     s.link.peer_name = Some(name);
                 } else {
+                    // The other computer went away; the pairing itself stays.
                     s.link = LinkState::default();
-                    s.paired = None;
                 }
             }
         }
@@ -1366,25 +1980,43 @@ impl AppState {
     }
 
     pub fn record_peer_fingerprint(&self, peer_id: &str, fingerprint: &str) -> Result<(), String> {
-        let mut s = self.inner.write();
-        let clean_new = fingerprint.replace(':', "").to_uppercase();
-        if let Some(existing) = s.peer_fingerprints.get(peer_id) {
-            let clean_existing = existing.replace(':', "").to_uppercase();
-            if clean_existing != clean_new {
-                return Err(format!(
-                    "certificate fingerprint changed for peer {}; possible MITM — re-pair to trust",
-                    peer_id
-                ));
+        {
+            let mut s = self.inner.write();
+            let clean_new = fingerprint.replace(':', "").to_uppercase();
+            if let Some(existing) = s.peer_fingerprints.get(peer_id) {
+                let clean_existing = existing.replace(':', "").to_uppercase();
+                if clean_existing != clean_new {
+                    return Err(format!(
+                        "certificate fingerprint changed for peer {}; possible MITM — re-pair to trust",
+                        peer_id
+                    ));
+                }
+            } else {
+                s.peer_fingerprints.insert(peer_id.to_string(), fingerprint.to_string());
             }
-        } else {
-            s.peer_fingerprints.insert(peer_id.to_string(), fingerprint.to_string());
-        }
-        if let Some(ref mut p) = s.paired {
-            if p.mac_id.eq_ignore_ascii_case(peer_id) {
-                p.tls_fingerprint = Some(fingerprint.to_string());
+            if let Some(ref mut p) = s.paired {
+                if p.mac_id.eq_ignore_ascii_case(peer_id) {
+                    p.tls_fingerprint = Some(fingerprint.to_string());
+                }
             }
         }
+        let (paired, fps) = {
+            let s = self.inner.read();
+            (s.paired.clone(), s.peer_fingerprints.clone())
+        };
+        #[cfg(not(test))]
+        crate::pairstore::save(&paired, &fps);
         Ok(())
+    }
+
+    /// Write the paired computer (and the fingerprints) to disk, so it survives a restart.
+    pub fn persist_pairs(&self) {
+        let (paired, fps) = {
+            let s = self.inner.read();
+            (s.paired.clone(), s.peer_fingerprints.clone())
+        };
+        #[cfg(not(test))]
+        crate::pairstore::save(&paired, &fps);
     }
 }
 
@@ -1547,6 +2179,54 @@ mod tests {
     }
 
     #[test]
+    fn pairing_survives_disconnect_and_client_updates() {
+        let app_state = AppState::new();
+        {
+            let mut s = app_state.inner.write();
+            s.paired = Some(PairedPeer {
+                mac_id: "vasanth".to_string(),
+                mac_name: "VASANTH".to_string(),
+                os: "win".to_string(),
+                address: Some("192.168.4.9".to_string()),
+                token: Some("BEAM_AUTH_V1:aa:bb".to_string()),
+                tls_fingerprint: Some("AA:BB".to_string()),
+            });
+        }
+        let peer = PeerInfo {
+            id: "vasanth".to_string(),
+            name: "VASANTH".to_string(),
+            os: "win".to_string(),
+            address: Some("192.168.4.9".to_string()),
+            port: Some(47800),
+            last_seen: None,
+            invited: None,
+        };
+
+        // A live client must not overwrite the pairing (or its token).
+        app_state.set_client(Some(peer));
+        let snap = app_state.snapshot();
+        assert_eq!(snap.link.state, "connected");
+        assert_eq!(
+            snap.paired.as_ref().and_then(|p| p.token.clone()).as_deref(),
+            Some("BEAM_AUTH_V1:aa:bb")
+        );
+
+        // Nor does the other computer going away undo the pairing.
+        app_state.remove_client("192.168.4.9");
+        assert_eq!(app_state.snapshot().link.state, "disconnected");
+        let after = app_state.snapshot();
+        assert_eq!(after.paired.as_ref().map(|p| p.mac_id.as_str()), Some("vasanth"));
+        assert_eq!(
+            after.paired.as_ref().and_then(|p| p.token.clone()).as_deref(),
+            Some("BEAM_AUTH_V1:aa:bb")
+        );
+
+        // An explicit disconnect keeps it too; only "forget" clears it.
+        app_state.set_client(None);
+        assert!(app_state.snapshot().paired.is_some());
+    }
+
+    #[test]
     fn test_layout_and_kvm_defaults_and_sync() {
         let app_state = AppState::new();
         let snap = app_state.snapshot();
@@ -1679,5 +2359,68 @@ mod tests {
         // hard-coded literal (regression: this was pinned to "1.1.7", so every
         // install reported a permanent phantom update).
         assert_eq!(UpdatesView::default().current, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn test_state_carries_every_field_the_ui_reads() {
+        // Every tab's update() reads these paths directly. A missing one used to
+        // render "undefined"/"NaN" or throw and freeze the rest of the tab.
+        let json = serde_json::to_value(AppState::new().snapshot()).expect("snapshot");
+
+        fn has(root: &serde_json::Value, path: &str) -> bool {
+            let mut cur = root;
+            for part in path.split('.') {
+                match cur.get(part) {
+                    Some(v) => cur = v,
+                    None => return false,
+                }
+            }
+            true
+        }
+
+        let paths = [
+            "clipboard.mode", "clipboard.skipConcealed", "clipboard.maxKB", "clipboard.historySize",
+            "clipboard.images", "clipboard.imageSupport", "clipboard.peerAccepts", "clipboard.lastSkip",
+            "audio.volume", "audio.muteLocal", "audio.receiving", "audio.sending",
+            "audio.macAccepts", "audio.error",
+            "audio.phoneMedia", "audio.phoneBt",
+            "vcam.name", "vcam.checked", "vcam.supported", "vcam.installed", "vcam.busy",
+            "vcam.message", "vcam.ready", "vcam.live", "vcam.on", "vcam.targets", "vcam.target",
+            "vcam.picture",
+            "camera.share", "camera.shareError", "camera.devices", "camera.device",
+            "camera.viewStatus", "camera.viewError", "camera.viewShown",
+            "remote.allow", "remote.using", "remote.opened", "remote.why",
+            "remote.pad.on", "remote.pad.supported", "remote.pad.busy", "remote.pad.live",
+            "notifs.apps", "notifs.hideText", "notifs.historyIcons", "notifs.readable",
+            "notifs.sent", "notifs.shown",
+            "keys.swapCtrlCmd",
+            "kvm.ble", "kvm.resistancePx",
+            "kvmState.lockError",
+            "wake.on", "wake.checked", "wake.busy", "wake.error",
+            "firewall.message", "firewall.error",
+            "pcScreen.vdd.checked", "pcScreen.vdd.busy", "pcScreen.vdd.message",
+            "terminal.status", "terminal.server", "terminal.user", "terminal.message",
+            "terminal.server.busy", "terminal.server.service", "terminal.server.message",
+            "terminal.server.info.enabled", "terminal.server.macAsked",
+            "apps.list", "apps.loading", "apps.message", "apps.peerPc",
+            "pcApps.macAccepts", "pcApps.message", "pcApps.open", "pcApps.streaming",
+            "files.smb.drive", "files.smb.wifi", "files.smb.mountMessage", "files.smb.busy",
+            "files.smb.message", "files.smb.folder",
+            "files.clip.error", "files.clip.pasting", "files.incoming.receiving",
+            "files.drag.state", "files.drag.name", "files.queued",
+            "files.shareOn", "files.shortcuts", "files.copyKeys", "files.pasteKeys",
+            "files.edgeDrag", "files.macDrags", "files.acceptFromMac", "files.dropToMac",
+            "files.received", "files.receivedFolder",
+            "net.radio", "net.bleOff", "net.error", "net.ssid", "net.linked", "net.why",
+            "net.hotspotSsid", "net.hotspotSaved", "net.location",
+            "mount.via",
+            "phone.assets",
+            "stream.width", "stream.height", "stream.stats",
+            "link.busy",
+            "app.hud", "monitor.mute", "monitor.volume", "monitor.framegen", "monitor.pacing",
+            "macInput",
+        ];
+        let missing: Vec<&str> = paths.into_iter().filter(|p| !has(&json, p)).collect();
+        assert!(missing.is_empty(), "state is missing UI fields: {:?}", missing);
     }
 }
