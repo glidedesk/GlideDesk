@@ -173,9 +173,6 @@ UI.tab({
     const keysRow = UI.row('Copy and paste files', '', [keysSw]);
     const copyRow = UI.row('Copy', 'Select files in File Explorer first', [copyRec]);
     const pasteRow = UI.row('Paste', '', [pasteRec]);
-
-    const edgeDrag = sw('Drag files across the screen edge', (v) => api.setFiles({ edgeDrag: v }));
-    const edgeRow = UI.row('Drag files between computers', '', [edgeDrag]);
     const cancelBtn = UI.button('Cancel', () => api.cancelDrop(), 'small');
     const outRow = UI.row('', '', [cancelBtn]);
     const inRow = UI.row('', '');
@@ -185,7 +182,6 @@ UI.tab({
       pair.el,
       foldersCard,
       folderCard,
-      UI.card('', [edgeRow]),
       UI.card('Recent', [outRow, inRow]),
     );
     const mb = (n) => (n / 1048576).toFixed(1) + ' MB';
@@ -217,8 +213,6 @@ UI.tab({
       pasteRow.setHint(ck.pasting ? 'Pasting…'
         : ck.incoming ? p.them + ' copied ' + (ck.incoming.name || ck.incoming.items + ' items') + ' · press ' + UI.keysLabel(f.pasteKeys)
           : 'Into the app in front (a chat, a mail…), or the File Explorer folder in front, else the Desktop');
-      edgeDrag.set(f.edgeDrag);
-      edgeRow.setHint(f.edgeDrag && f.macDrags === false ? 'Turned off on {name}' : f.edgeDrag ? 'Drag through the screen edge and drop anywhere' : '');
       // ---- the other computer's folder ----
       mount.set(f.mountMac);
       const other = m.peer || {};

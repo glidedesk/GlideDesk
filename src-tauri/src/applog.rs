@@ -206,7 +206,15 @@ pub fn init() {
 fn install_panic_hook(sink: Arc<Mutex<LogSink>>) {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let line = format!("{} PANIC {}\n", chrono::Local::now().to_rfc3339(), info);
+        // The message alone says a thread died but not where; the backtrace is
+        // what makes a crash report actionable, so it goes to crash.log too.
+        let trace = std::backtrace::Backtrace::force_capture();
+        let line = format!(
+            "{} PANIC {}\n{}\n",
+            chrono::Local::now().to_rfc3339(),
+            info,
+            trace
+        );
         let _ = io::stderr().write_all(line.as_bytes());
         if let Ok(mut s) = sink.lock() {
             s.write_crash(line.as_bytes());

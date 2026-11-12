@@ -274,6 +274,21 @@ fn run_player(state: Arc<PlayerState>) -> Result<(), String> {
     Ok(())
 }
 
+/// How many source frames one output callback may take, and where the
+/// resampler's position lands afterwards.
+///
+/// The device asks for `frames`; at a device rate below 48 kHz that is more
+/// source frames than the buffer may hold (the first callback can run while
+/// only one packet has arrived), so the position can end up past the data.
+/// Consuming what is there instead of the whole position is what keeps the
+/// drain below inside the slice; a starved callback starts over at the
+/// beginning of what is left rather than skipping sound that never arrived.
+fn consumption(pos: f64, available_frames: usize, starved: bool) -> (usize, f64) {
+    let consumed = (pos.floor().max(0.0) as usize).min(available_frames);
+    let rest = pos - consumed as f64;
+    (consumed, if starved { 0.0 } else { rest.max(0.0) })
+}
+
 fn build_output<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -299,12 +314,16 @@ where
                 };
                 let need = ((frames as f64) * step).ceil() as usize + 2;
                 let mut src: Vec<f32> = Vec::with_capacity(need * 2);
+                let mut starved = false;
                 {
                     let mut buffer = state.buffer.lock();
                     for _ in 0..need * 2 {
                         match buffer.pop_front() {
                             Some(s) => src.push(s),
-                            None => break,
+                            None => {
+                                starved = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -338,7 +357,7 @@ where
                     }
                     pos += step;
                 }
-                let consumed = pos.floor() as usize;
+                let (consumed, next_pos) = consumption(pos, src.len() / 2, starved);
                 if consumed > 0 {
                     // Put back what the next callback still needs.
                     let mut buffer = state.buffer.lock();
@@ -347,8 +366,8 @@ where
                     for s in rest {
                         buffer.push_front(s);
                     }
-                    pos -= consumed as f64;
                 }
+                pos = next_pos;
             },
             move |e| {
                 *err_state.error.lock() = format!("Playback error: {}", e);
@@ -694,9 +713,11 @@ fn run_capture(
             }
             let format = *format_ptr;
             let mut is_float = format.wFormatTag == IEEE_FLOAT;
-            if format.wFormatTag == EXTENSIBLE {
+            if format.wFormatTag == EXTENSIBLE && format.cbSize as usize >= 22 {
                 // WAVEFORMATEXTENSIBLE: the first 18 bytes are the same, then the
-                // channel mask and the sub-format GUID.
+                // channel mask and the sub-format GUID. cbSize counts those 22
+                // bytes; reading them without checking it would read past the
+                // device's format block.
                 let ext = format_ptr as *const u8;
                 let sub = std::slice::from_raw_parts(ext.add(24), 16);
                 let tail = &sub[4..16];
@@ -895,6 +916,20 @@ use cpal::traits::StreamTrait as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_callback_never_consumes_more_than_the_buffer_holds() {
+        // The device asked for 512 frames but only 240 arrived: the callback
+        // must consume what it has and start over, not index past the slice
+        // (this panicked inside the CoreAudio callback and aborted the app).
+        assert_eq!(consumption(512.0, 240, true), (240, 0.0));
+        // A normal callback keeps the fractional position for the next one.
+        assert_eq!(consumption(100.5, 300, false), (100, 0.5));
+        // Nothing available: no drain, no position drift.
+        assert_eq!(consumption(3.0, 0, true), (0, 0.0));
+        // 44.1 kHz devices ask for slightly more source frames than output ones.
+        assert_eq!(consumption(557.25, 560, false), (557, 0.25));
+    }
 
     #[test]
     fn upmix_passes_48k_stereo_through() {
