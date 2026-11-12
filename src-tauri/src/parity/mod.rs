@@ -174,6 +174,12 @@ pub fn set_pc_apps(partial: serde_json::Value, state: State<'_, AppState>, app: 
 #[tauri::command]
 pub fn open_mac_drive() -> Result<(), String> {
     log::info!("[Drive] Opening shared drive in system file explorer");
+    // When the other computer is sharing a folder, that is what "Open" means:
+    // its page opens in the browser, with every file a link. There is no drive to
+    // mount and nothing to install. Otherwise fall back to this computer's drives.
+    if crate::sharefolder::open_peer_folder().is_ok() {
+        return Ok(());
+    }
     #[cfg(target_os = "macos")]
     {
         Command::new("open")

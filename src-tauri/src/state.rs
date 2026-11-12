@@ -538,6 +538,14 @@ pub struct SmbState {
     pub folder: String,
     #[serde(default)]
     pub peer: Option<SmbPeer>,
+    /// Whether this computer is really serving a folder right now, how many items
+    /// are at its top, and why not when it is not.
+    #[serde(default)]
+    pub sharing: bool,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(rename = "shareMessage", default)]
+    pub share_message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -546,6 +554,13 @@ pub struct SmbPeer {
     pub mounted: bool,
     #[serde(default)]
     pub error: String,
+    /// Whether the other computer is sharing a folder this one can open.
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2520,7 +2535,8 @@ mod tests {
             "apps.list", "apps.loading", "apps.message", "apps.peerPc",
             "pcApps.macAccepts", "pcApps.message", "pcApps.open", "pcApps.streaming",
             "files.smb.drive", "files.smb.wifi", "files.smb.mountMessage", "files.smb.busy",
-            "files.smb.message", "files.smb.folder",
+            "files.smb.message", "files.smb.folder", "files.smb.sharing",
+            "files.smb.count", "files.smb.shareMessage", "files.smb.peer",
             "files.clip.error", "files.clip.pasting", "files.incoming.receiving",
             "files.drag.state", "files.drag.name", "files.queued",
             "files.shareOn", "files.shortcuts", "files.copyKeys", "files.pasteKeys",

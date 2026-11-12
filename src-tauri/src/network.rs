@@ -450,6 +450,10 @@ pub struct WireMessage {
     pub file_id: Option<String>,
     #[serde(rename = "batchFiles", default)]
     pub batch_files: Option<Vec<WireFileItem>>,
+
+    // Shared folder announcement: which folder, on which port, behind which token.
+    #[serde(rename = "sharedFolder", default)]
+    pub shared_folder: Option<WireShareFolder>,
     #[serde(rename = "totalBytes", default)]
     pub total_bytes: Option<u64>,
     #[serde(default)]
@@ -501,6 +505,20 @@ pub struct WireMessage {
     pub side: Option<String>,
     #[serde(rename = "pcSide", default)]
     pub pc_side: Option<String>,
+}
+
+/// What the other computer says about the folder it is sharing. Optional: older
+/// peers never send it, and this one then simply says nothing is shared.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WireShareFolder {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub files: u32,
 }
 
 impl Default for WireMessage {
@@ -559,6 +577,7 @@ impl Default for WireMessage {
             batch_id: None,
             file_id: None,
             batch_files: None,
+            shared_folder: None,
             total_bytes: None,
             offset: None,
             len: None,
@@ -1738,6 +1757,58 @@ impl MeshServer {
                             "h": pkt.height,
                         }),
                     );
+                }
+            }
+            "files.folder" => {
+                // What the other computer is offering to let this one read: a folder
+                // name, a port and a one-time token. Turning it off withdraws the
+                // address here as well.
+                if !*authenticated.read() {
+                    log::warn!(
+                        "[Auth] Dropping unauthenticated files.folder packet from {}",
+                        peer_addr
+                    );
+                } else {
+                    let ip = peer_addr.ip().to_string();
+                    let on = pkt.on.unwrap_or(false);
+                    let (available, name, count) = match (on, pkt.shared_folder.clone()) {
+                        (true, Some(info)) if info.port != 0 && !info.token.trim().is_empty() => {
+                            crate::sharefolder::peer_shared(
+                                &ip,
+                                &info.name,
+                                info.port,
+                                &info.token,
+                                info.files,
+                            );
+                            (true, info.name.clone(), info.files)
+                        }
+                        _ => {
+                            crate::sharefolder::peer_cleared();
+                            (false, String::new(), 0)
+                        }
+                    };
+                    {
+                        let mut s = state.inner.write();
+                        s.files.smb.peer = Some(crate::state::SmbPeer {
+                            mounted: available,
+                            error: String::new(),
+                            available,
+                            name: name.clone(),
+                            count,
+                        });
+                        s.files.smb.mount_message = if available {
+                            format!(
+                                "{} is sharing {} item{}",
+                                if name.is_empty() { "The other computer" } else { &name },
+                                count,
+                                if count == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            String::new()
+                        };
+                    }
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
                 }
             }
             "terminal.key" => {

@@ -26,6 +26,7 @@ mod phone;
 mod camera;
 mod parity;
 mod streaming;
+mod sharefolder;
 mod terminal;
 mod device_control;
 pub mod transport;
@@ -110,6 +111,10 @@ fn main() {
             // 4a. Keep the Terminal tab honest: offer this computer's key and learn
             // whether the other side will let a shell in.
             terminal::start(handle.clone(), network.clone());
+
+            // 4b. Serve the folder the Files page offers, and follow the other
+            // computer's shared folder.
+            sharefolder::start(handle.clone(), network.clone());
 
             // 4b. Drain the audio and screen channels from the start, so turning on
             // sharing later cannot find them already full.
@@ -250,6 +255,8 @@ fn main() {
             parity::open_monitor,
             parity::open_notified_app,
             parity::open_received_folder,
+            sharefolder::list_peer_folder,
+            sharefolder::download_peer_file,
             terminal::open_terminal,
             parity::pin_app,
             parity::remote_screen,

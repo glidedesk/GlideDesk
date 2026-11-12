@@ -297,6 +297,9 @@
     },
     openBluetoothSettings: () => invoke('open_bluetooth_settings'),
     openMacDrive: () => invoke('open_mac_drive'),
+    // The other computer's shared folder: one level at a time, then save a file.
+    listPeerFolder: (path) => invoke('list_peer_folder', { path: path ? String(path) : null }),
+    downloadPeerFile: (path) => invoke('download_peer_file', { path: String(path || '') }),
     openMonitor: () => invoke('open_monitor'),
     openNotifiedApp: (arg) => {
       const id = typeof arg === 'object' && arg ? (arg.app || arg.appName || arg.id || '') : String(arg || '');

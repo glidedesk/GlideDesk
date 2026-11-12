@@ -1,8 +1,9 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
 // Files tab: Send files (drop zone + Choose…) and copy/paste files with shortcuts,
-// then two direction cards — files and the Mac's folder coming here, files and
-// this PC's folder going to the Mac — then transfers. Drags across the edge,
-// Monitor 2 drops, network drives in one switch each.
+// then the two direction cards, then the Folders card — open the other computer's
+// shared folder and save from it, or share one of yours and browse it — then
+// transfers. Drags across the edge, Monitor 2 drops, network drives in one switch
+// each.
 'use strict';
 
 UI.tab({
@@ -16,19 +17,104 @@ UI.tab({
     const { el, api } = UI;
     const sw = (label, set) => UI.switch(set, { label });
     const mount = sw('{Name}’s folder here', (v) => api.setFiles({ mountMac: v }));
-    const openBtn = UI.button('Open', () => api.openMacDrive(), 'small');
-    const macDrive = UI.row('Open {name}’s shared folder', '', [openBtn, mount]);
+    // What the other computer shares is not a drive: it is a folder this page can
+    // list, and each file can be saved into the same place received files go.
+    const peerPill = el('span', { class: 'pill muted' });
+    const openBtn = UI.button('Open', () => toggleBrowse(), 'small');
+    const macDrive = UI.row('Open {name}’s shared folder', '', [peerPill, openBtn, mount.el]);
     const share = sw('{me}’s folder on {name}', (v) => api.setShareOn(v));
     const chooseBtn = UI.button('Choose…', () => api.chooseShareFolder(), 'small');
     const sharePill = el('span', { class: 'pill' });
-    const pcShare = UI.row('Share a folder with {name}', '', [sharePill, chooseBtn, share]);
+    const pcShare = UI.row('Share a folder', '', [sharePill, chooseBtn, share.el]);
+    // The two folder rows need the full width: inside the direction cards their
+    // labels and controls were squeezed onto three lines and overlapped.
+    const foldersCard = UI.card('Folders', [macDrive, pcShare]);
+
+    // The other computer's folder, one level at a time.
+    const browse = { open: false, path: '', entries: [], error: '', hint: '' };
+    let lastListKey = '';
+    const list = el('div', { class: 'history' });
+    const upBtn = UI.button('Up', () => load(parentPath(browse.path)), 'small');
+    const browserBtn = UI.button('In browser', () => api.openMacDrive(), 'small');
+    const listHead = UI.row('', '', [upBtn, browserBtn]);
+    const folderCard = UI.card('{Name}’s shared folder', [listHead, list]);
+    folderCard.hidden = true;
+
+    const joinPath = (a, b) => (a ? a + '/' + b : b);
+    const parentPath = (p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+    const updateHead = () => {
+      upBtn.disabled = !browse.path;
+      listHead.setHint(browse.hint || browse.path || 'Top of the folder');
+      listHead.hint.classList.toggle('bad', !!browse.error);
+    };
+    const rowFor = (entry) => {
+      const path = joinPath(browse.path, entry.name);
+      const row = el('div', { class: 'hist-item' }, [
+        el('span', { class: 'hist-dir ' + (entry.dir ? 'out' : 'in') }, [UI.icon(entry.dir ? 'folder' : 'doc')]),
+        el('div', { class: 'hist-text' }, [
+          el('div', { class: 'hist-preview selectable', text: entry.name }),
+          el('div', { class: 'hint', text: entry.dir ? 'Folder' : UI.bytes(entry.size) }),
+        ]),
+      ]);
+      row.append(entry.dir
+        ? UI.button('Open', () => load(path), 'small')
+        : UI.button('Save', () => saveFile(path, entry), 'small'));
+      return row;
+    };
+    const drawList = () => {
+      const key = JSON.stringify([browse.path, browse.error, browse.entries.map((e) => [e.name, e.size, e.dir])]);
+      if (key !== lastListKey) {
+        lastListKey = key;
+        if (browse.error) list.replaceChildren(UI.row(browse.error, ''));
+        else if (!browse.entries.length) list.replaceChildren(UI.row('This folder is empty', ''));
+        else list.replaceChildren(...browse.entries.map(rowFor));
+      }
+      updateHead();
+    };
+    const load = async (path) => {
+      browse.hint = 'Reading…';
+      drawList();
+      try {
+        const answer = await api.listPeerFolder(path);
+        browse.path = answer.path || path;
+        browse.entries = Array.isArray(answer.entries) ? answer.entries : [];
+        browse.error = '';
+        browse.hint = '';
+      } catch (e) {
+        browse.entries = [];
+        browse.error = String((e && e.message) || e);
+        browse.hint = '';
+      }
+      browse.open = true;
+      drawList();
+      // Small windows put the list below the fold; bring it into view.
+      folderCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    };
+    const toggleBrowse = () => {
+      if (browse.open) {
+        browse.open = false;
+        lastListKey = '';
+        folderCard.hidden = true;
+      } else {
+        browse.hint = '';
+        load('');
+      }
+    };
+    const saveFile = async (path, entry) => {
+      browse.hint = 'Saving ' + entry.name + '…';
+      drawList();
+      try {
+        const saved = await api.downloadPeerFile(path);
+        browse.hint = 'Saved to ' + saved;
+      } catch (e) {
+        browse.hint = String((e && e.message) || e);
+      }
+      drawList();
+    };
+
     const pair = UI.dirCards(
-      { on: { get: (s) => s.files.acceptFromMac, set: (v) => api.setFiles({ acceptFromMac: v }) }, label: 'Take files from {name} on {me}', rows: [
-        macDrive,
-      ] },
-      { on: { get: (s) => s.files.dropToMac, set: (v) => api.setFiles({ dropToMac: v }) }, label: 'Send files from {me} to {name}', rows: [
-        pcShare,
-      ] },
+      { on: { get: (s) => s.files.acceptFromMac, set: (v) => api.setFiles({ acceptFromMac: v }) }, label: 'Take files from {name} on {me}' },
+      { on: { get: (s) => s.files.dropToMac, set: (v) => api.setFiles({ dropToMac: v }) }, label: 'Send files from {me} to {name}' },
     );
     // Send files: drop zone + Choose…
     const zoneText = el('div', { class: 'big', text: 'Drop files or folders here' });
@@ -93,6 +179,8 @@ UI.tab({
       UI.card('', [sendRow, zone], { cls: 'keep-on' }),
       UI.card('', [keysRow, copyRow, pasteRow], { cls: 'keep-on' }),
       pair.el,
+      foldersCard,
+      folderCard,
       UI.card('', [edgeRow]),
       UI.card('Recent', [outRow, inRow]),
     );
@@ -127,17 +215,36 @@ UI.tab({
           : 'Into the app in front (a chat, a mail…), or the File Explorer folder in front, else the Desktop');
       edgeDrag.set(f.edgeDrag);
       edgeRow.setHint(f.edgeDrag && f.macDrags === false ? 'Turned off on {name}' : f.edgeDrag ? 'Drag through the screen edge and drop anywhere' : '');
+      // ---- the other computer's folder ----
       mount.set(f.mountMac);
-      openBtn.hidden = !m.drive && !m.wifi;
-      macDrive.setHint(m.mountMessage || (!f.mountMac ? '' : m.drive ? 'Drive ' + m.drive : m.busy === 'mount' ? 'Connecting…'
-        : m.wifi ? 'Over Bluetooth: Open connects it with Wi-Fi Direct' : 'Waiting for {name} to share one'));
+      const other = m.peer || {};
+      const otherCount = Number(other.count || 0);
+      peerPill.hidden = !other.available;
+      peerPill.textContent = other.available
+        ? (otherCount ? otherCount + (otherCount === 1 ? ' item' : ' items') : 'Empty')
+        : '';
+      peerPill.className = 'pill ' + (other.available ? 'good' : 'muted');
+      openBtn.disabled = !other.available || !f.mountMac;
+      if (browse.open && (!other.available || !f.mountMac)) browse.open = false;
+      folderCard.hidden = !(browse.open && other.available && f.mountMac);
+      macDrive.setHint(m.mountMessage || (!f.mountMac || other.available ? ''
+        : m.drive ? 'Drive ' + m.drive
+          : m.busy === 'mount' ? 'Connecting…'
+            : m.wifi ? 'Over Bluetooth: Open connects it with Wi-Fi Direct'
+              : 'Waiting for {name} to share one'));
+      // ---- the folder this computer offers ----
       share.set(f.shareOn);
       const busy = m.busy === 'setup' ? 'Setting up…' : m.busy === 'remove' ? 'Removing…' : '';
       sharePill.hidden = !f.shareOn && !busy;
-      sharePill.textContent = busy || (m.peer && m.peer.mounted ? 'On {name}' : m.peer && m.peer.error ? 'Problem' : 'Shared');
-      sharePill.className = 'pill ' + (busy ? 'muted' : m.peer && m.peer.mounted ? 'good' : m.peer && m.peer.error ? 'bad' : 'muted');
+      const sharingCount = Number(m.count || 0);
+      sharePill.textContent = busy
+        || (!f.shareOn ? 'Off'
+          : m.sharing ? 'Sharing' + (sharingCount ? ' ' + sharingCount + (sharingCount === 1 ? ' item' : ' items') : '')
+            : 'Not sharing');
+      sharePill.className = 'pill ' + (busy ? 'muted' : f.shareOn && m.sharing ? 'good' : f.shareOn ? 'bad' : 'muted');
       chooseBtn.disabled = !!m.busy;
-      pcShare.setHint(m.message || (m.peer && m.peer.error) || m.folder);
+      pcShare.setHint(m.shareMessage || m.folder || (f.shareOn && m.sharing ? '' : 'Choose… picks the folder to share'));
+      if (browse.open) drawList();
 
       cancelBtn.hidden = !f.current;
       if (f.current) {
