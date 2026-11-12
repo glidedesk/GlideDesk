@@ -1202,6 +1202,11 @@ impl NativeInputInjector {
             Self::key_event(vk, false, false);
         }
 
+        // A caption-button press is injected as a pair when the release arrives; if the
+        // link ends first, there is nothing left to press or release.
+        #[cfg(windows)]
+        caption_guard::clear();
+
         let btns_to_release: Vec<u8> = {
             let mut guard = HELD_BUTTONS.lock();
             if let Some(ref mut set) = *guard {
@@ -1642,11 +1647,13 @@ impl NativeInputInjector {
             return;
         }
         Self::sync_input_desktop();
+        use windows::Win32::Foundation::POINT;
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
             MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
             MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
         };
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 
         let flags = match (button, is_down) {
             (MouseButton::Left, true) => MOUSEEVENTF_LEFTDOWN,
@@ -1657,22 +1664,62 @@ impl NativeInputInjector {
             (MouseButton::Middle, false) => MOUSEEVENTF_MIDDLEUP,
         };
 
-        let input = INPUT {
+        let mouse = |dw_flags| INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
                 mi: MOUSEINPUT {
                     dx: 0,
                     dy: 0,
                     mouseData: 0,
-                    dwFlags: flags,
+                    dwFlags: dw_flags,
                     time: 0,
                     dwExtraInfo: 0,
                 },
             },
         };
 
+        // A press on this app's own caption button is held back until its release:
+        // see caption_guard. Windows' modal caption loop runs on the thread that
+        // injects here, so injecting the press first would queue the release behind
+        // the loop that is waiting for it and the link would time out (#209, #208,
+        // #203).
+        if button == MouseButton::Left {
+            if is_down {
+                if unsafe { caption_guard::on_own_caption_button() } {
+                    let mut at = POINT::default();
+                    let _ = unsafe { GetCursorPos(&mut at) };
+                    caption_guard::hold(at.x, at.y);
+                    log::info!("[KVM] caption-button press held until its release at ({}, {})", at.x, at.y);
+                    return;
+                }
+            } else if let Some((x, y)) = caption_guard::take() {
+                let mut at = POINT::default();
+                let _ = unsafe { GetCursorPos(&mut at) };
+                let moved = at.x != x || at.y != y;
+                let pair = [mouse(MOUSEEVENTF_LEFTDOWN), mouse(MOUSEEVENTF_LEFTUP)];
+                unsafe {
+                    if moved {
+                        let _ = SetCursorPos(x, y);
+                    }
+                    let sent = SendInput(&pair, std::mem::size_of::<INPUT>() as i32);
+                    if sent != 2 {
+                        log::warn!(
+                            "[KVM] SendInput caption click failed: sent={} err={} {}",
+                            sent, std::io::Error::last_os_error(), Self::desktop_probe()
+                        );
+                    } else {
+                        log::info!("[KVM] caption click injected as a press and release pair");
+                    }
+                    if moved {
+                        let _ = SetCursorPos(at.x, at.y);
+                    }
+                }
+                return;
+            }
+        }
+
         unsafe {
-            let sent = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+            let sent = SendInput(&[mouse(flags)], std::mem::size_of::<INPUT>() as i32);
             if sent != 1 {
                 log::warn!(
                     "[KVM] SendInput mouse button failed: {:?} down={} sent={} err={} {}",
@@ -2307,6 +2354,86 @@ impl ClipboardWatcher {
         if self.state.record_clipboard_item(text.clone(), "out", bytes, None) {
             crate::commands::push_state(&self.app, &self.state);
         }
+    }
+}
+
+/// Clicks on this app's own Minimize, Maximize, Close and Help buttons.
+///
+/// Windows runs a synchronous modal loop on the window's thread when a caption
+/// button is pressed, waiting for the release. Here that thread is also the one
+/// that injects input, so injecting the press first would queue the release behind
+/// the loop that is waiting for it: the link would time out and drop (#209, #208,
+/// #203). The press is held back and both halves are injected together when the
+/// release arrives.
+#[cfg(windows)]
+mod caption_guard {
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetCursorPos, GetWindowThreadProcessId, SendMessageTimeoutW, WindowFromPoint,
+        GA_ROOT, SMTO_ABORTIFHUNG, WM_NCHITTEST,
+    };
+
+    static HELD: AtomicBool = AtomicBool::new(false);
+    static HELD_X: AtomicI32 = AtomicI32::new(0);
+    static HELD_Y: AtomicI32 = AtomicI32::new(0);
+
+    /// Remember where the press landed; inject nothing yet.
+    pub fn hold(x: i32, y: i32) {
+        HELD_X.store(x, Ordering::SeqCst);
+        HELD_Y.store(y, Ordering::SeqCst);
+        HELD.store(true, Ordering::SeqCst);
+    }
+
+    /// Take the held point, if there is one.
+    pub fn take() -> Option<(i32, i32)> {
+        if !HELD.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        Some((HELD_X.load(Ordering::SeqCst), HELD_Y.load(Ordering::SeqCst)))
+    }
+
+    /// Drop a held press without injecting it (the link ended mid-click).
+    pub fn clear() {
+        HELD.store(false, Ordering::SeqCst);
+    }
+
+    /// Is the pointer on a caption button of one of this app's own windows?
+    pub unsafe fn on_own_caption_button() -> bool {
+        let mut p = POINT::default();
+        if GetCursorPos(&mut p).is_err() {
+            return false;
+        }
+        let h: HWND = WindowFromPoint(p);
+        if h.0.is_null() {
+            return false;
+        }
+        let root = GetAncestor(h, GA_ROOT);
+        let target = if root.0.is_null() { h } else { root };
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(target, Some(&mut pid));
+        if pid != GetCurrentProcessId() {
+            return false;
+        }
+        // Ask the window what that point is, exactly as the mouse would. The hit test
+        // must go to the top-level window: a child (the webview) answers HTCLIENT for
+        // its whole area, caption included.
+        let lparam = LPARAM((((p.y & 0xFFFF) << 16) | (p.x & 0xFFFF)) as isize);
+        let mut hit = 0usize;
+        let answered = SendMessageTimeoutW(
+            target,
+            WM_NCHITTEST,
+            WPARAM(0),
+            lparam,
+            SMTO_ABORTIFHUNG,
+            100,
+            Some(&mut hit),
+        );
+        if answered.0 == 0 {
+            return false;
+        }
+        matches!(hit as i32, 8 | 9 | 20 | 21) // HTMINBUTTON, HTMAXBUTTON, HTCLOSE, HTHELP
     }
 }
 
