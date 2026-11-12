@@ -34,6 +34,8 @@ rustls = "0.23.46"
 tokio-rustls = "0.26.6"
 tauri-plugin-single-instance = "2.0"
 socket2 = { version = "0.5", features = ["all"] }
+tauri-plugin-notification = "2"
+plist = "1"
 # xcap v0.1.1 has compatibility issues with modern rustc; using scrap or image capture natively
 
 

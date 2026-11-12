@@ -1090,7 +1090,7 @@ pub async fn pair_respond(allowed: bool, network: State<'_, NetworkManager>) -> 
 }
 
 #[tauri::command]
-pub fn set_app(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+pub fn set_app(partial: Value, state: State<'_, AppState>, network: State<'_, NetworkManager>, app: AppHandle) -> Result<(), String> {
     log::info!("Updating application settings: {:?}", partial);
     {
         let mut s = state.inner.write();
@@ -1159,6 +1159,10 @@ pub fn set_app(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Re
         }
     }
     push_state(&app, &state);
+    // Notifications: the other computer sends only while this one accepts them.
+    if partial.get("notifs").is_some() {
+        crate::notifications::send_policy(network.inner(), &state);
+    }
     // The Files page's choices are the setup a person should only do once: keep them
     // for the next launch.
     if partial.get("files").is_some() {

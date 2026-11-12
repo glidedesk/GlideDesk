@@ -362,7 +362,7 @@ pub fn clear_notif_history(state: State<'_, AppState>, app: AppHandle) -> Result
     log::info!("[Notifs] Clearing notification history");
     {
         let mut s = state.inner.write();
-        s.notifs.enabled = true;
+        s.notifs.history.clear();
     }
     push_state(&app, &state);
     Ok(())

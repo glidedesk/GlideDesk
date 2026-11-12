@@ -1,7 +1,7 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Notifications tab: the other computer's notifications here as Windows
-// toasts from GlideDesk, and this PC's on the other computer (read from Windows' notification
-// database by the helper). Two direction cards, then the apps seen sending.
+// Notifications tab: the other computer's notifications here as native system
+// notifications from GlideDesk, and this PC's on the other computer (read from this
+// system's notification store). Two direction cards, then the apps seen sending.
 'use strict';
 
 UI.tab({
@@ -41,8 +41,8 @@ UI.tab({
       pair.update(s);
       note.set('');
       hideSw.set(n.hideText);
-      recvRow.setHint(n.receive && n.shown ? n.shown + ' shown' : 'As Windows notifications, from GlideDesk');
-      sendRow.setHint(n.readable === false ? 'Windows’ notification list can’t be read'
+      recvRow.setHint(n.receive && n.shown ? n.shown + ' shown' : 'As native notifications, from GlideDesk');
+      sendRow.setHint(n.readable === false ? 'This computer’s notification list can’t be read'
         : !n.send ? '' : !connected ? 'Also switches it on the other computer' : n.sent ? n.sent + ' sent' : 'As native notifications there');
 
       // Recent notifications

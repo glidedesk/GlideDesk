@@ -19,6 +19,7 @@ mod fastfile;
 mod fileclip;
 mod media;
 mod network;
+mod notifications;
 mod pairlimit;
 mod pairstore;
 mod state;
@@ -61,6 +62,7 @@ fn main() {
     let window_reg = ParkedWindowRegistry::new();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             log::info!("[SingleInstance] Second launch detected; focusing existing window");
             crate::platform::set_window_visible_policy(app, true);
@@ -108,6 +110,9 @@ fn main() {
 
             // 4. Register NetworkManager in Tauri state
             app.manage(network.clone());
+
+            // 4a. Mirror this computer's notifications on the paired one.
+            notifications::start(handle.clone(), state.clone(), network.clone());
 
             // 4a. Keep the Terminal tab honest: offer this computer's key and learn
             // whether the other side will let a shell in.

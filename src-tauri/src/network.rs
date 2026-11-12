@@ -10,7 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -414,6 +414,19 @@ pub struct WireMessage {
     #[serde(default)]
     pub items: Option<Vec<crate::state::ChatItem>>,
 
+    // Notification fields: a notification on the sender (`notif`) and whether the
+    // receiver wants ours (`notif.policy`). Older peers omit all of them.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub at: Option<u64>,
+    #[serde(default)]
+    pub accept: Option<bool>,
+
     // Wake-on-LAN fields
     #[serde(default)]
     pub macs: Option<Vec<String>>,
@@ -565,6 +578,11 @@ impl Default for WireMessage {
             group: None,
             reply: None,
             items: None,
+            title: None,
+            subtitle: None,
+            body: None,
+            at: None,
+            accept: None,
             macs: None,
             address: None,
             user: None,
@@ -1286,6 +1304,9 @@ impl MeshServer {
         }
         state.remove_client(&session_id);
         state.remove_client(&peer_addr.ip().to_string());
+        if let Some(net) = app.try_state::<NetworkManager>() {
+            net.set_notif_accept(false);
+        }
         let was_driving = state.inner.read().input == "driving";
         state.set_where_input("home");
         crate::kvm::NativeInputInjector::release_all_keys();
@@ -2070,6 +2091,20 @@ impl MeshServer {
                         .await;
                 }
 
+                // Notifications: tell the other computer whether this one shows its.
+                let accept = {
+                    let s = state.inner.read();
+                    s.notifs.enabled && s.notifs.receive
+                };
+                let _ = out_tx
+                    .send(WireMessage {
+                        t: "notif.policy".to_string(),
+                        v: Some(1),
+                        accept: Some(accept),
+                        ..Default::default()
+                    })
+                    .await;
+
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
             }
@@ -2078,6 +2113,9 @@ impl MeshServer {
                     state.remove_client(pid);
                 }
                 state.remove_client(&peer_addr.ip().to_string());
+                if let Some(net) = app.try_state::<NetworkManager>() {
+                    net.set_notif_accept(false);
+                }
                 let was_driving = state.inner.read().input == "driving";
                 state.set_where_input("home");
                 crate::kvm::NativeInputInjector::release_all_keys();
@@ -2093,6 +2131,7 @@ impl MeshServer {
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
                 | "clip" | "clip.image" | "kvm.take" | "window.handoff.offer"
                 | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
+                | "notif" | "notif.policy"
                 | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
                 | "rz.offer" | "rz.take" | "files.batch" | "files.chunk"
                 | "files.done" | "files.ack" | "files.cancel" | "fclip.paste"
@@ -2398,6 +2437,25 @@ impl MeshServer {
             "gamepad.event" => {
                 log::info!("[Gamepad] Inbound gamepad event from {}: button={:?}, pressed={:?}", peer_addr, pkt.k, pkt.b);
                 let _ = app.emit("gamepad-event", &pkt);
+            }
+            "notif.policy" => {
+                if *authenticated.read() {
+                    crate::notifications::set_peer_policy(
+                        app,
+                        state,
+                        pkt.accept.unwrap_or(false),
+                    );
+                }
+            }
+            "notif" => {
+                if !*authenticated.read() {
+                    log::warn!(
+                        "[Auth] Dropping unauthenticated notif packet from {}",
+                        peer_addr
+                    );
+                } else {
+                    crate::notifications::incoming(app, state, pkt);
+                }
             }
             "chat.conv" => {
                 if let (Some(app_id), Some(key)) = (pkt.app.clone(), pkt.key.clone()) {
@@ -2920,6 +2978,8 @@ pub struct NetworkManager {
     local_name: String,
     seq: Arc<Mutex<u64>>,
     pair_limit_gen: Arc<AtomicU64>,
+    /// The other computer's last `notif.policy`: whether it wants ours.
+    notif_accept: Arc<AtomicBool>,
     pub tls_identity: Arc<crate::transport::tls::LocalTlsIdentity>,
     discovery: Arc<RwLock<Option<Arc<DiscoveryService>>>>,
 }
@@ -2951,6 +3011,7 @@ impl NetworkManager {
             local_name,
             seq: Arc::new(Mutex::new(chrono::Utc::now().timestamp_millis() as u64)),
             pair_limit_gen: Arc::new(AtomicU64::new(0)),
+            notif_accept: Arc::new(AtomicBool::new(false)),
             tls_identity,
             discovery: Arc::new(RwLock::new(None)),
         }
@@ -3881,6 +3942,7 @@ impl NetworkManager {
                 | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
+                | "notif" | "notif.policy"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
                 | "files.batch" | "files.chunk" | "files.done" | "files.ack" | "files.cancel"
         );
@@ -3952,6 +4014,7 @@ impl NetworkManager {
                 | "clip" | "clip.image" | "kvm.take" | "kvm.home" | "kvm.release"
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
+                | "notif" | "notif.policy"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
                 | "files.batch" | "files.chunk" | "files.done" | "files.ack" | "files.cancel"
         );
@@ -3994,6 +4057,15 @@ impl NetworkManager {
     /// This install's stable id, the one other computers know it by.
     pub fn local_id(&self) -> &str {
         &self.local_id
+    }
+
+    /// The other computer's last `notif.policy`: true when it shows ours.
+    pub fn set_notif_accept(&self, on: bool) {
+        self.notif_accept.store(on, Ordering::Relaxed);
+    }
+
+    pub fn notif_accept(&self) -> bool {
+        self.notif_accept.load(Ordering::Relaxed)
     }
 
     pub fn get_active_clients_info(&self) -> Vec<ClientInfo> {
