@@ -649,7 +649,7 @@ impl Default for FilesState {
             receive: true,
             share: true,
             path: String::new(),
-            share_on: false,
+            share_on: true,
             shortcuts: false,
             copy_keys: String::new(),
             paste_keys: String::new(),
@@ -1841,6 +1841,21 @@ impl AppState {
         if let Some((side, along)) = crate::pairstore::load_layout() {
             initial_state.layout.side = side;
             initial_state.layout.along = along;
+        }
+
+        // The Files page choices (folder shared, sharing on or off, received folder,
+        // direction switches), so a restart keeps the setup instead of asking again.
+        #[cfg(not(test))]
+        if let Some(f) = crate::pairstore::load_files() {
+            initial_state.files.share_on = f.share_on;
+            initial_state.files.smb.folder = f.folder;
+            initial_state.files.mount_mac = f.mount_mac;
+            initial_state.files.received_folder = f.received_folder;
+            initial_state.files.shortcuts = f.shortcuts;
+            initial_state.files.edge_drag = f.edge_drag;
+            initial_state.files.mac_drags = f.mac_drags;
+            initial_state.files.accept_from_mac = f.accept_from_mac;
+            initial_state.files.drop_to_mac = f.drop_to_mac;
         }
 
         Self {

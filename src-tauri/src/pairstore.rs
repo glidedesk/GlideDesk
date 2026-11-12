@@ -106,6 +106,86 @@ pub fn layout_path() -> PathBuf {
     p
 }
 
+/// Where the Files page's choices are kept: the folder this computer shares, whether
+/// it is sharing, where received files go, and the direction switches. Without it a
+/// restart made everyone pick the folder again.
+pub fn files_path() -> PathBuf {
+    let mut p = store_path();
+    p.set_file_name("files.json");
+    p
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The Files page choices as written to disk. Runtime fields (the transfer bar, the
+/// peer's answer, the browse list) are deliberately not here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilesFile {
+    #[serde(rename = "shareOn", default)]
+    pub share_on: bool,
+    #[serde(default)]
+    pub folder: String,
+    #[serde(rename = "mountMac", default)]
+    pub mount_mac: bool,
+    #[serde(rename = "receivedFolder", default)]
+    pub received_folder: String,
+    #[serde(default)]
+    pub shortcuts: bool,
+    #[serde(rename = "edgeDrag", default)]
+    pub edge_drag: bool,
+    #[serde(rename = "macDrags", default = "yes")]
+    pub mac_drags: bool,
+    #[serde(rename = "acceptFromMac", default = "yes")]
+    pub accept_from_mac: bool,
+    #[serde(rename = "dropToMac", default = "yes")]
+    pub drop_to_mac: bool,
+}
+
+/// The last Files page choices, if any were ever made.
+pub fn load_files() -> Option<FilesFile> {
+    let path = files_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<FilesFile>(&text) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            log::warn!("[Files] Ignoring unreadable {}: {}", path.display(), e);
+            None
+        }
+    }
+}
+
+/// Remember the Files page choices, so a restart comes back sharing the same folder.
+pub fn save_files(files: &crate::state::FilesState) {
+    if cfg!(test) {
+        return; // tests never touch the developer's real files
+    }
+    let path = files_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = FilesFile {
+        share_on: files.share_on,
+        folder: files.smb.folder.clone(),
+        mount_mac: files.mount_mac,
+        received_folder: files.received_folder.clone(),
+        shortcuts: files.shortcuts,
+        edge_drag: files.edge_drag,
+        mac_drags: files.mac_drags,
+        accept_from_mac: files.accept_from_mac,
+        drop_to_mac: files.drop_to_mac,
+    };
+    match serde_json::to_string_pretty(&file) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(&path, text) {
+                log::warn!("[Files] Could not write {}: {}", path.display(), e);
+            }
+        }
+        Err(e) => log::warn!("[Files] Could not encode files store: {}", e),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LayoutFile {
     #[serde(default = "default_layout_side")]

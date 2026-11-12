@@ -1159,6 +1159,12 @@ pub fn set_app(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Re
         }
     }
     push_state(&app, &state);
+    // The Files page's choices are the setup a person should only do once: keep them
+    // for the next launch.
+    if partial.get("files").is_some() {
+        let files = state.inner.read().files.clone();
+        crate::pairstore::save_files(&files);
+    }
     Ok(())
 }
 

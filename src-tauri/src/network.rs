@@ -1796,15 +1796,20 @@ impl MeshServer {
                             name: name.clone(),
                             count,
                         });
-                        s.files.smb.mount_message = if available {
-                            format!(
-                                "{} is sharing {} item{}",
-                                if name.is_empty() { "The other computer" } else { &name },
-                                count,
-                                if count == 1 { "" } else { "s" }
-                            )
-                        } else {
+                        s.files.smb.mount_message = if !available {
                             String::new()
+                        } else {
+                            let who = if name.is_empty() { "The other computer" } else { &name };
+                            if count == 0 {
+                                format!("{} is sharing an empty folder", who)
+                            } else {
+                                format!(
+                                    "{} is sharing {} item{}",
+                                    who,
+                                    count,
+                                    if count == 1 { "" } else { "s" }
+                                )
+                            }
                         };
                     }
                     let snap = state.snapshot();

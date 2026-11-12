@@ -87,7 +87,9 @@ UI.tab({
       }
       browse.open = true;
       drawList();
-      // Small windows put the list below the fold; bring it into view.
+      // Small windows put the list below the fold: show it and bring it into view.
+      // (A hidden card cannot be scrolled to, so this must happen before the scroll.)
+      folderCard.hidden = false;
       folderCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     };
     const toggleBrowse = () => {
@@ -97,6 +99,8 @@ UI.tab({
         folderCard.hidden = true;
       } else {
         browse.hint = '';
+        browse.open = true;
+        folderCard.hidden = false;
         load('');
       }
     };
@@ -243,7 +247,9 @@ UI.tab({
             : 'Not sharing');
       sharePill.className = 'pill ' + (busy ? 'muted' : f.shareOn && m.sharing ? 'good' : f.shareOn ? 'bad' : 'muted');
       chooseBtn.disabled = !!m.busy;
-      pcShare.setHint(m.shareMessage || m.folder || (f.shareOn && m.sharing ? '' : 'Choose… picks the folder to share'));
+      pcShare.setHint(m.shareMessage
+        || (!f.shareOn ? (m.folder ? 'Turned off · ' + m.folder : 'Turned off')
+          : m.folder || (m.sharing ? '' : 'Choose… picks the folder to share')));
       if (browse.open) drawList();
 
       cancelBtn.hidden = !f.current;

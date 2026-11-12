@@ -296,6 +296,10 @@ pub fn choose_received_folder(state: State<'_, AppState>, app: AppHandle) -> Res
         s.files.received = picked.clone();
     }
     push_state(&app, &state);
+    {
+        let files = state.inner.read().files.clone();
+        crate::pairstore::save_files(&files);
+    }
     Ok(picked)
 }
 
@@ -313,6 +317,10 @@ pub fn choose_share_folder(state: State<'_, AppState>, app: AppHandle) -> Result
         s.files.share_on = true;
     }
     push_state(&app, &state);
+    {
+        let files = state.inner.read().files.clone();
+        crate::pairstore::save_files(&files);
+    }
     Ok(picked)
 }
 
@@ -325,6 +333,10 @@ pub fn reset_received_folder(state: State<'_, AppState>, app: AppHandle) -> Resu
         s.files.received = dir.to_string_lossy().to_string();
     }
     push_state(&app, &state);
+    {
+        let files = state.inner.read().files.clone();
+        crate::pairstore::save_files(&files);
+    }
     Ok(dir.to_string_lossy().to_string())
 }
 

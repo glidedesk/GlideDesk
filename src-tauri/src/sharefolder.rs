@@ -516,6 +516,28 @@ async fn handle(mut stream: TcpStream) {
     }
 }
 
+/// The folder a fresh install offers, made on first use: a folder whose name says
+/// what it is, rather than the whole Desktop or Documents going out by surprise.
+pub fn default_share_dir(home: &Path) -> PathBuf {
+    home.join("GlideDesk Share")
+}
+
+/// This computer's default shared folder, created if this is the first time it is
+/// needed. `None` only when there is no home directory to put it in.
+pub fn default_share_folder() -> Option<PathBuf> {
+    let home = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())?;
+    let dir = default_share_dir(Path::new(&home));
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            log::warn!("[Share] Could not make {}: {}", dir.display(), e);
+            None
+        }
+    }
+}
+
 /// Start the folder server once, and keep the other computer told what is shared.
 pub fn start(app: AppHandle, network: NetworkManager) {
     tauri::async_runtime::spawn(async move {
@@ -572,11 +594,18 @@ async fn announce(
             s.files.path.clone(),
         )
     };
-    let chosen = if folder.trim().is_empty() {
+    // Nothing chosen yet is not "no folder": it is the default folder, made on first
+    // use, so a fresh install has something to open without a trip to Choose….
+    let chosen = if !folder.trim().is_empty() {
+        folder.clone()
+    } else if !path.trim().is_empty() {
         path
     } else {
-        folder
+        default_share_folder()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default()
     };
+    let adopted_default = enabled && folder.trim().is_empty() && !chosen.trim().is_empty();
     let root = PathBuf::from(chosen.trim());
 
     let (sharing, name, count, message) = if !enabled {
@@ -625,10 +654,19 @@ async fn announce(
             s.files.smb.share_message = message.clone();
             changed = true;
         }
+        // Name the default folder on the page, and keep it for next time.
+        if sharing && s.files.smb.folder.trim().is_empty() && !chosen.trim().is_empty() {
+            s.files.smb.folder = chosen.clone();
+            changed = true;
+        }
         changed
     };
     if changed {
         crate::commands::push_state(app, &state);
+        if adopted_default && sharing {
+            let files = state.inner.read().files.clone();
+            crate::pairstore::save_files(&files);
+        }
     }
 
     let port = port_slot().load(Ordering::Relaxed);
@@ -946,6 +984,15 @@ mod tests {
     fn a_name_is_encoded_and_decoded_unchanged() {
         let name = "résumé 2026 & notes.txt";
         assert_eq!(dec(&enc(name)), name);
+    }
+
+    #[test]
+    fn the_default_folder_is_under_home_and_named_for_what_it_is() {
+        let home = Path::new("/Users/someone");
+        assert_eq!(default_share_dir(home), PathBuf::from("/Users/someone/GlideDesk Share"));
+        assert!(default_share_dir(home).starts_with(home));
+        let windows = Path::new("C:/Users/Babsons");
+        assert!(default_share_dir(windows).ends_with("GlideDesk Share"));
     }
 
     #[test]
