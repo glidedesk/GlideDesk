@@ -375,6 +375,14 @@ pub struct WireMessage {
     /// Older peers omit it; the pointer then starts in the middle of the edge.
     #[serde(default, rename = "edgeAt")]
     pub edge_at: Option<f64>,
+    /// The sending computer's whole desktop size, in the units its pointer
+    /// works in. Sent with `hello`, `welcome` and `kvm.layout`, so the other
+    /// side can scale motion to its own screen instead of moving 1:1. Older
+    /// peers omit both fields and get the old 1:1 behaviour.
+    #[serde(default)]
+    pub sw: Option<f64>,
+    #[serde(default)]
+    pub sh: Option<f64>,
     #[serde(default)]
     pub smooth: Option<bool>,
 
@@ -568,6 +576,8 @@ impl Default for WireMessage {
             im: None,
             mods: None,
             edge_at: None,
+            sw: None,
+            sh: None,
             smooth: None,
             text: None,
             message: None,
@@ -1438,18 +1448,23 @@ impl MeshServer {
                 os: Some(current_os().to_string()),
                 port: Some(DEFAULT_PORT),
                 role: Some("host".to_string()),
+                sw: Some(crate::kvm::virtual_desktop_size().0),
+                sh: Some(crate::kvm::virtual_desktop_size().1),
                 ..Default::default()
             };
             let _ = sess.tx.send(welcome).await;
 
             // Tell the connecting guest which side we are on; it puts us on the opposite
-            // side of its own screen.
+            // side of its own screen. Our desktop size lets it scale movement to its own.
             let side = state.inner.read().layout.side.clone();
+            let (sw, sh) = crate::kvm::virtual_desktop_size();
             let layout_sync = WireMessage {
                 t: "kvm.layout".to_string(),
                 v: Some(1),
                 side: Some(side.clone()),
                 pc_side: Some(side),
+                sw: Some(sw),
+                sh: Some(sh),
                 ..Default::default()
             };
             let _ = sess.tx.send(layout_sync).await;
@@ -1724,6 +1739,14 @@ impl MeshServer {
                 let _ = app.emit("state-change", &snap);
             }
             "kvm.layout" => {
+                // Its desktop size, for scaling pointer movement sent there. This
+                // is learned even when the sides already agree.
+                if let (Some(w), Some(h)) = (pkt.sw, pkt.sh) {
+                    if w >= 2.0 && h >= 2.0 {
+                        state.inner.write().kvm.peer_screen = Some((w, h));
+                        crate::kvm::log_peer_screen(w, h);
+                    }
+                }
                 let side = pkt.side.clone().or_else(|| pkt.pc_side.clone());
                 if let Some(peer_side) = side {
                     let peer_id = pkt.o.clone().unwrap_or_default();
@@ -1743,11 +1766,14 @@ impl MeshServer {
                             }
                             crate::pairstore::save_layout(new_side, state.inner.read().layout.along);
                             // Tell the other computer where we ended up, so both agree.
+                            let (sw, sh) = crate::kvm::virtual_desktop_size();
                             let sync = WireMessage {
                                 t: "kvm.layout".to_string(),
                                 v: Some(1),
                                 side: Some(new_side.to_string()),
                                 pc_side: Some(new_side.to_string()),
+                                sw: Some(sw),
+                                sh: Some(sh),
                                 ..Default::default()
                             };
                             let _ = out_tx.send(sync).await;
@@ -2034,6 +2060,14 @@ impl MeshServer {
                 if is_auth {
                     *authenticated.write() = true;
                     log::info!("[Auth] Peer {} ({:?}) authenticated successfully via pairing token", peer_addr, pkt.id);
+                    // How big the other desktop is, so pointer movement sent there
+                    // can be scaled to fill it instead of moving 1:1.
+                    if let (Some(w), Some(h)) = (pkt.sw, pkt.sh) {
+                        if w >= 2.0 && h >= 2.0 {
+                            state.inner.write().kvm.peer_screen = Some((w, h));
+                            crate::kvm::log_peer_screen(w, h);
+                        }
+                    }
                 }
 
                 let addr_str = if peer_addr.ip().is_unspecified() || peer_addr.ip().is_loopback() {
@@ -2073,6 +2107,7 @@ impl MeshServer {
                     // pairing it stored, the same way we checked theirs. Without it, a
                     // reconnecting pair cannot authenticate each other from a bare welcome.
                     let our_token = state.inner.read().paired.as_ref().and_then(|p| p.token.clone());
+                    let (welcome_w, welcome_h) = crate::kvm::virtual_desktop_size();
                     let welcome = WireMessage {
                         t: "welcome".to_string(),
                         v: Some(1),
@@ -2082,17 +2117,22 @@ impl MeshServer {
                         port: Some(DEFAULT_PORT),
                         role: Some("host".to_string()),
                         token: our_token,
+                        sw: Some(welcome_w),
+                        sh: Some(welcome_h),
                         ..Default::default()
                     };
                     let _ = out_tx.send(welcome).await;
 
                     // Tell the connecting peer which side we are on; it flips it for itself.
                     let side = state.inner.read().layout.side.clone();
+                    let (sw, sh) = crate::kvm::virtual_desktop_size();
                     let layout_sync = WireMessage {
                         t: "kvm.layout".to_string(),
                         v: Some(1),
                         side: Some(side.clone()),
                         pc_side: Some(side),
+                        sw: Some(sw),
+                        sh: Some(sh),
                         ..Default::default()
                     };
                     let _ = out_tx.send(layout_sync).await;
@@ -2172,21 +2212,15 @@ impl MeshServer {
                 );
             }
             "k.mm" | "remote.mm" => {
-                // Inbound relative mouse / phone remote move with sub-pixel preservation
+                // Inbound relative mouse / phone remote move. The delta can be
+                // fractional because the sending side scales it to this screen,
+                // so whole pixels are taken here and the remainder is carried
+                // into the next packet instead of being rounded away.
                 if let (Some(dx), Some(dy)) = (pkt.dx, pkt.dy) {
-                    let ix = dx.round() as i32;
-                    let iy = dy.round() as i32;
-                    let final_x = if ix == 0 && dx.abs() > 0.001 {
-                        if dx > 0.0 { 1 } else { -1 }
-                    } else {
-                        ix
-                    };
-                    let final_y = if iy == 0 && dy.abs() > 0.001 {
-                        if dy > 0.0 { 1 } else { -1 }
-                    } else {
-                        iy
-                    };
-                    crate::kvm::NativeInputInjector::move_cursor_relative(final_x, final_y);
+                    let (ix, iy) = crate::kvm::accumulate_motion(dx, dy);
+                    if ix != 0 || iy != 0 {
+                        crate::kvm::NativeInputInjector::move_cursor_relative(ix, iy);
+                    }
                 }
             }
             "k.md" | "remote.md" => {
@@ -2407,7 +2441,9 @@ impl MeshServer {
                     state.set_where_input("driven");
                     // The other computer counts movement from the edge it crossed and
                     // gives control back when the movement returns to that point, so
-                    // this pointer has to start there too.
+                    // this pointer has to start there too. Any fraction left over from
+                    // an earlier move must not nudge it off that point.
+                    crate::kvm::reset_pending_motion();
                     let snap = state.snapshot();
                     crate::kvm::NativeInputInjector::place_cursor_at_entry_edge(
                         &snap.layout.side,
@@ -2418,6 +2454,7 @@ impl MeshServer {
             }
             "kvm.home" | "kvm.release" => {
                 state.set_where_input("home");
+                crate::kvm::reset_pending_motion();
                 // A shortcut held over the link must not survive the pointer leaving,
                 // or a later V here would turn into a file paste.
                 crate::fileclip::reset();
@@ -3322,6 +3359,7 @@ impl NetworkManager {
 
         // Send hello with saved pairing token if available
         let saved_token = self.state.inner.read().paired.as_ref().and_then(|p| p.token.clone());
+        let (sw, sh) = crate::kvm::virtual_desktop_size();
         let hello = WireMessage {
             t: "hello".to_string(),
             v: Some(1),
@@ -3331,6 +3369,8 @@ impl NetworkManager {
             port: Some(DEFAULT_PORT),
             role: Some("guest".to_string()),
             token: saved_token,
+            sw: Some(sw),
+            sh: Some(sh),
             ..Default::default()
         };
         let hello_str = serde_json::to_string(&hello).map_err(|e| e.to_string())?;
@@ -3949,11 +3989,20 @@ impl NetworkManager {
             }
             motion.take()
         };
+        // The other computer's desktop is rarely the same size. Scale the sum
+        // (not each event) so the same fraction of travel here covers the same
+        // fraction there; without it a smaller screen could only reach part of
+        // a bigger one before its pointer hit its own edge.
+        let (sx, sy) = {
+            let (lw, lh) = crate::kvm::virtual_desktop_size();
+            let peer = self.state.inner.read().kvm.peer_screen.unwrap_or((0.0, 0.0));
+            crate::kvm::motion_scale(lw, lh, peer.0, peer.1)
+        };
         let msg = WireMessage {
             t: "k.mm".to_string(),
             v: Some(1),
-            dx: Some(cdx),
-            dy: Some(cdy),
+            dx: Some(cdx * sx),
+            dy: Some(cdy * sy),
             ..Default::default()
         };
         self.send_packet_sync(msg);

@@ -152,6 +152,12 @@ pub struct KvmSettings {
     pub gestures: bool,
     #[serde(rename = "pcSide", default)]
     pub pc_side: Option<String>,
+    /// The other computer's virtual desktop size, in its own pointer units
+    /// (pixels on Windows, points on macOS), as it last reported in
+    /// `kvm.layout` / `hello`. Motion is scaled by the ratio between the two
+    /// so the whole of the other screen can be reached from this one.
+    #[serde(rename = "peerScreen", default)]
+    pub peer_screen: Option<(f64, f64)>,
     #[serde(default = "default_true")]
     pub ble: bool,
     #[serde(rename = "resistancePx", default)]
@@ -176,6 +182,7 @@ impl Default for KvmSettings {
             pc_side: Some(
                 if cfg!(target_os = "windows") { "left" } else { "right" }.to_string(),
             ),
+            peer_screen: None,
             ble: true,
             resistance_px: 0,
         }

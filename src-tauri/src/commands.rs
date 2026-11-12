@@ -124,12 +124,16 @@ pub fn set_layout(side: String, along: Option<f64>, state: State<'_, AppState>, 
     push_state(&app, &state);
 
     // The other computer flips this to work out where we sit on its screen, so send the
-    // side we chose here unchanged.
+    // side we chose here unchanged. The desktop size travels too, so it can scale
+    // pointer movement to its own screen.
+    let (sw, sh) = crate::kvm::virtual_desktop_size();
     network.send_packet_sync(crate::network::WireMessage {
         t: "kvm.layout".to_string(),
         v: Some(1),
         side: Some(side.clone()),
         pc_side: Some(side),
+        sw: Some(sw),
+        sh: Some(sh),
         ..Default::default()
     });
     Ok(())

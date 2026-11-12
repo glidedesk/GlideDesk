@@ -159,16 +159,130 @@ pub fn side_specific_modifier(vk: u16, scan: u32, extended: bool) -> u16 {
     }
 }
 
+/// How far the hand has to travel back towards this screen before control comes
+/// home with it.
+///
+/// A few pixels is not a deliberate return: pointer acceleration and the very
+/// first event after taking control can easily read a little backwards, and with
+/// a tight limit that handed control straight back, so the pointer crossed, came
+/// home, crossed again — the blink on the edge. A real pull back is much longer
+/// than this.
+pub const EDGE_RETURN_DISTANCE: f64 = 24.0;
+
 /// Check if cumulative remote virtual deltas indicate cursor has moved back across the seam to home.
 #[cfg(any(test, not(windows)))]
 pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: f64) -> bool {
     match side {
-        "right" => virtual_remote_x < -8.0,
-        "left" => virtual_remote_x > 8.0,
-        "top" => virtual_remote_y > 8.0,
-        "bottom" => virtual_remote_y < -8.0,
+        "right" => virtual_remote_x < -EDGE_RETURN_DISTANCE,
+        "left" => virtual_remote_x > EDGE_RETURN_DISTANCE,
+        "top" => virtual_remote_y > EDGE_RETURN_DISTANCE,
+        "bottom" => virtual_remote_y < -EDGE_RETURN_DISTANCE,
         _ => false,
     }
+}
+
+/// This computer's whole desktop, across every monitor, in the units its own
+/// pointer API uses (pixels on Windows and Linux, points on macOS).
+#[cfg(any(windows, target_os = "macos"))]
+pub fn virtual_desktop_size() -> (f64, f64) {
+    let (_, _, w, h) = hook_engine::get_virtual_desktop_bounds();
+    (w as f64, h as f64)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn virtual_desktop_size() -> (f64, f64) {
+    let (w, h) = get_linux_backend()
+        .ok()
+        .and_then(|b| b.get_viewport_dimensions().ok())
+        .unwrap_or((1920, 1080));
+    (w as f64, h as f64)
+}
+
+/// How much to multiply a pointer delta so the whole of the other computer's
+/// desktop is reachable from this one.
+///
+/// The two desktops are rarely the same size: a 1366×768 PC beside a 1920×1080
+/// Mac forwarded its deltas unchanged, so moving from the middle of the PC's
+/// screen to its bottom edge moved the Mac's pointer only 768 of its 1080
+/// points. The pointer then stopped at the bottom of the PC's screen while the
+/// person kept pushing, and the lower third of the Mac could not be reached.
+/// Scaling each axis by the ratio of the two sizes means the same fraction of
+/// travel on one desktop covers the same fraction of the other.
+///
+/// Both sizes are in their own pointer units, which is what the two motion
+/// APIs work in. The clamp keeps a bogus or half-reported size from turning a
+/// normal movement into a jump.
+pub fn motion_scale(local_w: f64, local_h: f64, peer_w: f64, peer_h: f64) -> (f64, f64) {
+    if local_w < 2.0 || local_h < 2.0 || peer_w < 2.0 || peer_h < 2.0 {
+        return (1.0, 1.0);
+    }
+    (
+        (peer_w / local_w).clamp(0.25, 4.0),
+        (peer_h / local_h).clamp(0.25, 4.0),
+    )
+}
+
+/// Say once, in the log, how the two desktops differ and what that does to movement.
+///
+/// When pointer travel looks wrong, the first thing worth knowing is whether the two
+/// computers agreed on how big each other's screens are; without this line that has
+/// to be guessed from the behaviour.
+pub fn log_peer_screen(peer_w: f64, peer_h: f64) {
+    let (lw, lh) = virtual_desktop_size();
+    let (sx, sy) = motion_scale(lw, lh, peer_w, peer_h);
+    log::info!(
+        "[KVM] Other desktop is {:.0}x{:.0}; this one is {:.0}x{:.0}, so movement sent there is scaled by {:.3}x{:.3}",
+        peer_w,
+        peer_h,
+        lw,
+        lh,
+        sx,
+        sy
+    );
+}
+
+/// Fractional pointer motion waiting to become whole pixels.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MotionAccumulator {
+    x: f64,
+    y: f64,
+}
+
+impl MotionAccumulator {
+    /// Add a fractional delta and return the whole pixels to move by.
+    ///
+    /// Scaled deltas are fractional (1.4 px is normal when a small screen is
+    /// beside a big one). Rounding each packet on its own loses the fraction
+    /// and the pointer falls behind the hand; forcing a whole pixel from any
+    /// non-zero remainder overshoots instead. The leftover waits here for the
+    /// next packet, so nothing is lost and nothing is invented.
+    pub fn add(&mut self, dx: f64, dy: f64) -> (i32, i32) {
+        self.x += dx;
+        self.y += dy;
+        let ix = self.x.trunc();
+        let iy = self.y.trunc();
+        self.x -= ix;
+        self.y -= iy;
+        (ix as i32, iy as i32)
+    }
+
+    pub fn reset(&mut self) {
+        self.x = 0.0;
+        self.y = 0.0;
+    }
+}
+
+static PENDING_MOTION: Mutex<MotionAccumulator> = Mutex::new(MotionAccumulator { x: 0.0, y: 0.0 });
+
+/// Whole-pixel movement for an incoming fractional delta.
+pub fn accumulate_motion(dx: f64, dy: f64) -> (i32, i32) {
+    PENDING_MOTION.lock().add(dx, dy)
+}
+
+/// Forget a leftover fraction when the pointer is placed rather than moved, so
+/// an old remainder does not nudge it after a jump.
+pub fn reset_pending_motion() {
+    PENDING_MOTION.lock().reset();
 }
 
 #[cfg(target_os = "macos")]
@@ -226,6 +340,13 @@ pub mod macos_ffi {
     pub const kCGMouseButtonCenter: CGMouseButton = 2;
 
     pub const kCGScrollEventUnitLine: CGScrollEventUnit = 1;
+
+    /// Free-form field on every event. This app writes its own marker in it so the
+    /// event tap can tell its injections apart from the person at the desk without
+    /// guessing from timing.
+    pub const kCGEventSourceUserData: u32 = 42;
+    pub const kCGEventSourceUnixProcessID: u32 = 41;
+    pub const kCGEventSourceStateCombinedSessionState: u32 = 0;
 
     pub const kCGKeyboardEventKeycode: u32 = 9;
     pub const kCGScrollWheelEventDeltaAxis1: u32 = 11;
@@ -307,6 +428,12 @@ pub mod macos_ffi {
         pub fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
         pub fn CGEventGetFlags(event: CGEventRef) -> u64;
         pub fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+        pub fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
+        pub fn CGEventSourceCreate(state_id: u32) -> CGEventSourceRef;
+        pub fn CGEventSourceSetLocalEventsSuppressionInterval(
+            source: CGEventSourceRef,
+            seconds: f64,
+        );
         pub fn CGEventKeyboardGetUnicodeString(
             event: CGEventRef,
             max_string_length: u64,
@@ -321,6 +448,9 @@ pub mod macos_ffi {
             display_count: *mut u32,
         ) -> CGError;
         pub fn CGDisplayBounds(display: u32) -> CGRect;
+        pub fn CGMainDisplayID() -> u32;
+        pub fn CGDisplayHideCursor(display: u32) -> CGError;
+        pub fn CGDisplayShowCursor(display: u32) -> CGError;
 
         pub fn CFMachPortCreateRunLoopSource(
             allocator: CFAllocatorRef,
@@ -654,6 +784,66 @@ pub fn handle_injection_result(kind: InjectionErrorKind, result: Result<(), Stri
 
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
 pub const SELF_ECHO_SUPPRESSION_WINDOW_MS: u64 = 25;
+
+/// Stamped into every event this app posts on macOS ("GLID").
+///
+/// Timing alone cannot separate the app's own pointer movement from the person's:
+/// a slow link delivers injected packets further apart than any window short
+/// enough to stay out of the way, and a fast one never leaves a gap at all. The
+/// marker travels with the event, so the tap always knows whose movement it is.
+#[cfg(target_os = "macos")]
+pub const INJECTED_EVENT_MARK: i64 = 0x474C_4944;
+
+#[cfg(target_os = "macos")]
+pub fn mark_injected_event(event: macos_ffi::CGEventRef) {
+    if event.is_null() {
+        return;
+    }
+    unsafe {
+        macos_ffi::CGEventSetIntegerValueField(
+            event,
+            macos_ffi::kCGEventSourceUserData,
+            INJECTED_EVENT_MARK,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn is_injected_event(event: macos_ffi::CGEventRef) -> bool {
+    if event.is_null() {
+        return false;
+    }
+    unsafe {
+        macos_ffi::CGEventGetIntegerValueField(event, macos_ffi::kCGEventSourceUserData)
+            == INJECTED_EVENT_MARK
+    }
+}
+
+/// Who posted this event, as macOS records it. Zero means the system itself
+/// (a real device, or the cursor being put somewhere by a warp).
+#[cfg(target_os = "macos")]
+pub fn injected_event_debug(event: macos_ffi::CGEventRef) -> String {
+    if event.is_null() {
+        return "null".to_string();
+    }
+    unsafe {
+        let user_data = macos_ffi::CGEventGetIntegerValueField(
+            event,
+            macos_ffi::kCGEventSourceUserData,
+        );
+        let pid = macos_ffi::CGEventGetIntegerValueField(
+            event,
+            macos_ffi::kCGEventSourceUnixProcessID,
+        );
+        format!(
+            "userData=0x{:X} (ours=0x{:X}) pid={} ours={}",
+            user_data,
+            INJECTED_EVENT_MARK,
+            pid,
+            std::process::id()
+        )
+    }
+}
 
 pub static LAST_INJECTION_TIMESTAMP_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -1251,10 +1441,14 @@ impl NativeInputInjector {
         record_injection_timestamp();
         if let Some(backend) = get_custom_backend() {
             let _ = backend.warp(960, 540);
+            #[cfg(target_os = "macos")]
+            hook_engine::set_cursor_hidden(false);
             return;
         }
         let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
         Self::recenter_cursor(vx, vy, vw, vh);
+        #[cfg(target_os = "macos")]
+        hook_engine::set_cursor_hidden(false);
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -1313,6 +1507,7 @@ impl NativeInputInjector {
         unsafe {
             let _ = CGWarpMouseCursorPosition(center_pt);
         }
+        hook_engine::note_injected_pointer(center_pt.x, center_pt.y);
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -1420,6 +1615,7 @@ impl NativeInputInjector {
         unsafe {
             let _ = CGWarpMouseCursorPosition(CGPoint { x: x as f64, y: y as f64 });
         }
+        hook_engine::note_injected_pointer(x as f64, y as f64);
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -1611,18 +1807,25 @@ impl NativeInputInjector {
             if !dummy.is_null() {
                 let cur = CGEventGetLocation(dummy);
                 CFRelease(dummy as _);
+                // Keep the pointer on a screen. Warping past the edge does not
+                // stop at it: macOS puts the cursor wherever it is told, so a
+                // longer push from the other computer used to carry it off the
+                // display, where it could not be seen or clicked.
+                let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
                 let target = CGPoint {
-                    x: cur.x + dx as f64,
-                    y: cur.y + dy as f64,
+                    x: (cur.x + dx as f64).clamp(vx as f64, (vx + vw - 1) as f64),
+                    y: (cur.y + dy as f64).clamp(vy as f64, (vy + vh - 1) as f64),
                 };
                 let _ = CGWarpMouseCursorPosition(target);
+                hook_engine::note_injected_pointer(target.x, target.y);
                 let ev = CGEventCreateMouseEvent(
-                    std::ptr::null_mut(),
+                    hook_engine::event_source(),
                     kCGEventMouseMoved,
                     target,
                     kCGMouseButtonLeft,
                 );
                 if !ev.is_null() {
+                    crate::kvm::mark_injected_event(ev);
                     CGEventPost(kCGHIDEventTap, ev);
                     CFRelease(ev as _);
                 }
@@ -1778,8 +1981,9 @@ impl NativeInputInjector {
                 (MouseButton::Middle, false) => (kCGEventOtherMouseUp, kCGMouseButtonCenter),
             };
 
-            let ev = CGEventCreateMouseEvent(std::ptr::null_mut(), ev_type, cur, mouse_btn);
+            let ev = CGEventCreateMouseEvent(hook_engine::event_source(), ev_type, cur, mouse_btn);
             if !ev.is_null() {
+                crate::kvm::mark_injected_event(ev);
                 CGEventPost(kCGHIDEventTap, ev);
                 CFRelease(ev as _);
             }
@@ -1889,7 +2093,7 @@ impl NativeInputInjector {
         unsafe {
             // dy for vertical wheel, dx for horizontal wheel
             let ev = CGEventCreateScrollWheelEvent2(
-                std::ptr::null_mut(),
+                hook_engine::event_source(),
                 kCGScrollEventUnitLine,
                 2,
                 dy,
@@ -1897,6 +2101,7 @@ impl NativeInputInjector {
                 0,
             );
             if !ev.is_null() {
+                crate::kvm::mark_injected_event(ev);
                 CGEventPost(kCGHIDEventTap, ev);
                 CFRelease(ev as _);
             }
@@ -2026,8 +2231,9 @@ impl NativeInputInjector {
         use macos_ffi::*;
         if let Some(mac_code) = keycodes::windows_vk_to_macos_keycode(vk) {
             unsafe {
-                let ev = CGEventCreateKeyboardEvent(std::ptr::null_mut(), mac_code, is_down);
+                let ev = CGEventCreateKeyboardEvent(hook_engine::event_source(), mac_code, is_down);
                 if !ev.is_null() {
+                    crate::kvm::mark_injected_event(ev);
                     CGEventPost(kCGHIDEventTap, ev);
                     CFRelease(ev as _);
                 }
@@ -2604,6 +2810,25 @@ pub mod hook_engine {
             .and_then(|slot| slot.read().ok().map(|g| std::sync::Arc::clone(&g)))
     }
 
+    /// Re-read the state that decides what the hook does.
+    ///
+    /// The cached view is refreshed a few times a second, which is fine for a switch
+    /// somebody flips but not for the moment the pointer crosses: the very next event
+    /// has to know this computer is driving, or it crosses again, takes the pointer a
+    /// second time and resets the distance it is counting from.
+    fn refresh_view_now() {
+        unsafe {
+            if let Some(state) = &APP_STATE {
+                if let Some(slot) = HOOK_VIEW.get() {
+                    let next = std::sync::Arc::new(hook_view(state));
+                    if let Ok(mut g) = slot.write() {
+                        *g = next;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn get_virtual_desktop_bounds() -> (i32, i32, i32, i32) {
         unsafe {
             let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -2614,6 +2839,54 @@ pub mod hook_engine {
                 (0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
             } else {
                 (vx, vy, vw, vh)
+            }
+        }
+    }
+
+    /// Move the pointer now, from the hook's own thread.
+    ///
+    /// The parked position is the origin the next movement is measured from, so
+    /// it has to be in place before that event is worked out. A warp posted to
+    /// the app's main thread can arrive after the next event and turn a small
+    /// hand movement into a jump; `SendInput` runs here and carries the marker
+    /// that keeps the hook from treating the move as the user pushing into the
+    /// edge. If the session refuses input from this thread, fall back to the
+    /// posted warp rather than leave the pointer at the edge.
+    fn park_cursor_now(x: i32, y: i32) {
+        super::record_injection_timestamp();
+        if let Some(backend) = super::get_custom_backend() {
+            let _ = backend.warp(x, y);
+            return;
+        }
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+            MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+        };
+        let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
+        if vw <= 1 || vh <= 1 {
+            return;
+        }
+        let nx = ((x - vx) as f64 * 65_535.0 / (vw - 1) as f64).round() as i32;
+        let ny = ((y - vy) as f64 * 65_535.0 / (vh - 1) as f64).round() as i32;
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: nx,
+                    dy: ny,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE
+                        | MOUSEEVENTF_ABSOLUTE
+                        | MOUSEEVENTF_VIRTUALDESK,
+                    time: 0,
+                    dwExtraInfo: 0x474C4944,
+                },
+            },
+        };
+        unsafe {
+            let sent = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+            if sent != 1 {
+                super::NativeInputInjector::warp_cursor(x, y);
             }
         }
     }
@@ -2799,6 +3072,8 @@ pub mod hook_engine {
                 {
                     log::info!("[KVM] Local mouse took control back from the other computer");
                     state.set_where_input("home");
+                    refresh_view_now();
+                    crate::kvm::reset_pending_motion();
                     crate::fileclip::reset();
                     NativeInputInjector::release_all_keys();
                     let new_snap = state.snapshot();
@@ -2839,6 +3114,7 @@ pub mod hook_engine {
                         }
 
                         state.set_where_input("driving");
+                        refresh_view_now();
                         let new_snap = state.snapshot();
                         let _ = app.emit("state-change", &new_snap);
 
@@ -2873,7 +3149,7 @@ pub mod hook_engine {
                             "bottom" => max_y - 5,
                             _ => m.pt.y,
                         };
-                        NativeInputInjector::warp_cursor(park_x, park_y);
+                        park_cursor_now(park_x, park_y);
                         LAST_PT = POINT { x: park_x, y: park_y };
                         return LRESULT(1);
                     }
@@ -2888,16 +3164,17 @@ pub mod hook_engine {
                             VIRTUAL_REMOTE_Y += dy;
 
                             let returned = match view.side.as_str() {
-                                "right" => VIRTUAL_REMOTE_X < -8.0,
-                                "left" => VIRTUAL_REMOTE_X > 8.0,
-                                "top" => VIRTUAL_REMOTE_Y > 8.0,
-                                "bottom" => VIRTUAL_REMOTE_Y < -8.0,
+                                "right" => VIRTUAL_REMOTE_X < -EDGE_RETURN_DISTANCE,
+                                "left" => VIRTUAL_REMOTE_X > EDGE_RETURN_DISTANCE,
+                                "top" => VIRTUAL_REMOTE_Y > EDGE_RETURN_DISTANCE,
+                                "bottom" => VIRTUAL_REMOTE_Y < -EDGE_RETURN_DISTANCE,
                                 _ => false,
                             };
 
                             if returned {
                                 log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", view.side, VIRTUAL_REMOTE_X);
                                 state.set_where_input("home");
+                                refresh_view_now();
                                 NativeInputInjector::release_all_keys();
                                 let new_snap = state.snapshot();
                                 let _ = app.emit("state-change", &new_snap);
@@ -2919,11 +3196,12 @@ pub mod hook_engine {
                                     "bottom" => max_y - 12,
                                     _ => m.pt.y,
                                 };
-                                // SetCursorPos from this hook thread fails (the thread is not
-                                // attached to the interactive desktop), which used to leave the
-                                // pointer sitting on the edge so the next push produced no
-                                // movement event and the edge never re-armed.
-                                NativeInputInjector::warp_cursor(return_x, return_y);
+                                // Put the pointer just inside the seam so the next push
+                                // produces a movement event the edge can be judged from
+                                // again. This has to happen before the next mouse event is
+                                // worked out, which is why it runs here rather than being
+                                // posted to the main thread.
+                                park_cursor_now(return_x, return_y);
                                 LAST_PT = POINT { x: return_x, y: return_y };
                                 return LRESULT(1);
                             }
@@ -2932,32 +3210,14 @@ pub mod hook_engine {
                                 net.send_motion(dx, dy);
                             }
 
-                            // Keep the pointer inside the desktop so relative moves never
-                            // clamp at a screen edge, but only pull it back when it actually
-                            // gets close: warping on every event raced the next move (the
-                            // warp is posted to the app's main thread), and a delayed warp
-                            // turned a 10 px hand movement into a 250 px jump.
-                            const EDGE_MARGIN: i32 = 24;
-                            let at_edge = m.pt.x >= max_x - EDGE_MARGIN
-                                || m.pt.x <= vx + EDGE_MARGIN
-                                || m.pt.y >= max_y - EDGE_MARGIN
-                                || m.pt.y <= vy + EDGE_MARGIN;
-                            if at_edge {
-                                let park_x = match view.side.as_str() {
-                                    "right" => max_x - 5,
-                                    "left" => vx + 5,
-                                    _ => m.pt.x,
-                                };
-                                let park_y = match view.side.as_str() {
-                                    "top" => vy + 5,
-                                    "bottom" => max_y - 5,
-                                    _ => m.pt.y,
-                                };
-                                NativeInputInjector::warp_cursor(park_x, park_y);
-                                LAST_PT = POINT { x: park_x, y: park_y };
-                            } else {
-                                LAST_PT = m.pt;
-                            }
+                            // Put the pointer back where it crossed before the next
+                            // event arrives, so every event carries only the movement
+                            // the hand made since the last one. This is what lets the
+                            // whole of a bigger screen be reached: the pointer here
+                            // never runs out of screen, because it is never allowed to
+                            // travel — its distance from the entry point *is* this
+                            // event's movement.
+                            park_cursor_now(LAST_PT.x, LAST_PT.y);
                             return LRESULT(1);
                         }
                         WM_LBUTTONDOWN | WM_LBUTTONUP => {
@@ -3130,6 +3390,81 @@ pub mod hook_engine {
     static mut LAST_PT: CGPoint = CGPoint { x: 0.0, y: 0.0 };
     static mut VIRTUAL_REMOTE_X: f64 = 0.0;
     static mut VIRTUAL_REMOTE_Y: f64 = 0.0;
+    static mut CURSOR_HIDDEN: bool = false;
+    /// Where this app last put the pointer on behalf of the other computer.
+    ///
+    /// macOS reports the cursor being put somewhere as an ordinary mouse-moved
+    /// event from the system (no marker, pid 0). It looks exactly like the person
+    /// touching the mouse, and at a seam it also looks like a new crossing, which
+    /// is where the blinking and the two arrows at the edge came from. Keeping the
+    /// spot we moved to lets those events be recognised and ignored.
+    ///
+    /// Stored as bits in atomics because the input thread writes this while the
+    /// tap thread reads it. NaN means "nowhere yet", which never matches a point.
+    static INJECTED_PT_X: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(f64::NAN.to_bits());
+    static INJECTED_PT_Y: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(f64::NAN.to_bits());
+
+    pub fn note_injected_pointer(x: f64, y: f64) {
+        INJECTED_PT_X.store(x.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        INJECTED_PT_Y.store(y.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn injected_pointer() -> (f64, f64) {
+        (
+            f64::from_bits(INJECTED_PT_X.load(std::sync::atomic::Ordering::Relaxed)),
+            f64::from_bits(INJECTED_PT_Y.load(std::sync::atomic::Ordering::Relaxed)),
+        )
+    }
+
+    /// One shared source for the events this app posts, so the suppression interval can
+    /// be shortened once instead of leaking a source per event.
+    static mut EVENT_SOURCE: CGEventSourceRef = std::ptr::null_mut();
+
+    /// Hide this computer's pointer while it is driving the other one.
+    ///
+    /// The pointer is pinned to the seam so movement can be measured from it, and
+    /// leaving it visible there means a second arrow sits blinking on the edge while
+    /// the real one moves on the other screen. macOS keeps the hide count per
+    /// connection, so it comes back by itself if this process ever dies.
+    pub fn set_cursor_hidden(hidden: bool) {
+        unsafe {
+            if hidden == CURSOR_HIDDEN {
+                return;
+            }
+            let display = CGMainDisplayID();
+            if hidden {
+                if CGDisplayHideCursor(display) == 0 {
+                    CURSOR_HIDDEN = true;
+                }
+            } else if CGDisplayShowCursor(display) == 0 {
+                CURSOR_HIDDEN = false;
+            }
+        }
+    }
+
+    /// A short suppression interval keeps the system from swallowing the movement that
+    /// follows a cursor warp, which matters now that the pointer is put back on the
+    /// seam after every event. The default 0.25 s made the pointer feel glued down.
+    unsafe fn configure_event_source() {
+        if !EVENT_SOURCE.is_null() {
+            return;
+        }
+        let source = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+        if !source.is_null() {
+            CGEventSourceSetLocalEventsSuppressionInterval(source, 0.05);
+            EVENT_SOURCE = source;
+        }
+    }
+
+    /// The source every event this app posts is created from.
+    pub fn event_source() -> CGEventSourceRef {
+        unsafe {
+            configure_event_source();
+            EVENT_SOURCE
+        }
+    }
 
     /// Is this app allowed to control the computer? Never shows anything to the user.
     pub fn has_accessibility_permission() -> bool {
@@ -3246,6 +3581,9 @@ pub mod hook_engine {
         }
 
         std::thread::spawn(|| {
+            unsafe {
+                configure_event_source();
+            }
             if !has_accessibility_permission() {
                 log::warn!(
                     "GlideDesk: macOS Accessibility permission is off, so keyboard and mouse \
@@ -3369,6 +3707,7 @@ pub mod hook_engine {
         _refcon: *mut c_void,
     ) -> CGEventRef {
         if r#type == kCGEventTapDisabledByTimeout || r#type == kCGEventTapDisabledByUserInput {
+            set_cursor_hidden(false);
             if let Some(tap) = EVENT_TAP {
                 CGEventTapEnable(tap, true);
             }
@@ -3376,6 +3715,13 @@ pub mod hook_engine {
         }
 
         if event.is_null() {
+            return event;
+        }
+
+        // Movement and clicks this app posted for the other computer are not the
+        // person at this desk. The marker travels with the event, so this is exact
+        // where timing alone could only guess.
+        if crate::kvm::is_injected_event(event) {
             return event;
         }
 
@@ -3402,6 +3748,23 @@ pub mod hook_engine {
 
             let sharing_enabled = snap.kvm.mouse && snap.kvm.linked && snap.kvm.drive_other && !snap.kvm_state.paused;
 
+            // While this computer is driving the other one its pointer is pinned to
+            // the seam and means nothing, so it is hidden: otherwise a second arrow
+            // sits blinking on the edge while the real one moves on the other screen.
+            set_cursor_hidden(is_driving);
+
+            // Putting the pointer down is reported by the system as an ordinary
+            // mouse-moved event. It is not the person at this desk, and at a seam it
+            // also looks like a fresh crossing, which is what made the pointer blink
+            // at the edge and left both computers driving each other.
+            let here = CGEventGetLocation(event);
+            let (inj_x, inj_y) = injected_pointer();
+            let at_injected_point = (here.x - inj_x).abs() < 4.0 && (here.y - inj_y).abs() < 4.0;
+            let is_move = r#type == kCGEventMouseMoved
+                || r#type == kCGEventLeftMouseDragged
+                || r#type == kCGEventRightMouseDragged
+                || r#type == kCGEventOtherMouseDragged;
+
             // A computer the other one is using gives control back as soon as its own
             // mouse is touched: events this app injected were filtered out above, so
             // anything left is the person at this desk. Without this both computers can
@@ -3411,8 +3774,19 @@ pub mod hook_engine {
                     || r#type == kCGEventLeftMouseDown
                     || r#type == kCGEventRightMouseDown)
             {
-                log::info!("[KVM] Local mouse took control back from the other computer");
+                if r#type == kCGEventMouseMoved && at_injected_point {
+                    // The cursor being put where it already is, not a hand moving it.
+                    LAST_PT = here;
+                    return event;
+                }
+                log::info!(
+                    "[KVM] Local mouse took control back from the other computer at ({:.1}, {:.1}); {}",
+                    here.x,
+                    here.y,
+                    crate::kvm::injected_event_debug(event)
+                );
                 state.set_where_input("home");
+                crate::kvm::reset_pending_motion();
                 crate::fileclip::reset();
                 NativeInputInjector::release_all_keys();
                 let new_snap = state.snapshot();
@@ -3423,15 +3797,19 @@ pub mod hook_engine {
                     ..Default::default()
                 };
                 net.send_packet_sync(home_msg);
+                set_cursor_hidden(false);
+                LAST_PT = here;
+                // This event brought control back; it is not also a crossing.
+                return event;
             }
 
             if !is_driving && has_peer && sharing_enabled {
-                if r#type == kCGEventMouseMoved
-                    || r#type == kCGEventLeftMouseDragged
-                    || r#type == kCGEventRightMouseDragged
-                {
+                if is_move {
                     let pt = CGEventGetLocation(event);
                     LAST_PT = pt;
+                    if at_injected_point {
+                        return event;
+                    }
 
                     let crossed = check_edge_crossed(&snap.layout.side, pt.x, pt.y, vx, vy, vw, vh);
 
@@ -3529,27 +3907,14 @@ pub mod hook_engine {
                             net.send_motion(dx, dy);
                         }
 
-                        let park_pt = match snap.layout.side.as_str() {
-                            "right" => CGPoint {
-                                x: (max_x - 5) as f64,
-                                y: pt.y.clamp(vy as f64, (max_y - 1) as f64),
-                            },
-                            "left" => CGPoint {
-                                x: (vx + 5) as f64,
-                                y: pt.y.clamp(vy as f64, (max_y - 1) as f64),
-                            },
-                            "top" => CGPoint {
-                                x: pt.x.clamp(vx as f64, (max_x - 1) as f64),
-                                y: (vy + 5) as f64,
-                            },
-                            "bottom" => CGPoint {
-                                x: pt.x.clamp(vx as f64, (max_x - 1) as f64),
-                                y: (max_y - 5) as f64,
-                            },
-                            _ => pt,
-                        };
-                        let _ = CGWarpMouseCursorPosition(park_pt);
-                        LAST_PT = park_pt;
+                        // Put the pointer back where it crossed before the next
+                        // event arrives, so every event carries only the movement
+                        // the hand made since the last one. This is what lets the
+                        // whole of a bigger screen be reached: the pointer here
+                        // never runs out of screen, because it is never allowed to
+                        // travel — its distance from the entry point *is* this
+                        // event's movement.
+                        let _ = CGWarpMouseCursorPosition(LAST_PT);
                         return std::ptr::null_mut();
                     }
                     kCGEventLeftMouseDown | kCGEventLeftMouseUp => {
@@ -4178,6 +4543,39 @@ mod tests {
     static TEST_MUTEX: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
+    fn motion_scale_maps_a_small_screen_onto_a_big_one() {
+        // A 1366×768 PC beside a 1920×1080 Mac: without scaling the pointer
+        // could only reach two thirds of the Mac before hitting the PC's edge.
+        let (sx, sy) = motion_scale(1366.0, 768.0, 1920.0, 1080.0);
+        assert!((sx - 1920.0 / 1366.0).abs() < 1e-9);
+        assert!((sy - 1080.0 / 768.0).abs() < 1e-9);
+        assert!(sx > 1.0 && sy > 1.0);
+    }
+
+    #[test]
+    fn motion_scale_is_one_for_matching_or_unknown_screens() {
+        assert_eq!(motion_scale(1920.0, 1080.0, 1920.0, 1080.0), (1.0, 1.0));
+        // A peer that has not said how big it is keeps the old 1:1 behaviour.
+        assert_eq!(motion_scale(1920.0, 1080.0, 0.0, 0.0), (1.0, 1.0));
+        // A nonsensical size must not turn a normal move into a jump.
+        assert_eq!(motion_scale(1920.0, 1080.0, 100.0, 10_000_000.0), (0.25, 4.0));
+    }
+
+    #[test]
+    fn motion_accumulator_carries_the_fraction_between_packets() {
+        let mut a = MotionAccumulator::default();
+        // 1.4 px per packet at three packets: 0, 0, then 4 (0.2 left over).
+        assert_eq!(a.add(1.4, 0.0), (1, 0));
+        assert_eq!(a.add(1.4, 0.0), (1, 0));
+        assert_eq!(a.add(1.4, 0.0), (2, 0));
+        assert_eq!(a.add(0.2, 0.0), (0, 0));
+        // Negative motion is carried the same way.
+        a.reset();
+        assert_eq!(a.add(-0.6, -0.6), (0, 0));
+        assert_eq!(a.add(-0.6, -0.6), (-1, -1));
+    }
+
+    #[test]
     fn remote_clipboard_echo_is_swallowed_once() {
         // The other computer put this on our clipboard: the watcher must not send it
         // back, and must not keep suppressing the same text after that one look.
@@ -4330,22 +4728,22 @@ mod tests {
     #[test]
     fn test_return_crossing_detection_math() {
         // Right side: peer is to the right. Returning means moving left past seam (virtual_x < -8.0)
-        assert!(check_edge_returned("right", -8.5, 0.0));
-        assert!(!check_edge_returned("right", -8.0, 0.0));
+        assert!(check_edge_returned("right", -24.5, 0.0));
+        assert!(!check_edge_returned("right", -24.0, 0.0));
         assert!(!check_edge_returned("right", -5.0, 0.0));
 
         // Left side: peer is to the left. Returning means moving right past seam (virtual_x > 8.0)
-        assert!(check_edge_returned("left", 8.5, 0.0));
-        assert!(!check_edge_returned("left", 8.0, 0.0));
+        assert!(check_edge_returned("left", 24.5, 0.0));
+        assert!(!check_edge_returned("left", 24.0, 0.0));
         assert!(!check_edge_returned("left", 5.0, 0.0));
 
         // Top side: peer is above. Returning means moving down past seam (virtual_y > 8.0)
-        assert!(check_edge_returned("top", 0.0, 8.5));
-        assert!(!check_edge_returned("top", 0.0, 8.0));
+        assert!(check_edge_returned("top", 0.0, 24.5));
+        assert!(!check_edge_returned("top", 0.0, 24.0));
 
         // Bottom side: peer is below. Returning means moving up past seam (virtual_y < -8.0)
-        assert!(check_edge_returned("bottom", 0.0, -8.5));
-        assert!(!check_edge_returned("bottom", 0.0, -8.0));
+        assert!(check_edge_returned("bottom", 0.0, -24.5));
+        assert!(!check_edge_returned("bottom", 0.0, -24.0));
 
         // Unknown side never returns
         assert!(!check_edge_returned("unknown", -100.0, -100.0));
