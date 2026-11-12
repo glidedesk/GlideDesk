@@ -1277,6 +1277,22 @@ pub async fn send_files(
     transfer_mgr: State<'_, crate::transport::transfer::TransferManager>,
     app: AppHandle,
 ) -> Result<String, String> {
+    send_files_to_peer(files, target, &network, &state, &phone_mgr, &transfer_mgr, &app).await
+}
+
+/// Send files over the paired link.
+///
+/// Shared by the Files page command and the Ctrl+Alt+V file paste, which runs from
+/// the network loop and has no Tauri command context of its own.
+pub async fn send_files_to_peer(
+    files: Vec<String>,
+    target: Option<String>,
+    network: &NetworkManager,
+    state: &AppState,
+    phone_mgr: &crate::phone::PhoneManager,
+    transfer_mgr: &crate::transport::transfer::TransferManager,
+    app: &AppHandle,
+) -> Result<String, String> {
     if files.is_empty() {
         return Err("No files specified for transfer".to_string());
     }
@@ -1288,7 +1304,7 @@ pub async fn send_files(
     // 1. Select optimal transfer route from real state inputs.
     // Use the same trimmed target the destination resolver saw, otherwise a padded
     // target ("  peer_b  ") silently falls back to an unrelated peer's route.
-    let route = crate::transport::route::select_route_for_peer(target_str, &state, &phone_mgr);
+    let route = crate::transport::route::select_route_for_peer(target_str, state, phone_mgr);
     log::info!(
         "[SendFiles] Selected route mode={} endpoint={} for {} file(s)",
         route.mode,
@@ -1580,7 +1596,7 @@ pub async fn send_files(
                 at: now,
             });
         }
-        push_state(&app, &state);
+        push_state(app, state);
     }
 
     Ok(batch_id)

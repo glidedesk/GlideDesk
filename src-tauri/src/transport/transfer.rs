@@ -289,6 +289,7 @@ pub struct AckNotification {
     pub offset: u64,
 }
 
+#[derive(Clone)]
 pub struct TransferManager {
     pub batches: Arc<RwLock<HashMap<String, TransferBatch>>>,
     pub ack_tx: tokio::sync::broadcast::Sender<AckNotification>,

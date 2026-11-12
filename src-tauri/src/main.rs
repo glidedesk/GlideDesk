@@ -16,6 +16,7 @@ mod inputmethod;
 mod kvm_geom;
 mod pairsync;
 mod fastfile;
+mod fileclip;
 mod media;
 mod network;
 mod pairlimit;

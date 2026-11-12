@@ -2095,7 +2095,7 @@ impl MeshServer {
                 | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
                 | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
                 | "rz.offer" | "rz.take" | "files.batch" | "files.chunk"
-                | "files.done" | "files.ack" | "files.cancel"
+                | "files.done" | "files.ack" | "files.cancel" | "fclip.paste"
                 if !*authenticated.read() =>
             {
                 log::warn!(
@@ -2159,22 +2159,79 @@ impl MeshServer {
                 if !accepted {
                     log::debug!("[KVM] Ignoring a key: keyboard sharing is off here");
                 } else if let Some(vk) = pkt.vk {
-                    let ch = pkt.ch.clone();
-                    let im = pkt.im.clone();
-                    // The input-method switch and the key it applies to both run on the
-                    // main thread, in that order: macOS requires it for its text-input
-                    // services, and on Windows the worker threads are not guaranteed to
-                    // be attached to the interactive desktop, which makes SendInput fail.
-                    {
-                        let _ = app.run_on_main_thread(move || {
-                            Self::inject_key(vk as u16, true, ch, im)
-                        });
+                    // Ctrl+Alt+V is the file paste: ask the computer the files were
+                    // copied on for them, and do not type the V into an app here.
+                    if crate::fileclip::note_key(vk as u16, true) {
+                        log::info!("[FileClip] Ctrl+Alt+V: asking the other computer for its copied files");
+                        let ask = WireMessage {
+                            t: "fclip.paste".to_string(),
+                            v: Some(1),
+                            ..Default::default()
+                        };
+                        let _ = out_tx.send(ask).await;
+                    } else {
+                        let ch = pkt.ch.clone();
+                        let im = pkt.im.clone();
+                        // The input-method switch and the key it applies to both run on the
+                        // main thread, in that order: macOS requires it for its text-input
+                        // services, and on Windows the worker threads are not guaranteed to
+                        // be attached to the interactive desktop, which makes SendInput fail.
+                        {
+                            let _ = app.run_on_main_thread(move || {
+                                Self::inject_key(vk as u16, true, ch, im)
+                            });
+                        }
                     }
                 }
             }
             "k.ku" | "remote.ku" => {
                 if let Some(vk) = pkt.vk {
-                    let _ = app.run_on_main_thread(move || Self::inject_key(vk as u16, false, None, None));
+                    // The release of the V that started a file paste is used up with it.
+                    if !crate::fileclip::note_key(vk as u16, false) {
+                        let _ = app.run_on_main_thread(move || {
+                            Self::inject_key(vk as u16, false, None, None)
+                        });
+                    }
+                }
+            }
+            "fclip.paste" => {
+                // The other computer pressed Ctrl+Alt+V while its pointer is here:
+                // the files copied on this computer travel over as a normal batch
+                // transfer and land in the receiving computer's received folder.
+                if !*authenticated.read() {
+                    log::warn!(
+                        "[Auth] Dropping unauthenticated fclip.paste packet from {}",
+                        peer_addr
+                    );
+                } else {
+                    let copied = crate::fileclip::clipboard_files();
+                    if copied.is_empty() {
+                        log::info!(
+                            "[FileClip] Nothing to paste: no files are copied on this computer"
+                        );
+                    } else {
+                        log::info!(
+                            "[FileClip] Sending {} copied file(s) for the paste",
+                            copied.len()
+                        );
+                        let app = app.clone();
+                        let state = state.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let network = app.state::<NetworkManager>().inner().clone();
+                            let transfer = app
+                                .state::<crate::transport::transfer::TransferManager>()
+                                .inner()
+                                .clone();
+                            let phone = app.state::<crate::phone::PhoneManager>().inner().clone();
+                            if let Err(e) = crate::commands::send_files_to_peer(
+                                copied, None, &network, &state, &phone, &transfer, &app,
+                            )
+                            .await
+                            {
+                                log::warn!("[FileClip] paste failed: {}", e);
+                            }
+                        });
+                    }
                 }
             }
             "clip" => {
@@ -2280,6 +2337,9 @@ impl MeshServer {
             }
             "kvm.home" | "kvm.release" => {
                 state.set_where_input("home");
+                // A shortcut held over the link must not survive the pointer leaving,
+                // or a later V here would turn into a file paste.
+                crate::fileclip::reset();
                 crate::kvm::NativeInputInjector::release_all_keys();
                 // This computer may have followed the other pointer just past the edge.
                 crate::kvm::NativeInputInjector::keep_cursor_visible();
@@ -3818,26 +3878,21 @@ impl NetworkManager {
             let guard = self.active_clients.read();
             // Two computers that dialled each other at the same moment hold a pair of
             // sessions; use only the one both ends agree on.
-            let preferred = if target_dests.is_none() {
-                Some(preferred_session_ids(&self.local_id, &guard))
-            } else {
-                None
-            };
+            let preferred = preferred_session_ids(&self.local_id, &guard);
             for client in guard.values() {
-                if let Some(ref keep) = preferred {
-                    if !keep.contains(&client.id) {
-                        skipped += 1;
-                        continue;
-                    }
-                }
                 let pid = client.peer_id.read().clone();
                 let matches_dest = match &target_dests {
-                    Some(dests) => dests.iter().any(|d| {
-                        d == &client.id
-                            || pid.as_deref() == Some(d.as_str())
-                            || d == &client.peer_addr.ip().to_string()
-                    }),
-                    None => true,
+                    Some(dests) => {
+                        let by_session = dests.iter().any(|d| d == &client.id);
+                        // Naming the peer rather than the session matches both of its
+                        // sessions, so only the agreed one carries the packet.
+                        let by_peer = dests.iter().any(|d| {
+                            pid.as_deref() == Some(d.as_str())
+                                || d == &client.peer_addr.ip().to_string()
+                        });
+                        by_session || (by_peer && preferred.contains(&client.id))
+                    }
+                    None => preferred.contains(&client.id),
                 };
 
                 if matches_dest && (!is_sensitive || *client.authenticated.read()) {
@@ -3890,23 +3945,21 @@ impl NetworkManager {
         let senders: Vec<mpsc::Sender<WireMessage>> = {
             let guard = self.active_clients.read();
             // One session per peer; see `preferred_session_ids`.
-            let preferred = if target_dests.is_none() {
-                Some(preferred_session_ids(&self.local_id, &guard))
-            } else {
-                None
-            };
+            let preferred = preferred_session_ids(&self.local_id, &guard);
             guard
                 .values()
-                .filter(|c| preferred.as_ref().map(|keep| keep.contains(&c.id)).unwrap_or(true))
                 .filter_map(|c| {
                     let pid = c.peer_id.read().clone();
                     let matches_dest = match &target_dests {
-                        Some(dests) => dests.iter().any(|d| {
-                            d == &c.id
-                                || pid.as_deref() == Some(d.as_str())
-                                || d == &c.peer_addr.ip().to_string()
-                        }),
-                        None => true,
+                        Some(dests) => {
+                            let by_session = dests.iter().any(|d| d == &c.id);
+                            let by_peer = dests.iter().any(|d| {
+                                pid.as_deref() == Some(d.as_str())
+                                    || d == &c.peer_addr.ip().to_string()
+                            });
+                            by_session || (by_peer && preferred.contains(&c.id))
+                        }
+                        None => preferred.contains(&c.id),
                     };
 
                     if matches_dest && (!is_sensitive || *c.authenticated.read()) {

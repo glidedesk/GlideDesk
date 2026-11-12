@@ -16,6 +16,7 @@ use crate::state::{AppState, PhoneConnectedDevice};
 use adb::AdbClient;
 use session::ActivePhoneSession;
 
+#[derive(Clone)]
 pub struct PhoneManager {
     pub adb: AdbClient,
     pub session: Arc<RwLock<Option<ActivePhoneSession>>>,

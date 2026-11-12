@@ -1962,6 +1962,7 @@ impl NativeInputInjector {
     pub fn platform_key_event(vk: u16, is_down: bool, extended: bool) {
         main_thread_input::run(move || {
             record_injection_timestamp();
+            hook_engine::note_injected_key();
             Self::platform_key_event_now(vk, is_down, extended)
         });
     }
@@ -2514,10 +2515,11 @@ pub mod main_thread_input {
 pub mod hook_engine {
     use super::*;
     use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_LBUTTON};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, GetSystemMetrics,
-        SetCursorPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK,
+        CallNextHookEx, DispatchMessageW, GetMessageW, GetSystemMetrics, PostThreadMessageW,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK,
         KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN, SM_CXVIRTUALSCREEN,
         SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WH_KEYBOARD_LL,
         WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
@@ -2533,6 +2535,72 @@ pub mod hook_engine {
     static mut LAST_PT: POINT = POINT { x: 0, y: 0 };
     static mut VIRTUAL_REMOTE_X: f64 = 0.0;
     static mut VIRTUAL_REMOTE_Y: f64 = 0.0;
+
+    /// What the two callbacks below are allowed to know, kept up to date by its own thread.
+    ///
+    /// Reading the live state inside a low-level hook meant cloning the whole state and
+    /// enumerating the local network addresses on every pointer event. When that call took
+    /// too long Windows silently unhooked the keyboard, and typing stopped crossing the
+    /// link with no error written anywhere. A tenth-of-a-second-old copy of a few fields
+    /// is more than enough to decide what to do with one event.
+    #[derive(Clone)]
+    struct HookView {
+        driving: bool,
+        has_peer: bool,
+        keyboard: bool,
+        mouse: bool,
+        linked: bool,
+        drive_other: bool,
+        paused: bool,
+        side: String,
+        peer_modifier: Option<u16>,
+    }
+
+    static HOOK_VIEW: std::sync::OnceLock<std::sync::RwLock<std::sync::Arc<HookView>>> =
+        std::sync::OnceLock::new();
+    /// Keyboard events this hook has seen, and keys this app injected itself.
+    static KEY_EVENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static KEY_INJECTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// The last key this hook saw, kept as a number so the watchdog can report it.
+    static LAST_VK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    pub fn note_injected_key() {
+        KEY_INJECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Thread running the hook message loop, so the watchdog can ask it to reinstall.
+    static HOOK_THREAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    const WM_REINSTALL_KEYBOARD: u32 = 0x8000 + 1;
+
+    fn hook_view(state: &AppState) -> HookView {
+        let s = state.inner.read();
+        let os = s
+            .peer
+            .as_ref()
+            .or(s.client.as_ref())
+            .map(|p| p.os.to_ascii_lowercase());
+        let peer_modifier = match os {
+            Some(ref os) if os.starts_with("mac") || os.contains("darwin") => Some(0x5B),
+            Some(ref os) if os.starts_with("win") => Some(0x11),
+            _ => None,
+        };
+        HookView {
+            driving: s.input == "driving",
+            has_peer: s.client.is_some() || s.peer.is_some() || s.link.state == "connected",
+            keyboard: s.kvm.keyboard,
+            mouse: s.kvm.mouse,
+            linked: s.kvm.linked,
+            drive_other: s.kvm.drive_other,
+            paused: s.kvm_state.paused,
+            side: s.layout.side.clone(),
+            peer_modifier,
+        }
+    }
+
+    fn current_view() -> Option<std::sync::Arc<HookView>> {
+        HOOK_VIEW
+            .get()
+            .and_then(|slot| slot.read().ok().map(|g| std::sync::Arc::clone(&g)))
+    }
 
     pub fn get_virtual_desktop_bounds() -> (i32, i32, i32, i32) {
         unsafe {
@@ -2551,6 +2619,80 @@ pub mod hook_engine {
     pub fn start_hooks(app: AppHandle, state: AppState, network: NetworkManager) {
         set_kvm_app_state(state.clone());
         super::main_thread_input::register(app.clone());
+        {
+            let view_state = state.clone();
+            let first = hook_view(&view_state);
+            let _ = HOOK_VIEW.set(std::sync::RwLock::new(std::sync::Arc::new(first)));
+            let refresher = state.clone();
+            std::thread::Builder::new()
+                .name("kvm-hook-view".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    let next = std::sync::Arc::new(hook_view(&refresher));
+                    if let Some(slot) = HOOK_VIEW.get() {
+                        if let Ok(mut g) = slot.write() {
+                            *g = next;
+                        }
+                    }
+                })
+                .ok();
+            // Windows drops a low-level keyboard hook whose callback misses its deadline,
+            // and a dropped hook stops every keystroke crossing without a word. Nothing
+            // here is slow any more, but a long silence is suspicious enough to put the
+            // hook back, and a key this app injects that never comes back through the
+            // hook is proof enough to do it straight away.
+            std::thread::Builder::new()
+                .name("kvm-hook-watch".into())
+                .spawn(move || {
+                    use std::sync::atomic::Ordering;
+                    let mut events = KEY_EVENTS.load(Ordering::Relaxed);
+                    let mut injections = KEY_INJECTIONS.load(Ordering::Relaxed);
+                    let mut suspect = 0u32;
+                    let mut installed_at = std::time::Instant::now();
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        let now_events = KEY_EVENTS.load(Ordering::Relaxed);
+                        let now_injections = KEY_INJECTIONS.load(Ordering::Relaxed);
+                        let moved = now_events != events;
+                        let typed = now_injections != injections;
+                        events = now_events;
+                        injections = now_injections;
+                        if moved {
+                            suspect = 0;
+                        } else if typed {
+                            // Keys this app injected did not come back through the hook,
+                            // which only happens when Windows has dropped the hook.
+                            suspect += 1;
+                        }
+                        let silent_too_long = !moved
+                            && installed_at.elapsed() > std::time::Duration::from_secs(300);
+                        if suspect < 2 && !silent_too_long {
+                            continue;
+                        }
+                        suspect = 0;
+                        installed_at = std::time::Instant::now();
+                        log::debug!(
+                            "[KVM] hook watch: putting the keyboard hook back (events={}, injections={}, last vk=0x{:02X})",
+                            now_events,
+                            now_injections,
+                            LAST_VK.load(Ordering::Relaxed)
+                        );
+                        let tid = HOOK_THREAD.load(Ordering::Relaxed);
+                        if tid != 0 {
+                            unsafe {
+                                let _ = PostThreadMessageW(
+                                    tid,
+                                    WM_REINSTALL_KEYBOARD,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        }
+                    }
+                })
+                .ok();
+        }
+
         unsafe {
             APP_HANDLE = Some(app);
             APP_STATE = Some(state);
@@ -2587,8 +2729,23 @@ pub mod hook_engine {
                     Err(e) => log::error!("[KVM] keyboard hook install failed: {}", e),
                 }
 
+                HOOK_THREAD.store(GetCurrentThreadId(), std::sync::atomic::Ordering::Relaxed);
+
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    if msg.message == WM_REINSTALL_KEYBOARD {
+                        if let Some(old) = KEYBOARD_HOOK.take() {
+                            let _ = UnhookWindowsHookEx(old);
+                        }
+                        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) {
+                            Ok(h) => {
+                                KEYBOARD_HOOK = Some(h);
+                                log::info!("[KVM] Windows keyboard hook put back after a quiet spell");
+                            }
+                            Err(e) => log::error!("[KVM] keyboard hook reinstall failed: {}", e),
+                        }
+                        continue;
+                    }
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -2614,18 +2771,21 @@ pub mod hook_engine {
             }
 
             if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
-                let snap = state.snapshot();
-                let has_peer = snap.client.is_some() || snap.peer.is_some() || snap.link.state == "connected";
-                let is_driving = snap.input == "driving";
+                let Some(view) = current_view() else {
+                    return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
+                };
+                let has_peer = view.has_peer;
+                let is_driving = view.driving;
 
                 let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
                 let max_x = vx + vw;
                 let max_y = vy + vh;
 
-                let sharing_enabled = snap.kvm.mouse && snap.kvm.linked && snap.kvm.drive_other && !snap.kvm_state.paused;
+                let sharing_enabled =
+                    view.mouse && view.linked && view.drive_other && !view.paused;
                 if !is_driving && has_peer && sharing_enabled {
                     // Edge check across the entire virtual multi-monitor desktop
-                    let crossed = match snap.layout.side.as_str() {
+                    let crossed = match view.side.as_str() {
                         "right" => m.pt.x >= max_x - 2,
                         "left" => m.pt.x <= vx + 1,
                         "top" => m.pt.y <= vy + 1,
@@ -2637,7 +2797,7 @@ pub mod hook_engine {
                         LAST_PT = m.pt;
                         VIRTUAL_REMOTE_X = 0.0;
                         VIRTUAL_REMOTE_Y = 0.0;
-                        log::info!("[KVM] Cursor crossed to peer: side={}, pt=({}, {})", snap.layout.side, m.pt.x, m.pt.y);
+                        log::info!("[KVM] Cursor crossed to peer: side={}, pt=({}, {})", view.side, m.pt.x, m.pt.y);
                         let is_left_down = (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0;
                         let is_ctrl_down = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
 
@@ -2646,7 +2806,7 @@ pub mod hook_engine {
                             let _ = app.emit("window-handoff-trigger", serde_json::json!({
                                 "x": m.pt.x,
                                 "y": m.pt.y,
-                                "side": snap.layout.side,
+                                "side": view.side,
                             }));
                         }
 
@@ -2658,7 +2818,7 @@ pub mod hook_engine {
                             t: "kvm.take".to_string(),
                             v: Some(1),
                             edge_at: Some(entry_fraction(
-                                &snap.layout.side,
+                                &view.side,
                                 m.pt.x as f64,
                                 m.pt.y as f64,
                                 vx,
@@ -2675,12 +2835,12 @@ pub mod hook_engine {
                         // movement from there. Without this the first delta after taking was
                         // the whole distance from the real pointer, which read as a huge
                         // movement the other way and handed control straight back.
-                        let park_x = match snap.layout.side.as_str() {
+                        let park_x = match view.side.as_str() {
                             "right" => max_x - 5,
                             "left" => vx + 5,
                             _ => m.pt.x,
                         };
-                        let park_y = match snap.layout.side.as_str() {
+                        let park_y = match view.side.as_str() {
                             "top" => vy + 5,
                             "bottom" => max_y - 5,
                             _ => m.pt.y,
@@ -2699,7 +2859,7 @@ pub mod hook_engine {
                             VIRTUAL_REMOTE_X += dx;
                             VIRTUAL_REMOTE_Y += dy;
 
-                            let returned = match snap.layout.side.as_str() {
+                            let returned = match view.side.as_str() {
                                 "right" => VIRTUAL_REMOTE_X < -8.0,
                                 "left" => VIRTUAL_REMOTE_X > 8.0,
                                 "top" => VIRTUAL_REMOTE_Y > 8.0,
@@ -2708,7 +2868,7 @@ pub mod hook_engine {
                             };
 
                             if returned {
-                                log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, VIRTUAL_REMOTE_X);
+                                log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", view.side, VIRTUAL_REMOTE_X);
                                 state.set_where_input("home");
                                 NativeInputInjector::release_all_keys();
                                 let new_snap = state.snapshot();
@@ -2721,12 +2881,12 @@ pub mod hook_engine {
                                 };
                                 net.send_packet_sync(home_msg);
 
-                                let return_x = match snap.layout.side.as_str() {
+                                let return_x = match view.side.as_str() {
                                     "right" => max_x - 12,
                                     "left" => vx + 12,
                                     _ => m.pt.x,
                                 };
-                                let return_y = match snap.layout.side.as_str() {
+                                let return_y = match view.side.as_str() {
                                     "top" => vy + 12,
                                     "bottom" => max_y - 12,
                                     _ => m.pt.y,
@@ -2755,12 +2915,12 @@ pub mod hook_engine {
                                 || m.pt.y >= max_y - EDGE_MARGIN
                                 || m.pt.y <= vy + EDGE_MARGIN;
                             if at_edge {
-                                let park_x = match snap.layout.side.as_str() {
+                                let park_x = match view.side.as_str() {
                                     "right" => max_x - 5,
                                     "left" => vx + 5,
                                     _ => m.pt.x,
                                 };
-                                let park_y = match snap.layout.side.as_str() {
+                                let park_y = match view.side.as_str() {
                                     "top" => vy + 5,
                                     "bottom" => max_y - 5,
                                     _ => m.pt.y,
@@ -2830,6 +2990,8 @@ pub mod hook_engine {
         if n_code >= 0 && l_param.0 != 0 {
             let msg = w_param.0 as u32;
             let k = *(l_param.0 as *const KBDLLHOOKSTRUCT);
+            KEY_EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            LAST_VK.store(k.vkCode, std::sync::atomic::Ordering::Relaxed);
 
             // Pass on keys this app injected itself, otherwise remote keystrokes would be
             // forwarded back to the computer they came from.
@@ -2838,8 +3000,11 @@ pub mod hook_engine {
             }
 
             if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
-                let snap = state.snapshot();
-                let is_driving = snap.input == "driving";
+                let Some(view) = current_view() else {
+                    return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
+                };
+                let is_driving = view.driving;
+                let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
 
                 // Hotkey to release: Double-tap VK_RMENU (Right Alt, 165) or VK_RCONTROL (163)
                 if (k.vkCode == 165 || k.vkCode == 163) && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
@@ -2881,10 +3046,9 @@ pub mod hook_engine {
                 }
 
                 if is_driving {
-                    let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
                     // Keyboard sharing off: keys typed here stay here. Releases are
                     // still forwarded so nothing stays held on the other computer.
-                    if !snap.kvm.keyboard && is_down {
+                    if !view.keyboard && is_down {
                         return LRESULT(1);
                     }
                     // A right Shift, Ctrl or Alt reported generically keeps its side,
@@ -2906,7 +3070,7 @@ pub mod hook_engine {
                             vk
                         );
                     }
-                    let vk = translate_modifier_vk(vk, peer_command_modifier_vk(&snap)) as u32;
+                    let vk = translate_modifier_vk(vk, view.peer_modifier) as u32;
                     let key_msg = WireMessage {
                         t: if is_down { "k.kd".to_string() } else { "k.ku".to_string() },
                         v: Some(1),
