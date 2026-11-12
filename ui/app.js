@@ -116,13 +116,12 @@
       v.master.set(on);
       v.page.classList.toggle('off', !on);
     }
-    if (v.art) { // while the page's switch is off; on a page without one, until dismissed
+    if (v.art) { // above the settings, which stay usable whether it's a bar or the picture
       let off = !v.def.master;
       try {
         if (v.def.master) off = !v.def.master.get(s);
       } catch (e) { /* its state isn't there yet */ }
       v.art.set(!limited && off);
-      v.body.hidden = !v.art.el.hidden;
     }
     try {
       v.render(s);

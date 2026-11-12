@@ -271,16 +271,30 @@ input[type="text"]:focus, input[type="search"]:focus { outline: none; box-shadow
 .mesh-pop .pill { margin-left: 4px; vertical-align: 2px; }
 .mesh-pop p { margin: 8px 0; }
 
-/* A feature's introduction, in place of its settings until it's turned on (shared/feature-art.js);
-   --fa1 / --fa2 are the two colours of its sidebar icon */
+/* A feature's introduction above its settings, a one-line bar until Show me opens the picture
+   (shared/feature-art.js); --fa1 / --fa2 are the two colours of its sidebar icon */
 .feature-art { --fa1: var(--accent); --fa2: var(--accent); --fa-dev: color-mix(in srgb, var(--text) 74%, var(--content)); --fa-scr: color-mix(in srgb, var(--fa1) 24%, var(--card));
-  display: flex; align-items: center; justify-content: center; min-height: calc(100vh - 190px); padding: 4px 0 28px; }
-.feature-art .fa-hero { width: 100%; max-width: 580px; padding: 20px 22px 24px; text-align: center; border-radius: 20px; border: 1px solid var(--line); box-shadow: var(--shadow);
+  padding: 0 0 16px; }
+.feature-art .fa-hero { width: 100%; max-width: 580px; margin: 0 auto; padding: 20px 22px 24px; text-align: center; border-radius: 20px; border: 1px solid var(--line); box-shadow: var(--shadow);
   background: linear-gradient(165deg, color-mix(in srgb, var(--fa1) 20%, var(--card)), var(--card) 70%); }
 .feature-art svg { display: block; width: 100%; height: auto; }
 .feature-art h2 { margin: 10px 0 6px; font-size: 21px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
 .feature-art p { max-width: 430px; margin: 0 auto 18px; font-size: 14px; line-height: 1.45; color: var(--muted); }
 .feature-art .btn { padding: 5px 20px; }
+.feature-art .fa-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.feature-art .fa-swatch { display: none; }
+/* The bar: the feature's name, Show me and Hide, with the settings right below it */
+.feature-art.is-compact .fa-hero { display: flex; align-items: center; gap: 12px; max-width: none; padding: 9px 14px; border-radius: 14px; text-align: left; box-shadow: none;
+  background: linear-gradient(150deg, color-mix(in srgb, var(--fa1) 14%, var(--card)), var(--card) 60%); }
+.feature-art.is-compact svg { display: none; }
+.feature-art.is-compact .fa-swatch { display: block; flex: none; width: 22px; height: 22px; border-radius: 7px;
+  background: linear-gradient(150deg, var(--fa1), var(--fa2)); }
+.feature-art.is-compact h2 { flex: none; margin: 0; font-size: 14px; font-weight: 650; }
+.feature-art.is-compact p { display: none; }
+.feature-art.is-compact .fa-row { flex: none; margin-left: auto; padding-left: 6px; }
+.feature-art.is-compact .btn { padding: 3px 10px; font-size: 13px; }
+.feature-art .fa-more { border-color: transparent; background: none; box-shadow: none; color: var(--accent); }
+.feature-art .fa-more:hover { background: var(--accent-soft); }
 .feature-art .fa-s1 { stop-color: var(--fa1); }
 .feature-art .fa-s2 { stop-color: var(--fa2); }
 .feature-art .fa-bg { fill: var(--fa1); opacity: 0.18; }

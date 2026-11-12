@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A feature's page shows its settings straight away**: the picture that introduces a feature (Cursor, Keyboard, Clipboard, Receive screen, Share screen, Files, Terminal, Apps, Audio, Camera, Notifications) used to stand in place of the settings, leaving only Dismiss — so the page looked like an advert with nothing in it. It is now a one line bar above the settings (the feature's name, Show me, Hide); Show me opens the picture, Show less folds it back, and Hide puts it away as before. The settings stay usable in every state.
+
 ### Fixed
 
 - **A paired computer lost the pairing when the other one went away**: the disconnect paths cleared the paired record (and a live client overwrote its token with `None`), so unplugging or restarting meant a new code. A pairing now survives a disconnect, sleep and restart: it is written to a small `pairs.json` (the token is kept there, never in the state the window sees), loaded at startup, and only Forget clears it. Test: `pairing_survives_disconnect_and_client_updates`.

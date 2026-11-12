@@ -1,16 +1,16 @@
 ﻿// GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// An introduction to a feature, on its page in place of the settings: a picture of its own, animated, in
-// the colours of its sidebar icon, its name, what it does, and Dismiss, which shows the settings. On a page
-// with a switch at the top it's there while that's off, and Dismiss holds until GlideDesk starts again; on
-// one without (Files, Terminal, Mount) it's there until dismissed, which is remembered. Every desktop app;
+// An introduction to a feature, above its page's settings: its name, what it does, and Show me, which opens
+// the picture of it, animated, in the colours of its sidebar icon. It stays a one-line bar so the settings
+// are usable straight away; Hide puts it away (on a page with a switch at the top, until that's turned on;
+// on one without (Files, Terminal, Mount), until dismissed, which is remembered). Every desktop app;
 // shared/mesh-intro.js draws devices with device().
 //   FeatureArt.FREE                -> tab ids that work without a connected device; on the others (and Overview's
 //                                     feature cards) switches do nothing while body.no-peer (nothing connected)
 //   FeatureArt.has(id)             -> an introduction for that tab
 //   FeatureArt.device(kind, x, y)  -> 'monitor' | 'laptop' | 'phone' as an outline (shared/mesh-intro.js)
 //   FeatureArt.dismissed(id)
-//   FeatureArt.create(id, { color, keep, onDismiss }) -> { el, set(show) }; color: the tab's (a CSS gradient),
-//     keep: Dismiss is remembered
+//   FeatureArt.create(id, { color, keep, onDismiss }) -> { el, set(show) }; color: the tab's (a CSS
+//     gradient), keep: Hide is remembered. The settings below it are always shown.
 (function () {
   const FREE = ['overview', 'multi', 'general', 'about', 'phone', 'calls', 'messages', 'media', 'pfiles'];
 
@@ -350,13 +350,23 @@
 
   function create(id, { color, keep = false, onDismiss }) {
     const el = document.createElement('div');
-    el.className = 'feature-art';
+    el.className = 'feature-art is-compact';
     el.hidden = true;
     const [c1, c2] = String(color || '').match(/#[0-9a-f]{3,8}\b/gi) || [];
     if (c1) el.style.setProperty('--fa1', c1); // CSSOM: the CSP allows it, style attributes it doesn't
     if (c1) el.style.setProperty('--fa2', c2 || c1);
     let gone = keep && dismissed(id); // dismissed (before, when kept), or now even where that can't be kept
     let built = false;
+    let more = null;
+    let open = false; // the picture; the bar is how it starts
+    function setOpen(v) {
+      open = !!v;
+      el.classList.toggle('is-compact', !open);
+      if (more) {
+        more.textContent = open ? 'Show less' : 'Show me';
+        more.setAttribute('aria-expanded', String(open));
+      }
+    }
     function build() {
       built = true;
       const hero = document.createElement('div');
@@ -372,21 +382,33 @@
         svg.setCurrentTime(1.6);
       }
       const [head, text] = TEXT[id];
+      const swatch = document.createElement('span'); // the bar's: the tab's icon colour
+      swatch.className = 'fa-swatch';
+      swatch.setAttribute('aria-hidden', 'true');
       const h = document.createElement('h2');
       h.textContent = head;
       const p = document.createElement('p');
       p.textContent = text;
+      more = document.createElement('button');
+      more.className = 'btn small fa-more';
+      more.textContent = open ? 'Show less' : 'Show me';
+      more.title = 'Show the picture';
+      more.setAttribute('aria-expanded', String(open));
+      more.onclick = () => setOpen(!open);
       const ok = document.createElement('button');
-      ok.className = 'btn';
-      ok.textContent = 'Dismiss';
-      ok.title = 'Show the settings';
+      ok.className = 'btn small';
+      ok.textContent = 'Hide';
+      ok.title = 'Hide the introduction; the settings stay';
       ok.onclick = () => {
         gone = true;
         if (keep) dismiss(id);
         el.hidden = true;
         onDismiss();
       };
-      hero.append(pic, h, p, ok);
+      const row = document.createElement('div');
+      row.className = 'fa-row';
+      row.append(more, ok);
+      hero.append(swatch, pic, h, p, row);
       el.append(hero);
     }
     return {
