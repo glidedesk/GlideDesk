@@ -1769,7 +1769,7 @@ impl MeshServer {
                     } else {
                         match crate::terminal::install_authorized_key(pubkey) {
                             Ok(()) => {
-                                let (service, svc_message) = crate::terminal::sshd_service();
+                                let (service, svc_message) = crate::terminal::sshd_service_cached();
                                 let running = service == "running";
                                 let accepted =
                                     running && crate::terminal::peer_key_accepted(pubkey);

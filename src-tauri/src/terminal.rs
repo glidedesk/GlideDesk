@@ -76,6 +76,25 @@ fn ssh_bin() -> &'static str {
     "ssh"
 }
 
+/// Start a helper program without letting it put a window on the screen.
+///
+/// On Windows a GUI process that starts a console program (whoami, sc, icacls,
+/// ssh-keygen) hands it a brand-new console window unless told otherwise. In a
+/// background loop that shows up as a black window blinking every few seconds,
+/// which looks like a fault. CREATE_NO_WINDOW is the flag that prevents it.
+fn quiet(cmd: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cmd;
+    }
+}
+
 /// Make the key if it is not there yet, and return the public half. One key per
 /// install: making a new one on every run would lock out the other computer.
 pub fn ensure_key() -> Result<String, String> {
@@ -83,9 +102,12 @@ pub fn ensure_key() -> Result<String, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot make {}: {}", dir.display(), e))?;
     let key = key_path();
     if !key.exists() {
-        let out = Command::new(ssh_keygen_bin())
+        let mut command = Command::new(ssh_keygen_bin());
+        command
             .args(["-t", "ed25519", "-N", "", "-C", "glidedesk", "-f"])
-            .arg(&key)
+            .arg(&key);
+        quiet(&mut command);
+        let out = command
             .output()
             .map_err(|e| format!("ssh-keygen could not start: {}", e))?;
         if !out.status.success() {
@@ -113,16 +135,25 @@ pub fn ensure_key() -> Result<String, String> {
 fn restrict_to_me(path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // `ensure_key` runs every few seconds; the permissions only ever need to be
+        // set once per run, and each `icacls` start is a process.
+        static DONE: AtomicBool = AtomicBool::new(false);
+        if DONE.swap(true, Ordering::Relaxed) {
+            return;
+        }
         let user = local_user();
         if user.is_empty() {
             return;
         }
-        let _ = Command::new("icacls")
+        let mut command = Command::new("icacls");
+        command
             .arg(path)
             .arg("/inheritance:r")
             .arg("/grant:r")
-            .arg(format!("{}:F", user))
-            .output();
+            .arg(format!("{}:F", user));
+        quiet(&mut command);
+        let _ = command.output();
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -176,12 +207,19 @@ fn ssh_home_keys() -> PathBuf {
 fn is_admin() -> bool {
     // Whether this *account* is an administrator, not whether this process is
     // elevated: Windows' sshd reads administrators' keys from a machine-wide file
-    // even when the app runs without elevation.
-    Command::new("whoami")
-        .args(["/groups"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("S-1-5-32-544"))
-        .unwrap_or(false)
+    // even when the app runs without elevation. Group membership does not change
+    // while the app runs, so ask once.
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let mut command = Command::new("whoami");
+        command.arg("/groups");
+        quiet(&mut command);
+        command
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("S-1-5-32-544"))
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -300,8 +338,10 @@ pub fn peer_key_accepted(pubkey: &str) -> bool {
 pub fn sshd_service() -> (String, String) {
     #[cfg(target_os = "macos")]
     {
-        let enabled = Command::new("launchctl")
-            .args(["print", "system/com.openssh.sshd"])
+        let mut command = Command::new("launchctl");
+        command.args(["print", "system/com.openssh.sshd"]);
+        quiet(&mut command);
+        let enabled = command
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -315,7 +355,10 @@ pub fn sshd_service() -> (String, String) {
     }
     #[cfg(target_os = "windows")]
     {
-        let out = Command::new("sc.exe").args(["query", "sshd"]).output();
+        let mut command = Command::new("sc.exe");
+        command.args(["query", "sshd"]);
+        quiet(&mut command);
+        let out = command.output();
         let text = out
             .as_ref()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -334,7 +377,10 @@ pub fn sshd_service() -> (String, String) {
     #[cfg(target_os = "linux")]
     {
         for name in ["sshd", "ssh"] {
-            if let Ok(out) = Command::new("systemctl").args(["is-active", name]).output() {
+            let mut command = Command::new("systemctl");
+            command.args(["is-active", name]);
+            quiet(&mut command);
+            if let Ok(out) = command.output() {
                 if String::from_utf8_lossy(&out.stdout).trim() == "active" {
                     return ("running".to_string(), "sshd is running. The other computer can open a terminal here.".to_string());
                 }
@@ -344,6 +390,32 @@ pub fn sshd_service() -> (String, String) {
     }
     #[allow(unreachable_code)]
     ("unknown".to_string(), String::new())
+}
+
+/// The same answer, remembered for a few seconds.
+///
+/// The loop and every incoming handshake ask whether the server is up. Asking the
+/// system means starting a process, and doing that four times a second is both
+/// wasteful and — on Windows — what a person sees as a window blinking. A short
+/// memory is enough because the state only changes when Set up runs, and that path
+/// asks the system directly.
+pub fn sshd_service_cached() -> (String, String) {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static CACHE: Mutex<Option<(Instant, (String, String))>> = Mutex::new(None);
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((at, value)) = guard.as_ref() {
+            if at.elapsed() < Duration::from_secs(15) {
+                return value.clone();
+            }
+        }
+    }
+    let fresh = sshd_service();
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), fresh.clone()));
+    }
+    fresh
 }
 
 /// Start this computer's SSH server, asking for administrator rights once if the
@@ -589,7 +661,7 @@ pub fn write_ssh_alias(host: &str, user: &str) {
 /// Read this computer's SSH server state into the tab once, so the row is not blank
 /// before the other computer has said anything.
 fn refresh_local_service(app: &AppHandle, state: &AppState) {
-    let (service, message) = sshd_service();
+    let (service, message) = sshd_service_cached();
     {
         let mut s = state.inner.write();
         s.terminal.server.service = service;
@@ -633,8 +705,10 @@ pub fn start(app: AppHandle, network: NetworkManager) {
             let state = app.state::<AppState>();
             refresh_local_service(&app, &state);
         }
+        let mut tick: u64 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            tick += 1;
 
             let state = app.state::<AppState>();
             let (enabled, allow, current_status) = {
@@ -665,8 +739,11 @@ pub fn start(app: AppHandle, network: NetworkManager) {
             };
 
             // Offer our key so the other computer can let us in. It answers with its
-            // own user name; until then the tab says it is waiting.
-            if allow {
+            // own user name; until then the tab says it is waiting. Once both sides
+            // agree there is nothing to ask, so it is only repeated now and then in
+            // case one of them restarts.
+            let worth_asking = current_status != "ready" || tick % 15 == 1;
+            if allow && worth_asking {
                 if let (Ok(public), Some(pid)) = (ensure_key(), peer.peer_id.clone()) {
                     let pkt = crate::network::WireMessage {
                         t: "terminal.key".to_string(),
