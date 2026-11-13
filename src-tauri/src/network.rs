@@ -2573,7 +2573,10 @@ impl MeshServer {
                 crate::fileclip::reset();
                 crate::kvm::NativeInputInjector::release_all_keys();
                 // This computer may have followed the other pointer just past the edge.
+                // Bringing it in also disarms the edge: control has just changed hands,
+                // so a pointer still resting on the seam must not hand it straight back.
                 crate::kvm::NativeInputInjector::keep_cursor_visible();
+                crate::kvm::reset_edge_dwell();
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
             }

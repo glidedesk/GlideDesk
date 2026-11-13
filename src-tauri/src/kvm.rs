@@ -65,6 +65,16 @@ static EDGE_TOUCHED_AT_MS: std::sync::atomic::AtomicU64 =
 /// cannot inherit it.
 static EDGE_TOUCHED_SIDE: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(0);
+/// Whether a new edge touch may start a dwell.
+///
+/// A hand that has just come home is still resting on the seam it travelled back
+/// through, so every event there looked like a fresh push: the pointer crossed,
+/// came home and crossed again, without the hand ever leaving the edge. Once
+/// control has changed hands the dwell stays disarmed until the pointer has been
+/// seen somewhere other than the seam, which makes each handover one deliberate
+/// trip rather than a blink between the two computers.
+static EDGE_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 fn edge_code(side: &str) -> u8 {
     match side {
@@ -76,17 +86,21 @@ fn edge_code(side: &str) -> u8 {
     }
 }
 
-/// Forget an edge touch in progress (after a crossing, a return, or a click).
+/// Forget an edge touch in progress and keep it forgotten until the pointer has
+/// moved away from the edge again (after a crossing, a return, or a click).
 pub fn reset_edge_dwell() {
     EDGE_TOUCHED_AT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     EDGE_TOUCHED_SIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+    EDGE_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// True once the pointer has *stayed* on the edge long enough to mean it.
 ///
 /// The first event that reaches the edge only starts the clock; the pointer has to
 /// still be there `EDGE_DWELL_MS` later, which needs movement events to keep coming.
-/// Moving away clears it, so the next approach starts over.
+/// Moving away clears it, so the next approach starts over — and re-arms it, which
+/// is what stops a pointer still sitting on the seam after a handover from handing
+/// itself straight back.
 pub fn edge_push_ready(
     side: &str,
     pt_x: f64,
@@ -105,7 +119,12 @@ pub fn edge_push_ready(
         _ => false,
     };
     if !touching {
-        reset_edge_dwell();
+        EDGE_TOUCHED_AT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        EDGE_TOUCHED_SIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+        EDGE_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+        return false;
+    }
+    if !EDGE_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
     let code = edge_code(side);
@@ -265,6 +284,38 @@ pub fn side_specific_modifier(vk: u16, scan: u32, extended: bool) -> u16 {
 /// home, crossed again — the blink on the edge. A real pull back is much longer
 /// than this.
 pub const EDGE_RETURN_DISTANCE: f64 = 24.0;
+
+/// How far inside the desktop the pointer is put whenever it is placed back
+/// after control changed hands.
+///
+/// Exactly on the edge still counts as touching it (see `edge_push_ready`), so a
+/// pointer left there handed control straight back at the first twitch of the
+/// hand — and once a resting pointer can finish its dwell on its own, it handed
+/// it back without anyone touching anything: the arrow blinked between the two
+/// computers. A dozen pixels is inside far enough that handing control over has
+/// to be deliberate, and close enough that the pointer still shows up where
+/// control came back.
+pub const SEAM_INSET: i32 = 12;
+
+/// Clamp a pointer position to somewhere usable and off every seam.
+pub fn clamp_inside_desktop(
+    x: f64,
+    y: f64,
+    vx: i32,
+    vy: i32,
+    vw: i32,
+    vh: i32,
+    inset: i32,
+) -> (i32, i32) {
+    // A tiny desktop cannot honour the full inset on both sides; never invert.
+    let max_ix = ((vw - 1) / 2).max(0) as f64;
+    let max_iy = ((vh - 1) / 2).max(0) as f64;
+    let ix = (inset.max(0) as f64).min(max_ix);
+    let iy = (inset.max(0) as f64).min(max_iy);
+    let cx = x.clamp(vx as f64 + ix, (vx + vw - 1) as f64 - ix);
+    let cy = y.clamp(vy as f64 + iy, (vy + vh - 1) as f64 - iy);
+    (cx.round() as i32, cy.round() as i32)
+}
 
 /// Where the pointer waits while this computer drives the other one.
 ///
@@ -1838,10 +1889,10 @@ impl NativeInputInjector {
         let along_y = vy + (frac * (vh - 1) as f64).round() as i32;
         let along_x = vx + (frac * (vw - 1) as f64).round() as i32;
         let (x, y) = match side {
-            "left" => (vx + 1, along_y),
-            "right" => (vx + vw - 2, along_y),
-            "top" => (along_x, vy + 1),
-            "bottom" => (along_x, vy + vh - 2),
+            "left" => (vx + SEAM_INSET, along_y),
+            "right" => (vx + vw - 1 - SEAM_INSET, along_y),
+            "top" => (along_x, vy + SEAM_INSET),
+            "bottom" => (along_x, vy + vh - 1 - SEAM_INSET),
             _ => return,
         };
         #[cfg(windows)]
@@ -1864,20 +1915,23 @@ impl NativeInputInjector {
         let along_y = (frac * (vh - 1) as f64).round() as i32;
         let along_x = (frac * (vw - 1) as f64).round() as i32;
         let (x, y) = match side {
-            "left" => (1, along_y),
-            "right" => (vw - 2, along_y),
-            "top" => (along_x, 1),
-            "bottom" => (along_x, vh - 2),
+            "left" => (SEAM_INSET, along_y),
+            "right" => (vw - 1 - SEAM_INSET, along_y),
+            "top" => (along_x, SEAM_INSET),
+            "bottom" => (along_x, vh - 1 - SEAM_INSET),
             _ => return,
         };
         Self::warp_cursor(x, y);
     }
 
-    /// Pull the pointer back onto a display if it was pushed just past an edge.
+    /// Bring the pointer back onto a display after the other computer let go.
     ///
-    /// The driven computer follows the other computer's pointer, and the last few pixels
-    /// of movement can land outside the screen. When control comes back here the pointer
-    /// has to be somewhere the user can see it.
+    /// The driven computer follows the other computer's pointer, and the last few
+    /// pixels of movement can land on or past the edge of a screen. When control
+    /// comes back the pointer has to be somewhere the user can see it *and* off the
+    /// seam: a pointer resting exactly on the edge counts as still touching it, so
+    /// the first twitch of the hand — or the dwell finishing on its own — handed
+    /// control straight back and the arrow blinked between the two computers.
     pub fn keep_cursor_visible() {
         let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
         if vw <= 2 || vh <= 2 {
@@ -1886,15 +1940,12 @@ impl NativeInputInjector {
         let Some((x, y)) = Self::cursor_position() else {
             return;
         };
-        let min_x = vx as f64 + 1.0;
-        let max_x = (vx + vw - 2) as f64;
-        let min_y = vy as f64 + 1.0;
-        let max_y = (vy + vh - 2) as f64;
-        if x < min_x || x > max_x || y < min_y || y > max_y {
-            let cx = x.clamp(min_x, max_x).round() as i32;
-            let cy = y.clamp(min_y, max_y).round() as i32;
-            log::info!("[KVM] Pulling pointer back on screen: ({:.0}, {:.0}) -> ({}, {})", x, y, cx, cy);
+        let (cx, cy) = clamp_inside_desktop(x, y, vx, vy, vw, vh, SEAM_INSET);
+        if (cx as f64 - x).abs() >= 0.5 || (cy as f64 - y).abs() >= 0.5 {
+            log::info!("[KVM] Bringing pointer in from the seam: ({:.0}, {:.0}) -> ({}, {})", x, y, cx, cy);
             Self::warp_cursor(cx, cy);
+            // Putting the pointer somewhere is not a decision to hand control over.
+            reset_edge_dwell();
         }
     }
 
@@ -3312,6 +3363,9 @@ pub mod hook_engine {
                     crate::kvm::reset_pending_motion();
                     crate::fileclip::reset();
                     NativeInputInjector::release_all_keys();
+                    // The pointer is standing on the seam the other computer left it
+                    // on. Touching the mouse there is not a push back across it.
+                    crate::kvm::reset_edge_dwell();
                     let new_snap = state.snapshot();
                     let _ = app.emit("state-change", &new_snap);
                     let home = WireMessage {
@@ -3423,13 +3477,13 @@ pub mod hook_engine {
                                 net.send_packet_sync(home_msg);
 
                                 let return_x = match view.side.as_str() {
-                                    "right" => max_x - 12,
-                                    "left" => vx + 12,
+                                    "right" => max_x - SEAM_INSET,
+                                    "left" => vx + SEAM_INSET,
                                     _ => m.pt.x,
                                 };
                                 let return_y = match view.side.as_str() {
-                                    "top" => vy + 12,
-                                    "bottom" => max_y - 12,
+                                    "top" => vy + SEAM_INSET,
+                                    "bottom" => max_y - SEAM_INSET,
                                     _ => m.pt.y,
                                 };
                                 // Put the pointer just inside the seam so the next push
@@ -4114,6 +4168,9 @@ pub mod hook_engine {
                 crate::kvm::reset_pending_motion();
                 crate::fileclip::reset();
                 NativeInputInjector::release_all_keys();
+                // The pointer is standing on the seam the other computer left it
+                // on. Touching the mouse there is not a push back across it.
+                super::reset_edge_dwell();
                 let new_snap = state.snapshot();
                 let _ = app.emit("state-change", &new_snap);
                 let home_msg = WireMessage {
@@ -4236,10 +4293,10 @@ pub mod hook_engine {
                             net.send_packet_sync(home_msg);
 
                             let return_pt = match snap.layout.side.as_str() {
-                                "right" => CGPoint { x: (max_x - 12) as f64, y: pt.y },
-                                "left" => CGPoint { x: (vx + 12) as f64, y: pt.y },
-                                "top" => CGPoint { x: pt.x, y: (vy + 12) as f64 },
-                                "bottom" => CGPoint { x: pt.x, y: (max_y - 12) as f64 },
+                                "right" => CGPoint { x: (max_x - SEAM_INSET) as f64, y: pt.y },
+                                "left" => CGPoint { x: (vx + SEAM_INSET) as f64, y: pt.y },
+                                "top" => CGPoint { x: pt.x, y: (vy + SEAM_INSET) as f64 },
+                                "bottom" => CGPoint { x: pt.x, y: (max_y - SEAM_INSET) as f64 },
                                 _ => pt,
                             };
                             let _ = CGWarpMouseCursorPosition(return_pt);
@@ -4745,13 +4802,13 @@ fn run_linux_x11_capture_loop(
                 network.send_packet_sync(home_msg);
 
                 let return_x = match snap.layout.side.as_str() {
-                    "right" => max_x - 12,
-                    "left" => vx + 12,
+                    "right" => max_x - SEAM_INSET,
+                    "left" => vx + SEAM_INSET,
                     _ => root_x,
                 };
                 let return_y = match snap.layout.side.as_str() {
-                    "top" => vy + 12,
-                    "bottom" => max_y - 12,
+                    "top" => vy + SEAM_INSET,
+                    "bottom" => max_y - SEAM_INSET,
                     _ => root_y,
                 };
                 let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, return_x as i16, return_y as i16);
@@ -5150,6 +5207,47 @@ mod tests {
     }
 
     #[test]
+    fn a_pointer_brought_back_from_a_seam_is_not_lying_on_it() {
+        // The position the pointer is put at when control comes back must not count
+        // as touching the edge, or the next twitch of the hand — or the dwell
+        // finishing by itself — hands control straight back.
+        for (vx, vy, vw, vh) in [
+            (0, 0, 1920, 1080),
+            (0, 0, 1366, 768),
+            (-1920, -200, 3840, 1440),
+            (0, 0, 1024, 768),
+        ] {
+            for (x, y) in [
+                (vx as f64 - 5.0, vy as f64 - 5.0),
+                (vx as f64, vy as f64),
+                ((vx + vw) as f64 - 1.0, (vy + vh) as f64 - 1.0),
+                ((vx + vw) as f64, (vy + vh) as f64),
+                (vx as f64, (vy + vh) as f64),
+            ] {
+                let (cx, cy) = clamp_inside_desktop(x, y, vx, vy, vw, vh, SEAM_INSET);
+                assert!(
+                    !check_edge_crossed("left", cx as f64, cy as f64, vx, vy, vw, vh),
+                    "({cx},{cy}) still on the left seam of {vw}x{vh}"
+                );
+                assert!(!check_edge_crossed("right", cx as f64, cy as f64, vx, vy, vw, vh));
+                assert!(!check_edge_crossed("top", cx as f64, cy as f64, vx, vy, vw, vh));
+                assert!(!check_edge_crossed("bottom", cx as f64, cy as f64, vx, vy, vw, vh));
+                assert!(pointer_report_inside(cx, cy, vx, vy, vw, vh));
+            }
+            // A position that is already usable is left exactly where it is.
+            let mid = (vx + vw / 2, vy + vh / 2);
+            assert_eq!(
+                clamp_inside_desktop(mid.0 as f64, mid.1 as f64, vx, vy, vw, vh, SEAM_INSET),
+                mid
+            );
+        }
+
+        // A desktop smaller than twice the inset must not invert its own bounds.
+        let (cx, cy) = clamp_inside_desktop(0.0, 0.0, 0, 0, 10, 8, SEAM_INSET);
+        assert!((0..10).contains(&cx) && (0..8).contains(&cy));
+    }
+
+    #[test]
     fn entry_fraction_maps_the_crossing_point_onto_the_edge() {
         // 1920x1080 screen at the origin: crossing half way down lands at 0.5.
         assert!((entry_fraction("left", 0.0, 540.0, 0, 0, 1920, 1080) - 0.5).abs() < 1e-6);
@@ -5229,10 +5327,18 @@ mod tests {
         assert!(!edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_100));
         assert!(edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_270));
 
-        // A clock left over from one edge does not carry to the opposite one.
+        // A handover leaves the pointer on the seam it travelled back through.
+        // Sitting there must not start a new dwell: at that point the machine has
+        // only just given control away or taken it back, and a pointer that rested
+        // on the edge used to cross again by itself.
         assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_000));
-        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_100));
-        assert!(edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_170));
+        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_400));
+
+        // Being seen anywhere else arms the next push...
+        assert!(!edge_push_ready("right", 1000.0, 500.0, 0, 0, 1920, 1080, 3_450));
+        // ...and that push then starts its own clock.
+        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_500));
+        assert!(edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_670));
         reset_edge_dwell();
     }
 
