@@ -3721,6 +3721,53 @@ pub mod hook_engine {
         }
     }
 
+    /// Set while a wake-up event is already on its way.
+    static EDGE_WAKE_PENDING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Give the edge dwell the event it needs when the hand has stopped moving.
+    ///
+    /// `edge_push_ready` measures how long the pointer has stayed on the edge, but
+    /// it can only notice that on another pointer event. A mouse pushed into the
+    /// edge sends none once the pointer cannot go any further, so the dwell never
+    /// finished and the other computer was never asked for the pointer. Only
+    /// synthetic input, which always sends the next event, crossed. Post one move
+    /// at the same place once the dwell has passed; the ordinary crossing code
+    /// then handles it as if the hand were still moving.
+    fn schedule_edge_wake() {
+        if EDGE_WAKE_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(EDGE_DWELL_MS + 25));
+            EDGE_WAKE_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            if EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                // The pointer left the edge in the meantime; nothing to finish.
+                return;
+            }
+            unsafe {
+                let dummy = CGEventCreate(std::ptr::null_mut());
+                if dummy.is_null() {
+                    return;
+                }
+                let pt = CGEventGetLocation(dummy);
+                CFRelease(dummy as _);
+                let ev = CGEventCreateMouseEvent(
+                    event_source(),
+                    kCGEventMouseMoved,
+                    pt,
+                    kCGMouseButtonLeft,
+                );
+                if !ev.is_null() {
+                    // Deliberately not marked as injected: this is the wake-up the
+                    // crossing check is waiting for, even though it moves nothing.
+                    CGEventPost(kCGHIDEventTap, ev);
+                    CFRelease(ev as _);
+                }
+            }
+        });
+    }
+
     /// Is this app allowed to control the computer? Never shows anything to the user.
     pub fn has_accessibility_permission() -> bool {
         unsafe { AXIsProcessTrustedWithOptions(std::ptr::null_mut()) != 0 }
@@ -4091,7 +4138,7 @@ pub mod hook_engine {
 
                     // Asked on every move, so that leaving the edge clears the
                     // clock and the next approach starts over.
-                    let crossed = edge_push_ready(
+                    let ready = edge_push_ready(
                             &snap.layout.side,
                             pt.x,
                             pt.y,
@@ -4100,7 +4147,17 @@ pub mod hook_engine {
                             vw,
                             vh,
                             now_ms,
-                        )
+                        );
+                    if !ready && EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+                        // The clock only moves when another event arrives, and a hand
+                        // that has pushed the pointer into the edge sends none: the
+                        // pointer is already as far as it goes. Without this, crossing
+                        // worked with synthetic input (which always sends a next event)
+                        // and not with a mouse. The wake posts one move in place after
+                        // the dwell, and that event finishes the normal crossing code.
+                        schedule_edge_wake();
+                    }
+                    let crossed = ready
                         && check_edge_crossed(&snap.layout.side, pt.x, pt.y, vx, vy, vw, vh);
 
                     if crossed {
