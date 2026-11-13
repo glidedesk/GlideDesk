@@ -1127,6 +1127,124 @@ pub fn net_join_hotspot(ssid: String, key: String) -> Result<(), String> {
     Ok(())
 }
 
+/// What this computer can do about a direct network (host / join), and where it is.
+#[tauri::command]
+pub fn wifi_caps() -> serde_json::Value {
+    crate::transport::wifi::caps()
+}
+
+/// Start a small network of our own for the paired computer to join.
+#[tauri::command]
+pub async fn wifi_host_start() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(crate::transport::wifi::host_start)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn wifi_host_stop() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(crate::transport::wifi::host_stop)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Join the other computer's network, then let discovery find it there.
+#[tauri::command]
+pub async fn wifi_join(ssid: String, key: String) -> Result<serde_json::Value, String> {
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        crate::transport::wifi::join(&ssid, &key)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    joined?;
+    Ok(crate::transport::wifi::state())
+}
+
+#[tauri::command]
+pub async fn wifi_leave() -> Result<serde_json::Value, String> {
+    let left = tauri::async_runtime::spawn_blocking(crate::transport::wifi::leave)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Err(why) = left {
+        log::warn!("[Wifi] Leaving the direct network did not finish: {}", why);
+    }
+    Ok(crate::transport::wifi::state())
+}
+
+// ------------------------------------------------------------------
+// Bluetooth between computers (transport/bt.rs)
+// ------------------------------------------------------------------
+
+/// Where the app keeps its files, so the Bluetooth helper can be found beside it.
+fn resource_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager as _;
+    app.path().resource_dir().ok()
+}
+
+/// What this computer can do over Bluetooth, and whether it is offering now.
+#[tauri::command]
+pub async fn bt_caps(app: AppHandle) -> Result<serde_json::Value, String> {
+    let dir = resource_dir(&app);
+    tauri::async_runtime::spawn_blocking(move || crate::transport::bt::caps(dir.as_deref()))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Offer a direct network over Bluetooth, so the other computer need not type it.
+#[tauri::command]
+pub async fn bt_offer(
+    app: AppHandle,
+    ssid: String,
+    key: String,
+    addr: String,
+    port: u16,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let dir = resource_dir(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let offer = crate::transport::bt::DirectOffer::new(
+            &name,
+            &ssid,
+            &key,
+            &addr,
+            if port == 0 { 47800 } else { port },
+        );
+        crate::transport::bt::offer(dir.as_deref(), &offer)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stop offering over Bluetooth.
+#[tauri::command]
+pub async fn bt_stop() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(crate::transport::bt::stop)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Read a direct network from a nearby computer over Bluetooth.
+#[tauri::command]
+pub async fn bt_read(app: AppHandle, seconds: Option<u64>) -> Result<serde_json::Value, String> {
+    let dir = resource_dir(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::transport::bt::read(dir.as_deref(), seconds.unwrap_or(12))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Nearby devices that offer a direct network, for showing what was found.
+#[tauri::command]
+pub async fn bt_scan(app: AppHandle, seconds: Option<u64>) -> Result<serde_json::Value, String> {
+    let dir = resource_dir(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::transport::bt::scan(dir.as_deref(), seconds.unwrap_or(6))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn net_cancel(app: AppHandle) -> Result<(), String> {
     log::info!("[Network] Cancelling pending network operation");

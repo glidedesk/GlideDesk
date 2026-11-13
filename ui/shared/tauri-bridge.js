@@ -235,6 +235,27 @@
         key: String(o.key != null ? o.key : (o.pass || '')),
       });
     },
+    wifiCaps: () => invoke('wifi_caps'),
+    wifiHostStart: () => invoke('wifi_host_start'),
+    wifiHostStop: () => invoke('wifi_host_stop'),
+    wifiJoin: (ssid, key) => invoke('wifi_join', { ssid: String(ssid || ''), key: String(key || '') }),
+    wifiLeave: () => invoke('wifi_leave'),
+    // Bluetooth between computers (transport/bt.rs): carries the direct
+    // network's name, password and address so nobody types them.
+    btCaps: () => invoke('bt_caps'),
+    btOffer: (o) => {
+      const v = o && typeof o === 'object' ? o : {};
+      return invoke('bt_offer', {
+        ssid: String(v.ssid || ''),
+        key: String(v.key || ''),
+        addr: String(v.addr || ''),
+        port: Number(v.port) || 47800,
+        name: String(v.name || 'GlideDesk'),
+      });
+    },
+    btStop: () => invoke('bt_stop'),
+    btRead: (seconds) => invoke('bt_read', { seconds: Number(seconds) || 12 }),
+    btScan: (seconds) => invoke('bt_scan', { seconds: Number(seconds) || 6 }),
     netLocation: () => invoke('net_location'),
     netWifi: (arg) => invoke('net_wifi', { arg: arg || {} }),
 

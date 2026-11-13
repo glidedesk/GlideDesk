@@ -138,12 +138,217 @@ UI.tab({
     const adbCard = UI.card('Phone screen, mouse and keyboard', [adbRow, adbPairRow]);
 
     const pairedList = el('div');
+
+    // Wi-Fi Direct between the two computers (transport/wifi.rs): for when they are
+    // not on a network they share. Windows hosts a small network, the other joins
+    // it, and the session moves to the address it gets there. Shown only where the
+    // system can do it, so no switch is ever there for show.
+    const directInfo = el('div', { class: 'hint' });
+    const directSsid = el('input', { type: 'text', placeholder: 'Network name', autocomplete: 'off', spellcheck: false, attrs: { 'aria-label': 'Direct network name' } });
+    const directKey = el('input', { type: 'password', placeholder: 'Password', autocomplete: 'off', spellcheck: false, attrs: { 'aria-label': 'Direct network password' } });
+    const directJoin = UI.button('Join', () => joinDirect(), 'small primary');
+    const directCopy = UI.button('Copy', () => api.copyText(directCopyText), 'small');
+    const hostSwitch = UI.switch((v) => hostDirect(v), { label: 'Host a direct network' });
+    const hostRow = UI.row('Host a direct network', 'Windows keeps its own Wi-Fi while it hosts', [directCopy, hostSwitch]);
+    const joinRow = UI.row('Join a direct network', 'For when the two are not on a network they share', [directSsid, directKey, directJoin]);
+    // Bluetooth carries the name and password to the other computer, so nobody
+    // has to type them. It needs no network, which is the point when there is
+    // no network; see transport/bt.rs.
+    const btOfferSw = UI.switch((v) => offerOverBluetooth(v), { label: 'Send the details over Bluetooth' });
+    const btOfferRow = UI.row('Send the details over Bluetooth', 'No password to type on the other computer', [btOfferSw]);
+    const btFind = UI.button('Find over Bluetooth', () => findOverBluetooth(), 'small primary');
+    const btFindRow = UI.row('Have the details sent over Bluetooth', 'For a computer that is hosting a direct network nearby', [btFind]);
+    const directCard = UI.card('Wi-Fi Direct', [hostRow, btOfferRow, joinRow, btFindRow, directInfo]);
+    directCard.hidden = true;
+    btOfferRow.hidden = true;
+    btFindRow.hidden = true;
+    let directCaps = null;
+    let btCaps = null;
+    let directHosting = false;
+    let directOffered = null;
+    let directCopyText = '';
+    const directSay = (text, bad) => {
+      directInfo.textContent = text || '';
+      directInfo.classList.toggle('bad', !!bad);
+    };
+    // Keep the preferences in step: Bluetooth with computers is what makes this
+    // possible, so turning it on here turns it on there too.
+    async function allowBluetoothWithComputers() {
+      if (UI.state && UI.state.net && UI.state.net.blePc === true) return;
+      try { await api.setNet({ blePc: true }); } catch (e) { /* the offer itself says why */ }
+    }
+    async function offerOverBluetooth(on) {
+      if (!on) {
+        btOfferSw.set(false);
+        directOffered = null;
+        try { await api.btStop(); } catch (e) { /* nothing was offering */ }
+        return;
+      }
+      if (!directOffered) {
+        btOfferSw.set(false);
+        directSay('Start the direct network first; then its details can be sent.', true);
+        return;
+      }
+      await allowBluetoothWithComputers();
+      directSay('Offering ' + directOffered.ssid + ' over Bluetooth…');
+      try {
+        await api.btOffer({
+          ssid: directOffered.ssid,
+          key: directOffered.key,
+          addr: directOffered.address || '',
+          port: directOffered.port || 47800,
+          name: (UI.state && UI.state.device && UI.state.device.name) || 'GlideDesk',
+        });
+        btOfferSw.set(true);
+        directSay('Offering ' + directOffered.ssid + ' over Bluetooth. On the other computer, use “Find over Bluetooth”.');
+      } catch (e) {
+        btOfferSw.set(false);
+        directSay(String((e && e.message) || e), true);
+      }
+    }
+    // After joining, the other computer turns up at a new address; connect there,
+    // so the session really runs over the direct network.
+    function dialOnNewNetwork() {
+      const was = (UI.state && UI.state.peer && UI.state.peer.address) || '';
+      const started = Date.now();
+      const look = () => {
+        const st = UI.state || {};
+        const peer = (st.found || []).find((p) => p.address && p.address !== was
+          && st.paired && (p.name === st.paired.macName || p.id === st.paired.macId));
+        if (peer) {
+          api.connectAddress(peer.address + ':' + (peer.port || 47800)).catch(() => {});
+          return;
+        }
+        if (Date.now() - started < 15000) setTimeout(look, 800);
+      };
+      setTimeout(look, 600);
+    }
+    async function findOverBluetooth() {
+      btFind.disabled = true;
+      directSay('Looking for a computer offering its network over Bluetooth…');
+      try {
+        const found = await api.btRead(12);
+        const offer = (found && found.offer) || {};
+        if (!offer.ssid) throw new Error('That computer did not say which network to join.');
+        directSsid.value = offer.ssid;
+        directKey.value = offer.key || '';
+        directSay('Found ' + (offer.name || 'the other computer') + ' offering ' + offer.ssid + '. Joining…');
+        await joinDirect(offer);
+      } catch (e) {
+        directSay(String((e && e.message) || e), true);
+      }
+      btFind.disabled = false;
+    }
+    async function hostDirect(on) {
+      if (on === directHosting) return;
+      directHosting = on;
+      hostSwitch.set(on);
+      directSay(on ? 'Starting the network…' : 'Stopping the network…');
+      try {
+        if (!on) await api.btStop().catch(() => {});
+        btOfferSw.set(false);
+        directOffered = null;
+        btOfferRow.hidden = true;
+        const r = on ? await api.wifiHostStart() : await api.wifiHostStop();
+        if (on && r && r.on) {
+          directOffered = {
+            ssid: r.ssid || '',
+            key: r.key || '',
+            address: r.address || '',
+            port: r.port || 47800,
+          };
+          directCopyText = (r.ssid || '') + ' / ' + (r.key || '');
+          directSay('Network: ' + (r.ssid || '?') + ' · Password: ' + (r.key || '?') + (r.address ? ' · Address: ' + r.address : '')
+            + '. On the other computer, join it here — or turn on Bluetooth below and it types nothing.');
+          // Bluetooth is the way in when the other computer cannot see the
+          // network yet; offer it straight away, and say so if it cannot.
+          btOfferRow.hidden = !(btCaps && btCaps.advertise);
+          if (btOfferRow.hidden === false) {
+            await offerOverBluetooth(true);
+          }
+        } else {
+          directHosting = false;
+          hostSwitch.set(false);
+          directSay(on ? ((r && r.status) || 'The network did not start.') : '', on);
+        }
+      } catch (e) {
+        directHosting = false;
+        hostSwitch.set(false);
+        directSay(String((e && e.message) || e), true);
+      }
+    }
+    // After joining, the other computer turns up at a new address; connect there,
+    // so the session really runs over the direct network.
+    function dialOnNewNetwork() {
+      const was = (UI.state && UI.state.peer && UI.state.peer.address) || '';
+      const started = Date.now();
+      const look = () => {
+        const st = UI.state || {};
+        const peer = (st.found || []).find((p) => p.address && p.address !== was
+          && st.paired && (p.name === st.paired.macName || p.id === st.paired.macId));
+        if (peer) {
+          api.connectAddress(peer.address + ':' + (peer.port || 47800)).catch(() => {});
+          return;
+        }
+        if (Date.now() - started < 15000) setTimeout(look, 800);
+      };
+      setTimeout(look, 600);
+    }
+    async function joinDirect(offer) {
+      const ssid = (offer && offer.ssid) || directSsid.value.trim();
+      const key = (offer && offer.key) || directKey.value;
+      if (!ssid) { directSay('Type the network name the other computer is hosting.', true); return; }
+      directJoin.disabled = true;
+      directSay('Joining ' + ssid + '…');
+      try {
+        const where = await api.wifiJoin(ssid, key);
+        // When Bluetooth said where the host is, go straight there: that address
+        // belongs to the network just joined, so discovery would have to wait.
+        if (offer && offer.addr) {
+          const target = offer.addr + ':' + (offer.port || 47800);
+          directSay('Joined ' + (where && where.ssid ? where.ssid : ssid) + '. Moving the session to ' + target + '…');
+          // A session can only be in one place; leave the old one first, or the
+          // new address is ignored because the app is still connected.
+          try { await api.disconnect(); } catch (e) { /* already idle */ }
+          await new Promise((r) => setTimeout(r, 600));
+          await api.connectAddress(target);
+          directSay('Joined ' + (where && where.ssid ? where.ssid : ssid) + '. Connected to the other computer at ' + target + '.');
+        } else {
+          directSay('Joined ' + (where && where.ssid ? where.ssid : ssid) + '. Looking for the other computer…');
+          dialOnNewNetwork();
+        }
+      } catch (e) {
+        directSay(String((e && e.message) || e), true);
+      }
+      directJoin.disabled = false;
+    }
+    api.wifiCaps().then((c) => {
+      directCaps = c || {};
+      hostRow.hidden = !directCaps.host;
+      joinRow.hidden = !directCaps.join;
+      directCard.hidden = !(directCaps.host || directCaps.join);
+      const on = directCaps.state && directCaps.state.ssid;
+      if (on) directSay('This computer is on ' + on + '.');
+    }).catch(() => {});
+    const refreshBtCaps = () => api.btCaps().then((c) => {
+      btCaps = c || {};
+      btFindRow.hidden = !btCaps.read;
+      // The offer switch belongs with a network that is already up; it is
+      // shown by hostDirect once there is something to offer.
+      if (btCaps.offering && directHosting) btOfferSw.set(true);
+    }).catch(() => {});
+    refreshBtCaps();
+    // Permission asked for on the first look can be granted a moment later;
+    // coming back to the window is when that has happened.
+    window.addEventListener('focus', refreshBtCaps);
+
     body.append(
       UI.card('', [addrRow, ipRow]),
       UI.card('Found nearby', [discRow, foundList, ...bleRows], { actions: [refresh] }),
       hero,
       adbCard,
       pair.el,
+      directCard,
       UI.card('Paired', [pairedList]),
     );
 

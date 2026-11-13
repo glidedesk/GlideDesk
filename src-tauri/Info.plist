@@ -10,5 +10,9 @@
 	<string>GlideDesk sends this computer's sound to the computer it is paired with.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>GlideDesk sends this computer's camera to the computer it is paired with when you turn the camera on.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>GlideDesk uses Bluetooth to reach a nearby computer when the two are not on the same network.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>GlideDesk uses Bluetooth to offer a direct network to a nearby computer.</string>
 </dict>
 </plist>
