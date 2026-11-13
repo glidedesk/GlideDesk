@@ -156,7 +156,7 @@ pub fn scan_app_entries() -> Vec<crate::state::AppEntry> {
 /// the peer's name, so listing this computer's own programs there showed the wrong
 /// thing; ask the peer instead and receive the answer as an `apps.list` packet.
 #[tauri::command]
-pub fn list_apps(
+pub async fn list_apps(
     state: State<'_, AppState>,
     network: State<'_, NetworkManager>,
     app: AppHandle,
@@ -184,6 +184,28 @@ pub fn list_apps(
         t: "apps.want".to_string(),
         v: Some(1),
         ..Default::default()
+    });
+    // A peer running an older version does not know `apps.want`, so nothing comes
+    // back. Stop the spinner after a moment instead of leaving it turning forever.
+    let inner = state.inner.clone();
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        let waiting = {
+            let mut s = inner.write();
+            if s.apps.loading {
+                s.apps.loading = false;
+                s.apps.message =
+                    "The other computer did not answer; it may be an older version".to_string();
+                true
+            } else {
+                false
+            }
+        };
+        if waiting {
+            let snap = inner.read().clone();
+            let _ = app2.emit("state-change", &snap);
+        }
     });
     Ok(())
 }
