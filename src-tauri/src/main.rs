@@ -342,6 +342,9 @@ fn main() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                // Nothing should keep offering a network after the app that
+                // offered it is gone.
+                crate::transport::bt::stop();
                 let window_reg = app_handle.state::<crate::window_manager::ParkedWindowRegistry>();
                 let restored = window_reg.restore_all();
                 if !restored.is_empty() {

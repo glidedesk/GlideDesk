@@ -628,6 +628,8 @@ mod tests {
         assert!(script.contains(CHARACTERISTIC_UUID));
         assert!(script.contains("StartAdvertising"));
         assert!(script.contains("IsPeripheralRoleSupported"));
+        // A copy left behind by a crash would keep yesterday's offer alive.
+        assert!(script.contains("*bt-host.ps1*"));
     }
 
     #[test]
