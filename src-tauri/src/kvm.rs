@@ -51,8 +51,6 @@ impl KvmQueue {
     }
 }
 
-/// Check if cursor coordinates cross the outer edge of the virtual desktop layout.
-#[cfg(any(test, not(windows)))]
 /// How long the pointer has to stay pressed against the edge before control moves.
 ///
 /// Crossing on position alone meant a mouse that was simply flicked to the edge —
@@ -125,6 +123,8 @@ pub fn edge_push_ready(
     true
 }
 
+/// Check if cursor coordinates cross the outer edge of the virtual desktop layout.
+#[cfg(any(test, not(windows)))]
 pub fn check_edge_crossed(side: &str, pt_x: f64, pt_y: f64, vx: i32, vy: i32, vw: i32, vh: i32) -> bool {
     let max_x = (vx + vw) as f64;
     let max_y = (vy + vh) as f64;
