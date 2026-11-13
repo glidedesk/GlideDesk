@@ -3753,11 +3753,14 @@ pub mod hook_engine {
         // computer. Passing it through untouched keeps every control clickable while
         // a peer is connected; intercepting our own clicks makes them land late or
         // not at all, which looks like a frozen window.
-        if CGEventGetIntegerValueField(event, kCGEventTargetUnixProcessID)
-            == std::process::id() as i64
-        {
-            return event;
-        }
+        // Input aimed at this app's own windows belongs to whoever is using the
+        // app, not to the other computer. macOS fills this field with the frontmost
+        // process for ordinary input, so it is only used to keep clicks, keys and
+        // wheel events away from the forwarding code while this computer is at home;
+        // pointer movement still goes through, because crossing the screen edge is
+        // how control is handed over and the app is often the frontmost window.
+        let target_is_self = CGEventGetIntegerValueField(event, kCGEventTargetUnixProcessID)
+            == std::process::id() as i64;
 
         // Movement and clicks this app posted for the other computer are not the
         // person at this desk. The marker travels with the event, so this is exact
@@ -3805,6 +3808,15 @@ pub mod hook_engine {
                 || r#type == kCGEventLeftMouseDragged
                 || r#type == kCGEventRightMouseDragged
                 || r#type == kCGEventOtherMouseDragged;
+
+            // While this computer is at home, a click or a keystroke in GlideDesk's
+            // own window must reach that window untouched, and must not travel to the
+            // other computer. Once this computer is driving the other one, the app's
+            // window is behind the pointer and its input belongs to the far side, so
+            // the guard is skipped.
+            if target_is_self && !is_driving && !is_move {
+                return event;
+            }
 
             // A computer the other one is using gives control back as soon as its own
             // mouse is touched: events this app injected were filtered out above, so
