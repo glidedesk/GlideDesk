@@ -109,6 +109,13 @@ fn main() {
             // 3. Start Native KVM Hook Engine (Phase 3: low-level mouse/keyboard & edge detection)
             kvm::hook_engine::start_hooks(handle.clone(), state.clone(), network.clone());
 
+            // A key left held by the last run (or by a link that went away in the
+            // middle of a press) is still down as far as this system knows. Nothing
+            // types after that and the system only beeps — the "keyboard is dead
+            // until a restart" report. Freeing every modifier here makes restarting
+            // the app enough.
+            kvm::NativeInputInjector::release_all_keys();
+
             // 4. Register NetworkManager in Tauri state
             app.manage(network.clone());
 
