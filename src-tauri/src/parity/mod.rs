@@ -72,38 +72,130 @@ pub fn scan_installed_apps() -> Vec<String> {
     apps
 }
 
-#[tauri::command]
-pub fn list_apps(state: State<'_, AppState>, app: AppHandle) -> Result<Vec<String>, String> {
-    let apps = scan_installed_apps();
-    log::info!("[Apps] Discovered {} installed applications on system", apps.len());
+/// What the other computer's Apps page shows. The id is what `launch_app_here`
+/// needs (a bundle or shortcut name, a `.desktop` id, an executable); the name is
+/// what people read. On Linux the file name is not a name — `vim` is "Vim" and
+/// `org.gnome.Nautilus` is "Files" — so the `Name=` line is read too.
+pub fn scan_app_entries() -> Vec<crate::state::AppEntry> {
+    #[cfg(target_os = "linux")]
     {
-        let mut s = state.inner.write();
-        s.apps.loading = false;
-        s.apps.message = if apps.is_empty() {
-            "No applications were found on this computer yet".to_string()
-        } else {
-            String::new()
-        };
-        s.apps.list = apps
-            .iter()
+        let mut out: Vec<crate::state::AppEntry> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut dirs = vec![
+            "/usr/share/applications".to_string(),
+            "/usr/local/share/applications".to_string(),
+        ];
+        if let Ok(home) = std::env::var("HOME") {
+            dirs.push(format!("{}/.local/share/applications", home));
+        }
+        for dir in dirs {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                    continue;
+                }
+                let id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if id.is_empty() || !seen.insert(id.clone()) {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                let mut name = String::new();
+                let mut hidden = false;
+                let mut in_main = false;
+                let mut is_app = false;
+                for line in text.lines() {
+                    let line = line.trim();
+                    if line.starts_with('[') {
+                        in_main = line == "[Desktop Entry]";
+                        continue;
+                    }
+                    if !in_main {
+                        continue;
+                    }
+                    if let Some(v) = line.strip_prefix("Type=") {
+                        is_app = v.trim() == "Application";
+                    } else if let Some(v) = line.strip_prefix("Name=") {
+                        if name.is_empty() {
+                            name = v.trim().to_string();
+                        }
+                    } else if let Some(v) = line.strip_prefix("NoDisplay=") {
+                        hidden = v.trim().eq_ignore_ascii_case("true");
+                    }
+                }
+                if hidden || !is_app {
+                    continue;
+                }
+                if name.is_empty() {
+                    name = id.clone();
+                }
+                out.push(crate::state::AppEntry { id, name, icon: String::new() });
+            }
+        }
+        out.sort_by_key(|a| a.name.to_lowercase());
+        return out;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        scan_installed_apps()
+            .into_iter()
             .map(|name| crate::state::AppEntry {
                 id: name.clone(),
-                name: name.clone(),
+                name,
                 icon: String::new(),
             })
-            .collect();
+            .collect()
     }
-    push_state(&app, &state);
-    Ok(apps)
 }
 
+/// Fill the Apps page with the *other* computer's apps. The card is titled with
+/// the peer's name, so listing this computer's own programs there showed the wrong
+/// thing; ask the peer instead and receive the answer as an `apps.list` packet.
 #[tauri::command]
-pub fn launch_app(name: String) -> Result<(), String> {
+pub fn list_apps(
+    state: State<'_, AppState>,
+    network: State<'_, NetworkManager>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let connected = state.inner.read().link.state == "connected";
+    if !connected {
+        let mut s = state.inner.write();
+        s.apps.loading = false;
+        s.apps.message = "Connect to the other computer to see its apps".to_string();
+        drop(s);
+        push_state(&app, &state);
+        return Ok(());
+    }
+    log::info!("[Apps] Asking the other computer for its apps");
+    {
+        let mut s = state.inner.write();
+        s.apps.loading = true;
+        s.apps.message = String::new();
+        // The old list belonged to this computer; don't show it under the peer's
+        // name while the answer is on its way.
+        s.apps.list.clear();
+    }
+    push_state(&app, &state);
+    network.send_packet_sync(WireMessage {
+        t: "apps.want".to_string(),
+        v: Some(1),
+        ..Default::default()
+    });
+    Ok(())
+}
+
+/// Open an app on this computer. Called either by the peer's `apps.launch`
+/// request or by `launch_app` when the app belongs to the computer being used.
+pub fn launch_app_here(name: &str) -> Result<(), String> {
     log::info!("[Apps] Launching application: {}", name);
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
-            .args(["-a", &name])
+            .args(["-a", name])
             .spawn()
             .map_err(|e| format!("Failed to launch app '{}': {}", name, e))?;
         return Ok(());
@@ -111,7 +203,7 @@ pub fn launch_app(name: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         Command::new("cmd")
-            .args(["/C", "start", &name])
+            .args(["/C", "start", "", name])
             .spawn()
             .map_err(|e| format!("Failed to launch app '{}': {}", name, e))?;
         return Ok(());
@@ -119,13 +211,35 @@ pub fn launch_app(name: String) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         Command::new("gtk-launch")
-            .arg(&name)
+            .arg(name)
             .spawn()
             .map_err(|e| format!("Failed to launch app '{}': {}", name, e))?;
         return Ok(());
     }
     #[allow(unreachable_code)]
     Err(format!("Launching app '{}' is not supported on this platform", name))
+}
+
+/// Open one of the other computer's apps. The Apps page lists what the other
+/// computer has, so the click has to travel there; opening a same-named app here
+/// would be a different program.
+#[tauri::command]
+pub fn launch_app(
+    name: String,
+    state: State<'_, AppState>,
+    network: State<'_, NetworkManager>,
+) -> Result<(), String> {
+    if state.inner.read().link.state != "connected" {
+        return Err("Connect to the other computer first".to_string());
+    }
+    log::info!("[Apps] Asking the other computer to open '{}'", name);
+    network.send_packet_sync(WireMessage {
+        t: "apps.launch".to_string(),
+        v: Some(1),
+        name: Some(name),
+        ..Default::default()
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -210,18 +324,21 @@ pub fn open_mac_drive() -> Result<(), String> {
 
 /// Ask for a folder with the system's own picker. `None` means the person closed
 /// it without choosing, which must leave the setting as it was.
-fn pick_folder(prompt: &str) -> Option<String> {
+fn pick_folder(app: &AppHandle, prompt: &str) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        let script = format!(
-            "POSIX path of (choose folder with prompt \"{}\")",
-            prompt.replace('"', " ")
-        );
-        let out = Command::new("osascript").arg("-e").arg(script).output().ok()?;
-        if !out.status.success() {
-            return None;
+        // Our own process shows the panel: an `osascript` sheet would be handed to
+        // whichever app is frontmost, which cannot answer for us and leaves the
+        // dialog open with a dead button.
+        use tauri_plugin_dialog::DialogExt;
+        // A sheet on our own window, for the same reason as the file picker: the
+        // free-floating panel's browser is hosted elsewhere and goes dead on use.
+        let mut dialog = app.dialog().file().set_title(prompt);
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
         }
-        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let picked = dialog.blocking_pick_folder()?;
+        let p = picked.into_path().ok()?.to_string_lossy().to_string();
         return if p.is_empty() { None } else { Some(p.trim_end_matches('/').to_string()) };
     }
     #[cfg(target_os = "windows")]
@@ -283,10 +400,27 @@ pub fn open_received_folder(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Run the folder picker without blocking the thread that pumps this app's windows.
+///
+/// The picker waits for a person, and doing that on the main thread freezes the
+/// dialog it just opened: the click that should dismiss it cannot be delivered.
+async fn pick_folder_in_background(app: &AppHandle, prompt: &str) -> Option<String> {
+    let prompt = prompt.to_string();
+    let picker = app.clone();
+    tauri::async_runtime::spawn_blocking(move || pick_folder(&picker, &prompt))
+        .await
+        .ok()
+        .flatten()
+}
+
 #[tauri::command]
-pub fn choose_received_folder(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
+pub async fn choose_received_folder(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
     // Change… on the General page: where files sent to this computer are saved.
-    let picked = match pick_folder("Choose where received files are saved") {
+    //
+    // The picker has to run off the main thread: it blocks until the person
+    // chooses, and a main thread stuck in that wait cannot even deliver the
+    // click that dismisses the dialog.
+    let picked = match pick_folder_in_background(&app, "Choose where received files are saved").await {
         Some(p) => p,
         None => return Ok(state.inner.read().files.received_folder.clone()),
     };
@@ -304,9 +438,9 @@ pub fn choose_received_folder(state: State<'_, AppState>, app: AppHandle) -> Res
 }
 
 #[tauri::command]
-pub fn choose_share_folder(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
+pub async fn choose_share_folder(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
     // Choose… on the Files page: the folder this computer offers the other one.
-    let picked = match pick_folder("Choose a folder to share with the other computer") {
+    let picked = match pick_folder_in_background(&app, "Choose a folder to share with the other computer").await {
         Some(p) => p,
         None => return Ok(state.inner.read().files.path.clone()),
     };
@@ -428,7 +562,7 @@ pub fn mute_notif_app(
 #[tauri::command]
 pub fn open_notified_app(id: String) -> Result<(), String> {
     log::info!("[Notifs] Opening notified app: {}", id);
-    launch_app(id)
+    launch_app_here(&id)
 }
 
 // ==========================================

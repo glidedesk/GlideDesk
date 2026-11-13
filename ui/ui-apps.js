@@ -1,8 +1,7 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Apps tab. Mac → PC: the Mac's apps with their icons; click one and it opens on the Mac,
-// its windows appearing here as their own windows with their own taskbar buttons. PC → Mac (phase
-// 13): the Mac opens this PC's apps; each of their windows is streamed on its own to a Mac window.
-// Between two PCs the same both ways (peerapps.js here, pcapps.js there); no Pin to Start.
+// Apps tab. Shows the apps installed on the other computer; clicking one asks that
+// computer to open it. The switch below it decides whether the other computer may do
+// the same with this one's apps.
 'use strict';
 
 UI.tab({
@@ -11,9 +10,8 @@ UI.tab({
   order: 80,
   title: 'Apps',
   color: 'linear-gradient(#bf5af2, #5e5ce6)',
-  desc: 'Use apps from the other computer in their own windows.',
+  desc: 'Open apps on the other computer from here.',
   master: { get: (s) => s.macApps.on || s.pcApps.allow, set: (v) => { UI.api.setMacApps({ on: v }); UI.api.setPcApps({ allow: v }); } },
-  badge: (s) => (s.apps.open + s.pcApps.streaming ? String(s.apps.open + s.pcApps.streaming) : ''),
   build(body) {
     const { el, api } = UI;
     const note = UI.note('warn', '');
@@ -21,11 +19,10 @@ UI.tab({
     const filter = el('input', { type: 'text', placeholder: 'Search apps', autocomplete: 'off', spellcheck: false, attrs: { 'aria-label': 'Search apps' } });
     const grid = el('div', { class: 'app-grid' });
     const status = UI.row('', '');
-    const openCount = UI.row('', '');
     const pcState = UI.row('', '');
     const pair = UI.dirCards(
-      { on: { get: (s) => s.macApps.on, set: (v) => api.setMacApps({ on: v }) }, label: 'Open {name}’s apps on {me}', hint: 'Pick one below', rows: [openCount] },
-      { on: { get: (s) => s.pcApps.allow, set: (v) => api.setPcApps({ allow: v }) }, label: 'Open {me}’s apps on {name}', hint: 'Pick them over there', rows: [pcState] },
+      { on: { get: (s) => s.macApps.on, set: (v) => api.setMacApps({ on: v }) }, label: 'Use {name}’s apps', hint: 'They open on {name}' },
+      { on: { get: (s) => s.pcApps.allow, set: (v) => api.setPcApps({ allow: v }) }, label: 'Let {name} use my apps', hint: 'They open here', rows: [pcState] },
     );
     const listCard = UI.card('Mac apps', [UI.row('Search', '', [filter]), grid, status], { actions: [refresh] });
     body.append(pair.el, note, listCard);
@@ -40,12 +37,9 @@ UI.tab({
       listCard.hidden = !s.macApps.on;
       listCard.querySelector('.card-title > span').textContent = UI.peer(s).name + '’s apps';
       if (connected && s.macApps.on && !asked && !a.list.length) { asked = true; api.listApps(); }
-      openCount.hidden = !a.open;
-      openCount.label.textContent = a.open + ' open here';
       const pa = s.pcApps;
       pcState.hidden = !pa.allow;
-      pcState.label.textContent = pa.streaming ? pa.streaming + ' open on {name}'
-        : !connected ? 'Waiting for {name}' : !pa.macAccepts ? 'Turned off on {name}' : pa.open ? 'Connecting…' : 'None open';
+      pcState.label.textContent = !connected ? 'Waiting for {name}' : (pa.message || 'None yet');
       pcState.setHint(pa.message || '');
       if (!connected) asked = false;
       note.set(a.message || '');

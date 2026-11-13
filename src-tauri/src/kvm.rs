@@ -345,6 +345,7 @@ pub mod macos_ffi {
     /// event tap can tell its injections apart from the person at the desk without
     /// guessing from timing.
     pub const kCGEventSourceUserData: u32 = 42;
+    pub const kCGEventTargetUnixProcessID: u32 = 40;
     pub const kCGEventSourceUnixProcessID: u32 = 41;
     pub const kCGEventSourceStateCombinedSessionState: u32 = 0;
 
@@ -2322,6 +2323,35 @@ impl NativeClipboard {
     }
 }
 
+/// The clipboard handle used whenever this computer writes text or a picture for the
+/// user or on the other computer's behalf.
+///
+/// On X11 the clipboard belongs to whichever client owns the selection, and the data
+/// is gone the moment that client's window is destroyed — unless a clipboard manager
+/// takes it over first. A session without one (a bare window manager, a kiosk box)
+/// would therefore lose every item the other computer sends the instant the setter
+/// returned, so one handle is kept alive for the life of the app instead of a fresh
+/// one per write. On macOS and Windows holding the handle is equally harmless.
+static SHARED_CLIPBOARD: Mutex<Option<NativeClipboard>> = Mutex::new(None);
+
+fn with_shared_clipboard<R>(f: impl FnOnce(&mut NativeClipboard) -> R) -> Option<R> {
+    let mut guard = SHARED_CLIPBOARD.lock();
+    if guard.is_none() {
+        *guard = Some(NativeClipboard::new());
+    }
+    guard.as_mut().map(f)
+}
+
+/// Put `text` on this clipboard so that it outlives this call.
+pub fn set_shared_clipboard_text(text: &str) -> bool {
+    with_shared_clipboard(|cb| cb.set_text(text)).unwrap_or(false)
+}
+
+/// Put a PNG on this clipboard so that it outlives this call.
+pub fn set_shared_clipboard_image(png_bytes: &[u8]) -> bool {
+    with_shared_clipboard(|cb| cb.set_image_png(png_bytes)).unwrap_or(false)
+}
+
 /// The text and picture this computer last received from the other one.
 ///
 /// Putting an item received from the other computer on this clipboard makes the
@@ -3718,6 +3748,17 @@ pub mod hook_engine {
             return event;
         }
 
+        // Input aimed at this app's own windows — its page, its menu, the system
+        // panels it opens — belongs to whoever is using GlideDesk, not to the other
+        // computer. Passing it through untouched keeps every control clickable while
+        // a peer is connected; intercepting our own clicks makes them land late or
+        // not at all, which looks like a frozen window.
+        if CGEventGetIntegerValueField(event, kCGEventTargetUnixProcessID)
+            == std::process::id() as i64
+        {
+            return event;
+        }
+
         // Movement and clicks this app posted for the other computer are not the
         // person at this desk. The marker travels with the event, so this is exact
         // where timing alone could only guess.
@@ -4501,6 +4542,24 @@ pub mod hook_engine {
 
     pub static LINUX_CAPTURE_RUNNING: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
+
+    /// Bounds of the X11 root window, reported in the same shape as the other
+    /// platforms so shared pointer handling does not need a special case.
+    #[cfg(target_os = "linux")]
+    pub fn get_virtual_desktop_bounds() -> (i32, i32, i32, i32) {
+        match get_linux_backend() {
+            Ok(backend) => match backend.get_viewport_dimensions() {
+                Ok((w, h)) if w > 2 && h > 2 => (0, 0, w as i32, h as i32),
+                _ => (0, 0, 0, 0),
+            },
+            Err(_) => (0, 0, 0, 0),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn get_virtual_desktop_bounds() -> (i32, i32, i32, i32) {
+        (0, 0, 0, 0)
+    }
 
     pub fn start_hooks(app: AppHandle, state: AppState, network: NetworkManager) {
         set_kvm_app_state(state.clone());

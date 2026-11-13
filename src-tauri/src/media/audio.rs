@@ -862,9 +862,7 @@ fn run_capture(
                     return;
                 }
                 let mut stereo = Vec::with_capacity(data.len() * 2);
-                if let Some(u) = up_cb.lock().as_mut() {
-                    u.push(data, &mut stereo);
-                }
+                up_cb.lock().push(data, &mut stereo);
                 if !stereo.is_empty() {
                     let _ = tx_cb.try_send(f32_bytes(&stereo));
                 }
@@ -884,9 +882,7 @@ fn run_capture(
                     }
                     let floats: Vec<f32> = data.iter().map(|v| *v as f32 / 32768.0).collect();
                     let mut stereo = Vec::with_capacity(floats.len() * 2);
-                    if let Some(u) = up_cb.lock().as_mut() {
-                        u.push(&floats, &mut stereo);
-                    }
+                    up_cb.lock().push(&floats, &mut stereo);
                     if !stereo.is_empty() {
                         let _ = tx_cb.try_send(f32_bytes(&stereo));
                     }

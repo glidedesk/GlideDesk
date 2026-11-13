@@ -73,6 +73,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(state.clone())
         .manage(window_reg.clone())
         .manage(NativeBridgeManager::new())

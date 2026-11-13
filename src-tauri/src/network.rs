@@ -25,6 +25,37 @@ pub const BEACON_INTERVAL: Duration = Duration::from_millis(2000);
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1000);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(12000);
 
+/// Would dialling `ip:port` reach this computer's own listening socket?
+///
+/// Pairing with ourselves is not obviously wrong-looking: both ends of the socket
+/// are this process, so the handshake matches itself and every pointer move and
+/// clipboard change comes straight back. A peer that reached us through a
+/// translation layer (a virtual machine, a container, a port forward) records the
+/// translated source address — often `127.0.0.1` — as its address, so the next
+/// reconnect would otherwise dial our own port.
+fn is_own_listen_addr(ip: &str, port: u16) -> bool {
+    if port != DEFAULT_PORT {
+        return false;
+    }
+    let Ok(target) = ip.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    // Our server binds 0.0.0.0, which includes every loopback address.
+    if target.is_loopback() {
+        return true;
+    }
+    // And every address of ours: ask the routing table which source it would use.
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .ok()
+        .and_then(|s| {
+            // UDP `connect` sends nothing; it only picks the route.
+            s.connect("192.0.2.1:9").ok()?;
+            s.local_addr().ok()
+        })
+        .map(|local| local.ip() == target)
+        .unwrap_or(false)
+}
+
 /// Pointer-motion coalescing.
 const MOTION_BACKLOG_LIMIT: u64 = 64 * 1024;
 const MOTION_MAX_WAIT: Duration = Duration::from_millis(20);
@@ -531,6 +562,12 @@ pub struct WireMessage {
     pub mac_name: Option<String>,
     #[serde(default)]
     pub side: Option<String>,
+
+    // Apps fields: `apps.want` asks the other computer for its installed apps,
+    // `apps.list` carries them back, and `apps.launch` asks it to open one by id.
+    // Older peers omit the list and get the older behaviour.
+    #[serde(default)]
+    pub apps: Option<Vec<crate::state::AppEntry>>,
     #[serde(rename = "pcSide", default)]
     pub pc_side: Option<String>,
 }
@@ -626,6 +663,7 @@ impl Default for WireMessage {
             mac_name: None,
             side: None,
             pc_side: None,
+            apps: None,
             audio_bytes: None,
             audio_b64: None,
             audio_rate: None,
@@ -2201,6 +2239,7 @@ impl MeshServer {
                 | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
                 | "notif" | "notif.policy" | "audio.policy"
                 | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
+                | "apps.want" | "apps.list" | "apps.launch"
                 | "rz.offer" | "rz.take" | "files.batch" | "files.chunk"
                 | "files.done" | "files.ack" | "files.cancel" | "fclip.paste"
                 if !*authenticated.read() =>
@@ -2354,8 +2393,7 @@ impl MeshServer {
                             max_kb
                         );
                     } else {
-                        let mut cb = crate::kvm::NativeClipboard::new();
-                        cb.set_text(text);
+                        crate::kvm::set_shared_clipboard_text(text);
                         // Let the watcher know this is not a fresh local copy.
                         crate::kvm::note_remote_clipboard_text(text);
                         if state.record_clipboard_item(text.clone(), "in", text.len() as u64, None) {
@@ -2380,8 +2418,7 @@ impl MeshServer {
                     } else {
                         use base64::Engine;
                         if let Ok(png_bytes) = base64::prelude::BASE64_STANDARD.decode(b64) {
-                            let mut cb = crate::kvm::NativeClipboard::new();
-                            if cb.set_image_png(&png_bytes) {
+                            if crate::kvm::set_shared_clipboard_image(&png_bytes) {
                                 crate::kvm::note_remote_clipboard_image(png_bytes.len());
                                 let w = pkt.w.unwrap_or(0);
                                 let h = pkt.height.unwrap_or(0);
@@ -2403,6 +2440,73 @@ impl MeshServer {
                             }
                         }
                     }
+                }
+            }
+            "apps.want" => {
+                // The other computer's Apps page asks what is installed here. Only
+                // answer while this computer allows its apps to be opened from there,
+                // so turning that direction off really turns it off.
+                let allow = state.inner.read().pc_apps.allow;
+                if !allow {
+                    log::info!("[Apps] Refused the other computer's app list: opening is off here");
+                } else {
+                    let list = crate::parity::scan_app_entries();
+                    log::info!("[Apps] Sending our {} apps to the other computer", list.len());
+                    let reply = WireMessage {
+                        t: "apps.list".to_string(),
+                        v: Some(1),
+                        apps: Some(list),
+                        ..Default::default()
+                    };
+                    let _ = out_tx.send(reply).await;
+                }
+            }
+            "apps.list" => {
+                let list = pkt.apps.clone().unwrap_or_default();
+                log::info!("[Apps] Received {} apps from the other computer", list.len());
+                {
+                    let mut s = state.inner.write();
+                    s.apps.loading = false;
+                    s.apps.peer_pc = true;
+                    s.apps.message = if list.is_empty() {
+                        "The other computer has no apps to show".to_string()
+                    } else {
+                        String::new()
+                    };
+                    s.apps.list = list
+                        .into_iter()
+                        .filter(|x| !x.name.trim().is_empty())
+                        .collect();
+                }
+                let snap = state.snapshot();
+                let _ = app.emit("state-change", &snap);
+            }
+            "apps.launch" => {
+                let allow = state.inner.read().pc_apps.allow;
+                // `name` carries the id the other computer's list used, which is what
+                // launching needs here (a bundle name, a `.desktop` id, an exe name).
+                let id = pkt.name.clone().unwrap_or_default();
+                if id.trim().is_empty() {
+                    // Nothing to open.
+                } else if !allow {
+                    log::info!("[Apps] Refused to open '{}': opening is off here", id);
+                } else {
+                    log::info!("[Apps] The other computer asked to open '{}'", id);
+                    let result = crate::parity::launch_app_here(&id);
+                    if let Err(e) = &result {
+                        log::warn!("[Apps] Could not open '{}': {}", id, e);
+                    }
+                    {
+                        // Show the same thing on this computer's Apps page, so its
+                        // "let the other computer use my apps" row says what happened.
+                        let mut s = state.inner.write();
+                        s.pc_apps.message = match &result {
+                            Ok(()) => format!("Opened {} for the other computer", id),
+                            Err(e) => format!("Could not open {}: {}", id, e),
+                        };
+                    }
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
                 }
             }
             "kvm.take" => {
@@ -3291,6 +3395,16 @@ impl NetworkManager {
         // Somebody asked to connect (the user, or our own retry): not "stay disconnected" any more.
         self.state.inner.write().link.manual_off = false;
 
+        // Never dial our own server: the handshake would match itself and the link
+        // would loop its own pointer and clipboard traffic back.
+        if is_own_listen_addr(target_ip, DEFAULT_PORT) {
+            log::info!(
+                "[NetworkManager] Refusing to connect to this computer's own address {}",
+                target_addr
+            );
+            return Err("That address is this computer. Pick the other computer instead.".to_string());
+        }
+
         // The other computer may already have dialled us; don't open a second session.
         if self.state.inner.read().link.state == "connected" {
             return Ok(());
@@ -3513,6 +3627,11 @@ impl NetworkManager {
     pub async fn start_pair(&self, target_addr: &str) -> Result<(), String> {
         let clean_addr = target_addr.trim_start_matches("ws://").trim_start_matches("wss://");
         let target_ip = clean_addr.split(':').next().unwrap_or(clean_addr);
+
+        // Pairing with our own server would hand this computer a copy of itself.
+        if is_own_listen_addr(target_ip, DEFAULT_PORT) {
+            return Err("That address is this computer. Pick the other computer instead.".to_string());
+        }
 
         // Guest pairing: bound the dial, and say what to do if nothing answers.
         self.set_pairing_phase("connecting", "guest", target_ip, target_ip);
@@ -4032,6 +4151,7 @@ impl NetworkManager {
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
                 | "notif" | "notif.policy" | "audio.policy"
+                | "apps.want" | "apps.list" | "apps.launch"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
                 | "files.batch" | "files.chunk" | "files.done" | "files.ack" | "files.cancel"
         );
@@ -4104,6 +4224,7 @@ impl NetworkManager {
                 | "kvm.layout" | "window.handoff.offer" | "window.handoff.return"
                 | "gamepad.event" | "chat.conv" | "notif.reply" | "chat.want"
                 | "notif" | "notif.policy" | "audio.policy"
+                | "apps.want" | "apps.list" | "apps.launch"
                 | "rz.offer" | "rz.take" | "phone.media.ctl"
                 | "files.batch" | "files.chunk" | "files.done" | "files.ack" | "files.cancel"
         );

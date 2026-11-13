@@ -217,9 +217,12 @@ UI.tab({
         ? (otherCount ? otherCount + (otherCount === 1 ? ' item' : ' items') : 'Empty')
         : '';
       peerPill.className = 'pill ' + (other.available ? 'good' : 'muted');
-      openBtn.disabled = !other.available || !f.mountMac;
-      if (browse.open && (!other.available || !f.mountMac)) browse.open = false;
-      folderCard.hidden = !(browse.open && other.available && f.mountMac);
+      // Browsing reads the other computer's folder over the share link; it does not
+      // need the folder mounted as a drive here. Requiring the mount switch made
+      // Open do nothing at all unless that separate feature was turned on.
+      openBtn.disabled = !other.available;
+      if (browse.open && !other.available) browse.open = false;
+      folderCard.hidden = !(browse.open && other.available);
       macDrive.setHint(m.mountMessage || (!f.mountMac || other.available ? ''
         : m.drive ? 'Drive ' + m.drive
           : m.busy === 'mount' ? 'Connecting…'

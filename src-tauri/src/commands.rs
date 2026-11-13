@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 use base64::Engine;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::ShellExt;
 
 #[tauri::command]
@@ -237,8 +237,7 @@ pub fn set_clipboard(
         s.clipboard.images = b;
     }
     if let Some(text) = partial.get("text").and_then(|v| v.as_str()) {
-        let mut cb = crate::kvm::NativeClipboard::new();
-        cb.set_text(text);
+        crate::kvm::set_shared_clipboard_text(text);
 
         let msg = crate::network::WireMessage {
             t: "clip".to_string(),
@@ -258,8 +257,7 @@ pub fn set_clipboard(
 
 #[tauri::command]
 pub fn copy_text(text: String) -> Result<(), String> {
-    let mut cb = crate::kvm::NativeClipboard::new();
-    cb.set_text(&text);
+    crate::kvm::set_shared_clipboard_text(&text);
     Ok(())
 }
 
@@ -1216,8 +1214,7 @@ pub fn copy_history(index: usize, state: State<'_, AppState>) -> Result<(), Stri
     }
     if index < s.clipboard.history.len() {
         let item = &s.clipboard.history[index];
-        let mut cb = crate::kvm::NativeClipboard::new();
-        cb.set_text(&item.text);
+        crate::kvm::set_shared_clipboard_text(&item.text);
         Ok(())
     } else {
         Err(format!("Clipboard history index {} out of bounds (len: {})", index, s.clipboard.history.len()))
@@ -1625,34 +1622,34 @@ pub async fn send_wire_message(
     Ok(())
 }
 
-#[tauri::command]
-pub fn choose_send_files(_app: AppHandle) -> Result<Vec<String>, String> {
-    log::info!("Opening native file selection dialog for choose_send_files");
+/// Show the system's "send these files" picker and return what was chosen.
+///
+/// This waits for a person, so it must not run on the thread that pumps this app's
+/// windows: a main thread parked in that wait cannot route the click that dismisses
+/// the very picker it just opened, and the window looks frozen.
+fn pick_files_for_sending(app: &AppHandle) -> Result<Vec<String>, String> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg("set theFiles to choose file with multiple selections allowed\nset out to \"\"\nrepeat with aFile in theFiles\nset out to out & (POSIX path of aFile) & \"\\n\"\nend repeat\nreturn out")
-            .output()
-            .map_err(|e| format!("Failed to launch file dialog: {}", e))?;
-
-        if !output.status.success() {
-            // User cancelled
-            return Ok(Vec::new());
+        // Ask our own process for the panel. Driving `osascript` here would hand the
+        // sheet to whatever app happens to be frontmost, which cannot answer it for
+        // us: the dialog opens, the list works, and the button that closes it is dead.
+        use tauri_plugin_dialog::DialogExt;
+        // Present the panel as a sheet on our own window. A free-floating app panel
+        // puts its browser in a separate system process, and that view stops taking
+        // clicks as soon as the folder changes, leaving a dialog that cannot be used.
+        let mut dialog = app.dialog().file();
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
         }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let files: Vec<String> = stdout
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if !files.is_empty() {
-            log::info!("User selected {} file(s) for sending", files.len());
-            let _ = _app.emit("files-selected", &files);
-        }
-        return Ok(files);
+        let picked = dialog.blocking_pick_files();
+        return Ok(picked
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|f| f.into_path().ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .collect());
     }
 
     #[cfg(target_os = "windows")]
@@ -1664,13 +1661,11 @@ pub fn choose_send_files(_app: AppHandle) -> Result<Vec<String>, String> {
             .map_err(|e| format!("Failed to launch Windows file dialog: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let files: Vec<String> = stdout
+        return Ok(stdout
             .lines()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .collect();
-        log::info!("[ChooseFiles] dialog returned {} path(s): {:?}", files.len(), files);
-        return Ok(files);
+            .collect());
     }
 
     #[cfg(target_os = "linux")]
@@ -1680,15 +1675,28 @@ pub fn choose_send_files(_app: AppHandle) -> Result<Vec<String>, String> {
             .output();
         if let Ok(out) = output {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            let files: Vec<String> = stdout
+            return Ok(stdout
                 .lines()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .collect();
-            return Ok(files);
+                .collect());
         }
         Err("File selection dialog not supported or zenity not found on Linux".to_string())
     }
+}
+
+#[tauri::command]
+pub async fn choose_send_files(app: AppHandle) -> Result<Vec<String>, String> {
+    log::info!("Opening native file selection dialog for choose_send_files");
+    let picker = app.clone();
+    let files = tauri::async_runtime::spawn_blocking(move || pick_files_for_sending(&picker))
+        .await
+        .map_err(|e| format!("File dialog task failed: {}", e))??;
+    if !files.is_empty() {
+        log::info!("[ChooseFiles] {} file(s) chosen for sending", files.len());
+        let _ = app.emit("files-selected", &files);
+    }
+    Ok(files)
 }
 
 #[tauri::command]
