@@ -241,6 +241,18 @@ pub fn side_specific_modifier(vk: u16, scan: u32, extended: bool) -> u16 {
 /// than this.
 pub const EDGE_RETURN_DISTANCE: f64 = 24.0;
 
+/// Where the pointer waits while this computer drives the other one.
+///
+/// The middle of the desktop, so the hand has room to move in every direction.
+/// Parking it in the seam it crossed seemed tidy — the pointer would already be
+/// at the edge when it came home — but the few pixels between the park point and
+/// the screen edge were all the movement that edge could report: pushing further
+/// left produced no new position at all, so the other computer's pointer stopped
+/// a few pixels in. From the middle there is always somewhere to go.
+pub fn drive_park_point(vx: i32, vy: i32, vw: i32, vh: i32) -> (i32, i32) {
+    (vx + vw / 2, vy + vh / 2)
+}
+
 /// Check if cumulative remote virtual deltas indicate cursor has moved back across the seam to home.
 #[cfg(any(test, not(windows)))]
 pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: f64) -> bool {
@@ -3310,20 +3322,11 @@ pub mod hook_engine {
                         net.send_packet_sync(take);
 
                         // The crossing event is swallowed, so the pointer never actually
-                        // reached the edge; stop it just inside the seam and count the next
-                        // movement from there. Without this the first delta after taking was
-                        // the whole distance from the real pointer, which read as a huge
-                        // movement the other way and handed control straight back.
-                        let park_x = match view.side.as_str() {
-                            "right" => max_x - 5,
-                            "left" => vx + 5,
-                            _ => m.pt.x,
-                        };
-                        let park_y = match view.side.as_str() {
-                            "top" => vy + 5,
-                            "bottom" => max_y - 5,
-                            _ => m.pt.y,
-                        };
+                        // reached the edge; move it to the middle of the desktop and count
+                        // the next movement from there. Without this the first delta after
+                        // taking was the whole distance from the real pointer, which read as
+                        // a huge movement the other way and handed control straight back.
+                        let (park_x, park_y) = super::drive_park_point(vx, vy, vw, vh);
                         park_cursor_now(park_x, park_y);
                         LAST_PT = POINT { x: park_x, y: park_y };
                         return LRESULT(1);
@@ -3385,12 +3388,12 @@ pub mod hook_engine {
                                 net.send_motion(dx, dy);
                             }
 
-                            // Put the pointer back where it crossed before the next
+                            // Put the pointer back at the park point before the next
                             // event arrives, so every event carries only the movement
                             // the hand made since the last one. This is what lets the
                             // whole of a bigger screen be reached: the pointer here
                             // never runs out of screen, because it is never allowed to
-                            // travel — its distance from the entry point *is* this
+                            // travel — its distance from the park point *is* this
                             // event's movement.
                             park_cursor_now(LAST_PT.x, LAST_PT.y);
                             return LRESULT(1);
@@ -4079,12 +4082,9 @@ pub mod hook_engine {
                         };
                         net.send_packet_sync(take);
 
-                        let park_pt = match snap.layout.side.as_str() {
-                            "right" => CGPoint { x: (max_x - 5) as f64, y: pt.y },
-                            "left" => CGPoint { x: (vx + 5) as f64, y: pt.y },
-                            "top" => CGPoint { x: pt.x, y: (vy + 5) as f64 },
-                            "bottom" => CGPoint { x: pt.x, y: (max_y - 5) as f64 },
-                            _ => pt,
+                        let park_pt = {
+                            let (park_x, park_y) = super::drive_park_point(vx, vy, vw, vh);
+                            CGPoint { x: park_x as f64, y: park_y as f64 }
                         };
                         let _ = CGWarpMouseCursorPosition(park_pt);
                         LAST_PT = park_pt;
@@ -4136,12 +4136,12 @@ pub mod hook_engine {
                             net.send_motion(dx, dy);
                         }
 
-                        // Put the pointer back where it crossed before the next
+                        // Put the pointer back at the park point before the next
                         // event arrives, so every event carries only the movement
                         // the hand made since the last one. This is what lets the
                         // whole of a bigger screen be reached: the pointer here
                         // never runs out of screen, because it is never allowed to
-                        // travel — its distance from the entry point *is* this
+                        // travel — its distance from the park point *is* this
                         // event's movement.
                         let _ = CGWarpMouseCursorPosition(LAST_PT);
                         return std::ptr::null_mut();
@@ -4590,16 +4590,7 @@ fn run_linux_x11_capture_loop(
                 };
                 network.send_packet_sync(take);
 
-                let park_x = match snap.layout.side.as_str() {
-                    "right" => max_x - 5,
-                    "left" => vx + 5,
-                    _ => root_x,
-                };
-                let park_y = match snap.layout.side.as_str() {
-                    "top" => vy + 5,
-                    "bottom" => max_y - 5,
-                    _ => root_y,
-                };
+                let (park_x, park_y) = super::drive_park_point(vx, vy, vw, vh);
                 let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, park_x as i16, park_y as i16);
                 let _ = conn.flush();
                 last_x = park_x;
@@ -4661,17 +4652,8 @@ fn run_linux_x11_capture_loop(
                 network.send_motion(dx, dy);
             }
 
-            // Keep cursor parked near edge
-            let park_x = match snap.layout.side.as_str() {
-                "right" => max_x - 5,
-                "left" => vx + 5,
-                _ => root_x.clamp(vx, max_x - 1),
-            };
-            let park_y = match snap.layout.side.as_str() {
-                "top" => vy + 5,
-                "bottom" => max_y - 5,
-                _ => root_y.clamp(vy, max_y - 1),
-            };
+            // Keep cursor parked in the middle of the desktop
+            let (park_x, park_y) = super::drive_park_point(vx, vy, vw, vh);
             let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, park_x as i16, park_y as i16);
             let _ = conn.flush();
             last_x = park_x;
@@ -4983,6 +4965,36 @@ mod tests {
 
         // Unknown side never crosses
         assert!(!check_edge_crossed("unknown", 0.0, 0.0, vx, vy, vw, vh));
+    }
+
+    #[test]
+    fn the_driving_park_point_leaves_room_on_every_side() {
+        // A single 1920x1080 desktop at the origin parks in the middle.
+        assert_eq!(drive_park_point(0, 0, 1920, 1080), (960, 540));
+
+        // A monitor to the left moves the whole desktop's origin, and the park
+        // point moves with it instead of landing outside the screens.
+        assert_eq!(drive_park_point(-1920, 0, 3840, 1080), (0, 540));
+
+        // However the desktop is laid out, there is a deliberate move to be made
+        // towards every edge. A pointer parked in the seam could only report the
+        // few pixels between itself and the edge, and that is what stopped the
+        // other computer's pointer a few pixels in.
+        for (vx, vy, vw, vh) in [
+            (0, 0, 1920, 1080),
+            (0, 0, 1366, 768),
+            (-1920, -200, 3840, 1440),
+        ] {
+            let (px, py) = drive_park_point(vx, vy, vw, vh);
+            assert!(px - vx >= 300 && (vx + vw) - px >= 300, "no room left/right on {vw}x{vh}");
+            assert!(py - vy >= 200 && (vy + vh) - py >= 200, "no room up/down on {vw}x{vh}");
+            // And the park point is not itself on an edge, so it cannot
+            // immediately read as another crossing.
+            assert!(!check_edge_crossed("left", px as f64, py as f64, vx, vy, vw, vh));
+            assert!(!check_edge_crossed("right", px as f64, py as f64, vx, vy, vw, vh));
+            assert!(!check_edge_crossed("top", px as f64, py as f64, vx, vy, vw, vh));
+            assert!(!check_edge_crossed("bottom", px as f64, py as f64, vx, vy, vw, vh));
+        }
     }
 
     #[test]
