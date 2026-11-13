@@ -72,4 +72,6 @@ lipo -create "$TMP/bt-arm64" "$TMP/bt-x86_64" -output "$OUT"
 chmod +x "$OUT"
 
 echo "Bluetooth helper built: $OUT"
-"$OUT" caps || echo "(the helper answered nothing; the app will say why when it is used)"
+echo "Run it from inside GlideDesk.app to check it answers; macOS kills a bare"
+echo "helper that asks for Bluetooth before it can explain why (no usage string"
+echo "outside the bundle)."
