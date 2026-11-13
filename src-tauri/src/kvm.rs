@@ -1408,6 +1408,56 @@ pub fn get_linux_backend() -> Result<std::sync::Arc<X11RbBackend>, String> {
 static HELD_KEYS: parking_lot::Mutex<Option<std::collections::HashSet<u16>>> = parking_lot::Mutex::new(None);
 static HELD_BUTTONS: parking_lot::Mutex<Option<std::collections::HashSet<u8>>> = parking_lot::Mutex::new(None);
 
+/// Keys whose *press* this computer sent to the other one and took away from the
+/// app that had them.
+///
+/// A release is only taken away for those keys. Without that, this order leaves a
+/// key down for good: the person holds Command, control moves to the other computer
+/// while it is still held, and the release is swallowed and sent away instead of
+/// reaching the app that saw the press. macOS then believes Command is still down,
+/// so every later letter becomes a shortcut and nothing types — the keyboard looks
+/// dead until the machine restarts.
+#[cfg(any(test, windows, target_os = "macos"))]
+static SWALLOWED_KEY_DOWNS: parking_lot::Mutex<Option<std::collections::HashSet<u16>>> =
+    parking_lot::Mutex::new(None);
+
+/// Remember that a press of `keycode` went to the other computer.
+#[cfg(any(test, windows, target_os = "macos"))]
+fn mark_swallowed_down(keycode: u16) {
+    let mut guard = SWALLOWED_KEY_DOWNS.lock();
+    guard.get_or_insert_with(std::collections::HashSet::new).insert(keycode);
+}
+
+/// True when this key's press was taken away, so its release belongs to the other
+/// computer too. Clears the mark: one release per press.
+#[cfg(any(test, windows, target_os = "macos"))]
+fn take_swallowed_down(keycode: u16) -> bool {
+    let mut guard = SWALLOWED_KEY_DOWNS.lock();
+    guard
+        .as_mut()
+        .map(|set| set.remove(&keycode))
+        .unwrap_or(false)
+}
+
+/// Every key whose press was taken away and never came back up.
+#[cfg(any(test, windows, target_os = "macos"))]
+fn take_all_swallowed_downs() -> Vec<u16> {
+    let mut guard = SWALLOWED_KEY_DOWNS.lock();
+    match guard.as_mut() {
+        Some(set) => set.drain().collect(),
+        None => Vec::new(),
+    }
+}
+
+#[cfg(any(test, windows, target_os = "macos"))]
+fn swallowed_down_count() -> usize {
+    SWALLOWED_KEY_DOWNS
+        .lock()
+        .as_ref()
+        .map(|set| set.len())
+        .unwrap_or(0)
+}
+
 fn track_key(vk: u16, is_down: bool) {
     let mut guard = HELD_KEYS.lock();
     let set = guard.get_or_insert_with(std::collections::HashSet::new);
@@ -1473,6 +1523,29 @@ impl NativeInputInjector {
             }
         };
         for vk in keys_to_release {
+            Self::key_event(vk, false, false);
+        }
+
+        // Keys whose press went to the other computer have no release coming here,
+        // so free them here: a press taken away and never given back leaves the app
+        // that saw it waiting for a release that will not come.
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let pending = swallowed_down_count();
+            if pending > 0 {
+                log::info!(
+                    "[KVM] Releasing {} key(s) whose press went to the other computer",
+                    pending
+                );
+            }
+        }
+        #[cfg(target_os = "macos")]
+        for keycode in take_all_swallowed_downs() {
+            let vk = keycodes::macos_keycode_to_windows_vk(keycode) as u16;
+            Self::key_event(vk, false, false);
+        }
+        #[cfg(windows)]
+        for vk in take_all_swallowed_downs() {
             Self::key_event(vk, false, false);
         }
 
@@ -3436,10 +3509,11 @@ pub mod hook_engine {
                 }
 
                 if is_driving {
-                    // Keyboard sharing off: keys typed here stay here. Releases are
-                    // still forwarded so nothing stays held on the other computer.
+                    // Keyboard sharing off: keys typed here stay here, presses and
+                    // releases alike, so a key held when the switch went off is not
+                    // left down on either computer.
                     if !view.keyboard && is_down {
-                        return LRESULT(1);
+                        return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
                     }
                     // A right Shift, Ctrl or Alt reported generically keeps its side,
                     // then Ctrl here is Command on the driven computer, so Ctrl+C there
@@ -3467,6 +3541,24 @@ pub mod hook_engine {
                         vk: Some(vk),
                         ..Default::default()
                     };
+                    if is_down {
+                        // A press the link could not take belongs to this computer
+                        // instead of vanishing; the person typed it.
+                        if net.send_packet_sync(key_msg) == 0 {
+                            return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
+                        }
+                        mark_swallowed_down(raw_vk);
+                        return LRESULT(1);
+                    }
+                    // Its press stayed here (made before control moved, or with
+                    // keyboard sharing off), so this release has to stay here too.
+                    if !take_swallowed_down(raw_vk) {
+                        log::info!(
+                            "[KVM] Key release kept here (vk 0x{:02X}): its press stayed on this computer",
+                            raw_vk
+                        );
+                        return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
+                    }
                     net.send_packet_sync(key_msg);
                     return LRESULT(1);
                 }
@@ -4190,9 +4282,24 @@ pub mod hook_engine {
                             vk: Some(vk as u32),
                             ..Default::default()
                         };
-                        if net.send_packet_sync(key_msg) == 0 {
+                        if is_down {
+                            if net.send_packet_sync(key_msg) == 0 {
+                                return event;
+                            }
+                            mark_swallowed_down(keycode);
+                            return std::ptr::null_mut();
+                        }
+                        // The press stayed here (it was made before control moved):
+                        // the release has to stay here too, or the modifier stays
+                        // down in the app that saw it.
+                        if !take_swallowed_down(keycode) {
+                            log::info!(
+                                "[KVM] Key release kept here (code {}): its press stayed on this computer",
+                                keycode
+                            );
                             return event;
                         }
+                        net.send_packet_sync(key_msg);
                         return std::ptr::null_mut();
                     }
                     kCGEventKeyDown | kCGEventKeyUp => {
@@ -4253,9 +4360,25 @@ pub mod hook_engine {
                         // gone) is given back to this one instead of vanishing: the
                         // person typed it, and silence on both screens is the one
                         // answer that cannot be right.
-                        if net.send_packet_sync(key_msg) == 0 {
+                        if is_down {
+                            if net.send_packet_sync(key_msg) == 0 {
+                                return event;
+                            }
+                            mark_swallowed_down(keycode);
+                            return std::ptr::null_mut();
+                        }
+                        // Its press stayed on this computer (made before control
+                        // moved, or before keyboard sharing came back on), so the
+                        // release must be delivered here too; swallowing it alone
+                        // leaves that key held down for good.
+                        if !take_swallowed_down(keycode) {
+                            log::info!(
+                                "[KVM] Key release kept here (code {}): its press stayed on this computer",
+                                keycode
+                            );
                             return event;
                         }
+                        net.send_packet_sync(key_msg);
                         return std::ptr::null_mut();
                     }
                     _ => {}
@@ -4947,6 +5070,28 @@ mod tests {
         assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_100));
         assert!(edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_170));
         reset_edge_dwell();
+    }
+
+    #[test]
+    fn test_release_belongs_where_its_press_went() {
+        // A press taken away for the other computer takes its release with it...
+        mark_swallowed_down(55);
+        assert!(take_swallowed_down(55));
+        // ...once: a second release for the same key is the app's business.
+        assert!(!take_swallowed_down(55));
+
+        // A press that stayed here keeps its release here. This is the case that
+        // used to leave Command held down: pressed before the pointer moved, released
+        // after, with the release swallowed and sent away.
+        assert!(!take_swallowed_down(57));
+
+        // Coming back home frees anything that never came up.
+        mark_swallowed_down(56);
+        mark_swallowed_down(55);
+        assert_eq!(swallowed_down_count(), 2);
+        let freed = take_all_swallowed_downs();
+        assert_eq!(freed.len(), 2);
+        assert_eq!(swallowed_down_count(), 0);
     }
 
     #[test]
