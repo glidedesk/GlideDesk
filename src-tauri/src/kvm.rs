@@ -3243,6 +3243,29 @@ pub mod hook_engine {
                 return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
             }
 
+            let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
+
+            // A point outside the desktop is not this cursor. Windows keeps the
+            // real pointer on a screen, but a laptop touchpad driver reports its
+            // own coordinates in mouse messages (the machine here sends points
+            // like (1501, -21)). Read as a hand move, one of those took control
+            // back and even crossed to the other computer while somebody was
+            // working here, which looks like the pointer dying for no reason.
+            if vw > 1
+                && vh > 1
+                && (m.pt.x < vx
+                    || m.pt.x >= vx + vw
+                    || m.pt.y < vy
+                    || m.pt.y >= vy + vh)
+            {
+                log::debug!(
+                    "[KVM] Ignoring pointer report outside the desktop: ({}, {})",
+                    m.pt.x,
+                    m.pt.y
+                );
+                return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
+            }
+
             if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
                 let Some(view) = current_view() else {
                     return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
@@ -3250,7 +3273,6 @@ pub mod hook_engine {
                 let has_peer = view.has_peer;
                 let is_driving = view.driving;
 
-                let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
                 let max_x = vx + vw;
                 let max_y = vy + vh;
 
@@ -3260,26 +3282,21 @@ pub mod hook_engine {
                 // The cached view is refreshed a few times a second, which is fine for a
                 // switch but too slow for the moment the pointer changes hands: the entry
                 // move arrives while the copy still says "home", and the hook would count
-                // it as a crossing back. Read where input belongs right now instead; it is
-                // one read lock and a four-byte comparison.
-                let (live_home, live_driven) = {
-                    let s = state.inner.read();
-                    (
-                        can_start_crossing(&s.input, has_peer, sharing_enabled),
-                        s.input == "driven",
-                    )
-                };
+                // it as a crossing back. The live mode is read further down, only when an
+                // event is actually at an edge or a hand touches a driven screen, so the
+                // common move keeps the hook lock-free.
 
                 // A computer the other one is using gives control back as soon as its
                 // own mouse is touched. Injected input carries the marker and was
                 // passed on above, so anything left is the person at this desk. Without
                 // this both computers can end up each believing the other is driving,
                 // and then neither takes input at all.
-                if live_driven
+                if view.driven
                     && matches!(
                         msg,
                         WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
                     )
+                    && state.inner.read().input == "driven"
                 {
                     log::info!("[KVM] Local mouse took control back from the other computer");
                     state.set_where_input("home");
@@ -3297,7 +3314,8 @@ pub mod hook_engine {
                     net.send_packet_sync(home);
                 }
 
-                if live_home {
+                let cached_home = !view.driving && !view.driven;
+                if cached_home && has_peer && sharing_enabled {
                     // Edge check across the entire virtual multi-monitor desktop
                     let crossed = match view.side.as_str() {
                         "right" => m.pt.x >= max_x - 2,
@@ -3307,7 +3325,15 @@ pub mod hook_engine {
                         _ => false,
                     };
 
-                    if crossed {
+                    // Only a computer whose pointer is being used here hands it over.
+                    // The cached view can be a beat behind the pointer changing hands,
+                    // so confirm the live mode before taking it.
+                    if crossed
+                        && {
+                            let s = state.inner.read();
+                            can_start_crossing(&s.input, has_peer, sharing_enabled)
+                        }
+                    {
                         LAST_PT = m.pt;
                         VIRTUAL_REMOTE_X = 0.0;
                         VIRTUAL_REMOTE_Y = 0.0;
