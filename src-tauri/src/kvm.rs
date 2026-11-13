@@ -4590,7 +4590,7 @@ fn run_linux_x11_capture_loop(
                 };
                 network.send_packet_sync(take);
 
-                let (park_x, park_y) = super::drive_park_point(vx, vy, vw, vh);
+                let (park_x, park_y) = drive_park_point(vx, vy, vw, vh);
                 let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, park_x as i16, park_y as i16);
                 let _ = conn.flush();
                 last_x = park_x;
@@ -4653,7 +4653,7 @@ fn run_linux_x11_capture_loop(
             }
 
             // Keep cursor parked in the middle of the desktop
-            let (park_x, park_y) = super::drive_park_point(vx, vy, vw, vh);
+            let (park_x, park_y) = drive_park_point(vx, vy, vw, vh);
             let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, park_x as i16, park_y as i16);
             let _ = conn.flush();
             last_x = park_x;
