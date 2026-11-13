@@ -123,6 +123,17 @@ pub fn edge_push_ready(
     true
 }
 
+/// Whether what just happened here may hand the pointer to the other computer.
+///
+/// Only a computer whose pointer is being used at this desk can start a crossing.
+/// While the other computer drives this one, the pointer is moved by injection and
+/// those positions reach this computer's own edges too; counting one of them as a
+/// fresh crossing made each computer take the pointer back from the other, so the
+/// pointer bounced between the two seams instead of travelling.
+pub fn can_start_crossing(input: &str, has_peer: bool, sharing_enabled: bool) -> bool {
+    input == "home" && has_peer && sharing_enabled
+}
+
 /// Check if cursor coordinates cross the outer edge of the virtual desktop layout.
 #[cfg(any(test, not(windows)))]
 pub fn check_edge_crossed(side: &str, pt_x: f64, pt_y: f64, vx: i32, vy: i32, vw: i32, vh: i32) -> bool {
@@ -3246,12 +3257,25 @@ pub mod hook_engine {
                 let sharing_enabled =
                     view.mouse && view.linked && view.drive_other && !view.paused;
 
+                // The cached view is refreshed a few times a second, which is fine for a
+                // switch but too slow for the moment the pointer changes hands: the entry
+                // move arrives while the copy still says "home", and the hook would count
+                // it as a crossing back. Read where input belongs right now instead; it is
+                // one read lock and a four-byte comparison.
+                let (live_home, live_driven) = {
+                    let s = state.inner.read();
+                    (
+                        can_start_crossing(&s.input, has_peer, sharing_enabled),
+                        s.input == "driven",
+                    )
+                };
+
                 // A computer the other one is using gives control back as soon as its
                 // own mouse is touched. Injected input carries the marker and was
                 // passed on above, so anything left is the person at this desk. Without
                 // this both computers can end up each believing the other is driving,
                 // and then neither takes input at all.
-                if view.driven
+                if live_driven
                     && matches!(
                         msg,
                         WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
@@ -3273,7 +3297,7 @@ pub mod hook_engine {
                     net.send_packet_sync(home);
                 }
 
-                if !is_driving && has_peer && sharing_enabled {
+                if live_home {
                     // Edge check across the entire virtual multi-monitor desktop
                     let crossed = match view.side.as_str() {
                         "right" => m.pt.x >= max_x - 2,
@@ -4023,7 +4047,7 @@ pub mod hook_engine {
                 return event;
             }
 
-            if !is_driving && has_peer && sharing_enabled {
+            if can_start_crossing(&snap.input, has_peer, sharing_enabled) {
                 if is_move {
                     let pt = CGEventGetLocation(event);
                     LAST_PT = pt;
@@ -4552,7 +4576,7 @@ fn run_linux_x11_capture_loop(
 
         let sharing_enabled = snap.kvm.mouse && snap.kvm.linked && snap.kvm.drive_other && !snap.kvm_state.paused;
 
-        if !is_driving && has_peer && sharing_enabled {
+        if can_start_crossing(&snap.input, has_peer, sharing_enabled) {
             let crossed = check_edge_crossed(&snap.layout.side, root_x as f64, root_y as f64, vx, vy, vw, vh);
             if crossed {
                 virtual_remote_x = 0.0;
@@ -4965,6 +4989,19 @@ mod tests {
 
         // Unknown side never crosses
         assert!(!check_edge_crossed("unknown", 0.0, 0.0, vx, vy, vw, vh));
+    }
+
+    #[test]
+    fn a_driven_computer_never_starts_a_crossing() {
+        // Only the computer being used at this desk hands the pointer over. While
+        // the other one drives this computer, injected moves reach the same edges
+        // and must never be read as a fresh crossing; that was the loop that made
+        // each computer take the pointer back and the cursor crawl.
+        assert!(can_start_crossing("home", true, true));
+        assert!(!can_start_crossing("driving", true, true));
+        assert!(!can_start_crossing("driven", true, true));
+        assert!(!can_start_crossing("home", false, true));
+        assert!(!can_start_crossing("home", true, false));
     }
 
     #[test]
