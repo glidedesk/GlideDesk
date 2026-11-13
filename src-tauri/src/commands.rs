@@ -174,6 +174,7 @@ pub fn set_net(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Re
             s.net.ble_wifi_off = b;
         }
     }
+    crate::pairstore::save_net(&state.inner.read().net);
     push_state(&app, &state);
     Ok(())
 }

@@ -1865,6 +1865,16 @@ impl AppState {
             initial_state.files.drop_to_mac = f.drop_to_mac;
         }
 
+        // The Bluetooth switches, which are choices and not runtime state: a switch
+        // that comes back off after a restart looks like it did nothing when it was
+        // turned on.
+        #[cfg(not(test))]
+        if let Some(n) = crate::pairstore::load_net() {
+            initial_state.net.ble = n.ble;
+            initial_state.net.ble_pc = n.ble_pc;
+            initial_state.net.ble_wifi_off = n.ble_wifi_off;
+        }
+
         Self {
             inner: Arc::new(RwLock::new(initial_state)),
         }

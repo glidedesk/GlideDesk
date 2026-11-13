@@ -115,6 +115,15 @@ pub fn files_path() -> PathBuf {
     p
 }
 
+/// Where the Bluetooth switches are kept. They are choices, not runtime state: a
+/// switch that comes back off after every restart looks broken, and the person who
+/// turned it on goes looking for the fault somewhere else.
+pub fn net_path() -> PathBuf {
+    let mut p = store_path();
+    p.set_file_name("net.json");
+    p
+}
+
 fn yes() -> bool {
     true
 }
@@ -183,6 +192,54 @@ pub fn save_files(files: &crate::state::FilesState) {
             }
         }
         Err(e) => log::warn!("[Files] Could not encode files store: {}", e),
+    }
+}
+
+/// The Bluetooth switches as written to disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetFile {
+    #[serde(default)]
+    pub ble: bool,
+    #[serde(rename = "blePc", default)]
+    pub ble_pc: bool,
+    #[serde(rename = "bleWifiOff", default = "yes")]
+    pub ble_wifi_off: bool,
+}
+
+/// The last Bluetooth choices, if any were ever made.
+pub fn load_net() -> Option<NetFile> {
+    let path = net_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<NetFile>(&text) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            log::warn!("[Net] Ignoring unreadable {}: {}", path.display(), e);
+            None
+        }
+    }
+}
+
+/// Remember the Bluetooth switches, so a restart comes back as the person left it.
+pub fn save_net(net: &crate::state::NetState) {
+    if cfg!(test) {
+        return; // tests never touch the developer's real files
+    }
+    let path = net_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = NetFile {
+        ble: net.ble,
+        ble_pc: net.ble_pc,
+        ble_wifi_off: net.ble_wifi_off,
+    };
+    match serde_json::to_string_pretty(&file) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(&path, text) {
+                log::warn!("[Net] Could not write {}: {}", path.display(), e);
+            }
+        }
+        Err(e) => log::warn!("[Net] Could not encode net store: {}", e),
     }
 }
 
@@ -307,5 +364,19 @@ mod tests {
         let f = PairFile::default();
         assert!(f.paired.is_none());
         assert!(f.peer_fingerprints.is_empty());
+    }
+
+    #[test]
+    fn net_store_keeps_the_switches_and_defaults_the_rest() {
+        // A file written before a switch existed still loads, with that switch at
+        // its default, so an upgrade does not turn Bluetooth on by surprise.
+        let old: NetFile = serde_json::from_str(r#"{"ble":true}"#).unwrap();
+        assert!(old.ble);
+        assert!(!old.ble_pc, "companions stay off until switched on");
+        assert!(old.ble_wifi_off, "Bluetooth off on Wi-Fi is the default");
+
+        let all: NetFile =
+            serde_json::from_str(r#"{"ble":true,"blePc":true,"bleWifiOff":false}"#).unwrap();
+        assert!(all.ble && all.ble_pc && !all.ble_wifi_off);
     }
 }

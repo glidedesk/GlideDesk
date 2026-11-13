@@ -1183,11 +1183,39 @@ fn resource_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
 
 /// What this computer can do over Bluetooth, and whether it is offering now.
 #[tauri::command]
-pub async fn bt_caps(app: AppHandle) -> Result<serde_json::Value, String> {
+pub async fn bt_caps(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
     let dir = resource_dir(&app);
-    tauri::async_runtime::spawn_blocking(move || crate::transport::bt::caps(dir.as_deref()))
+    let caps = tauri::async_runtime::spawn_blocking(move || crate::transport::bt::caps(dir.as_deref()))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // The General page's Bluetooth line reads this; before it was only Windows
+    // that ever answered, so a Mac said "Unknown" while it worked. "missing" is
+    // this app's packaging, not the radio, so it stays "Unknown" and does not
+    // claim the radio is broken.
+    let radio = match caps.get("state").and_then(|s| s.as_str()) {
+        Some("on") => Some("on"),
+        Some("off") => Some("off"),
+        Some("unsupported") => Some("unsupported"),
+        _ => None,
+    };
+    if let Some(radio) = radio {
+        let changed = {
+            let mut s = state.inner.write();
+            if s.net.radio == radio {
+                false
+            } else {
+                s.net.radio = radio.to_string();
+                true
+            }
+        };
+        if changed {
+            push_state(&app, &state);
+        }
+    }
+    Ok(caps)
 }
 
 /// Offer a direct network over Bluetooth, so the other computer need not type it.
