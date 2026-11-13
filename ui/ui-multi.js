@@ -38,9 +38,10 @@ UI.tab({
       const next = JSON.stringify(clients.map((c) => [c.id, c.name, c.os, c.address || '']));
       if (next === key) return;
       key = next;
+      const OS = { mac: 'Mac', win: 'Windows', linux: 'Linux', android: 'Phone' };
       list.replaceChildren(...clients.map((c) => UI.row(
         c.name || c.id,
-        c.address || '',
+        [OS[c.os] || c.os, c.address].filter(Boolean).join(' · '),
         [UI.osIcon(c.os)]
       )));
     };

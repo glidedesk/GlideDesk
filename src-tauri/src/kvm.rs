@@ -53,6 +53,78 @@ impl KvmQueue {
 
 /// Check if cursor coordinates cross the outer edge of the virtual desktop layout.
 #[cfg(any(test, not(windows)))]
+/// How long the pointer has to stay pressed against the edge before control moves.
+///
+/// Crossing on position alone meant a mouse that was simply flicked to the edge —
+/// to reach a menu, a scrollbar, the corner of a window — handed the whole session
+/// to the other computer. Pushing on for a moment longer is what a person does when
+/// they mean to go there, and a brush against the edge never does.
+pub const EDGE_DWELL_MS: u64 = 160;
+
+static EDGE_TOUCHED_AT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// Which edge the clock above belongs to (0 = none), so a touch on another edge
+/// cannot inherit it.
+static EDGE_TOUCHED_SIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+fn edge_code(side: &str) -> u8 {
+    match side {
+        "left" => 1,
+        "right" => 2,
+        "top" => 3,
+        "bottom" => 4,
+        _ => 0,
+    }
+}
+
+/// Forget an edge touch in progress (after a crossing, a return, or a click).
+pub fn reset_edge_dwell() {
+    EDGE_TOUCHED_AT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    EDGE_TOUCHED_SIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True once the pointer has *stayed* on the edge long enough to mean it.
+///
+/// The first event that reaches the edge only starts the clock; the pointer has to
+/// still be there `EDGE_DWELL_MS` later, which needs movement events to keep coming.
+/// Moving away clears it, so the next approach starts over.
+pub fn edge_push_ready(
+    side: &str,
+    pt_x: f64,
+    pt_y: f64,
+    vx: i32,
+    vy: i32,
+    vw: i32,
+    vh: i32,
+    now_ms: u64,
+) -> bool {
+    let touching = match side {
+        "right" => pt_x >= (vx + vw) as f64 - 2.0,
+        "left" => pt_x <= (vx + 1) as f64,
+        "top" => pt_y <= (vy + 1) as f64,
+        "bottom" => pt_y >= (vy + vh) as f64 - 2.0,
+        _ => false,
+    };
+    if !touching {
+        reset_edge_dwell();
+        return false;
+    }
+    let code = edge_code(side);
+    let started = EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed);
+    let started_side = EDGE_TOUCHED_SIDE.load(std::sync::atomic::Ordering::Relaxed);
+    if started == 0 || started_side != code {
+        EDGE_TOUCHED_SIDE.store(code, std::sync::atomic::Ordering::Relaxed);
+        EDGE_TOUCHED_AT_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+        return false;
+    }
+    if now_ms.saturating_sub(started) < EDGE_DWELL_MS {
+        return false;
+    }
+    reset_edge_dwell();
+    true
+}
+
 pub fn check_edge_crossed(side: &str, pt_x: f64, pt_y: f64, vx: i32, vy: i32, vw: i32, vh: i32) -> bool {
     let max_x = (vx + vw) as f64;
     let max_y = (vy + vh) as f64;
@@ -3864,7 +3936,19 @@ pub mod hook_engine {
                         return event;
                     }
 
-                    let crossed = check_edge_crossed(&snap.layout.side, pt.x, pt.y, vx, vy, vw, vh);
+                    // Asked on every move, so that leaving the edge clears the
+                    // clock and the next approach starts over.
+                    let crossed = edge_push_ready(
+                            &snap.layout.side,
+                            pt.x,
+                            pt.y,
+                            vx,
+                            vy,
+                            vw,
+                            vh,
+                            now_ms,
+                        )
+                        && check_edge_crossed(&snap.layout.side, pt.x, pt.y, vx, vy, vw, vh);
 
                     if crossed {
                         VIRTUAL_REMOTE_X = 0.0;
@@ -4048,9 +4132,11 @@ pub mod hook_engine {
                             _ => false,
                         };
 
-                        // Sharing off: presses stay here, releases pass so nothing sticks.
+                        // Sharing off: presses stay here, so the window under the
+                        // pointer still gets them; releases pass too, so a key held
+                        // when the switch went off cannot stay stuck down.
                         if !snap.kvm.keyboard && is_down {
-                            return std::ptr::null_mut();
+                            return event;
                         }
 
                         // Release hotkeys: Double-tap Right Option (61), Right Command (54), Right Control (62)
@@ -4104,16 +4190,20 @@ pub mod hook_engine {
                             vk: Some(vk as u32),
                             ..Default::default()
                         };
-                        net.send_packet_sync(key_msg);
+                        if net.send_packet_sync(key_msg) == 0 {
+                            return event;
+                        }
                         return std::ptr::null_mut();
                     }
                     kCGEventKeyDown | kCGEventKeyUp => {
                         let keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) as u16;
                         let is_down = r#type == kCGEventKeyDown;
 
-                        // Sharing off: presses stay here, releases pass so nothing sticks.
+                        // Sharing off: presses stay here, so the window under the
+                        // pointer still gets them; releases pass too, so a key held
+                        // when the switch went off cannot stay stuck down.
                         if !snap.kvm.keyboard && is_down {
-                            return std::ptr::null_mut();
+                            return event;
                         }
 
                         // Release hotkey check
@@ -4159,7 +4249,13 @@ pub mod hook_engine {
                             im,
                             ..Default::default()
                         };
-                        net.send_packet_sync(key_msg);
+                        // A key that never reached the other computer (link full or
+                        // gone) is given back to this one instead of vanishing: the
+                        // person typed it, and silence on both screens is the one
+                        // answer that cannot be right.
+                        if net.send_packet_sync(key_msg) == 0 {
+                            return event;
+                        }
                         return std::ptr::null_mut();
                     }
                     _ => {}
@@ -4818,6 +4914,39 @@ mod tests {
 
         // Unknown side never returns
         assert!(!check_edge_returned("unknown", -100.0, -100.0));
+    }
+
+    #[test]
+    fn test_edge_crossing_needs_a_deliberate_push() {
+        // Both halves in one test: the dwell clock is shared state, and two tests
+        // running at once would each see the other's touch.
+        reset_edge_dwell();
+
+        // A pointer that is nowhere near the edge neither crosses nor starts a clock.
+        assert!(!edge_push_ready("left", 400.0, 500.0, 0, 0, 1920, 1080, 1_000));
+
+        // Reaching the edge is not crossing yet: it only starts the clock.
+        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_000));
+        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_100));
+
+        // Still pressing there after the dwell: this is meant.
+        assert!(edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_160));
+
+        // The crossing cleared the clock, so the next event starts over.
+        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_180));
+        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_250));
+
+        // Moving away before the dwell means the brush never counts.
+        assert!(!edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_000));
+        assert!(!edge_push_ready("bottom", 500.0, 900.0, 0, 0, 1920, 1080, 2_050));
+        assert!(!edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_100));
+        assert!(edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_270));
+
+        // A clock left over from one edge does not carry to the opposite one.
+        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_000));
+        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_100));
+        assert!(edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_170));
+        reset_edge_dwell();
     }
 
     #[test]

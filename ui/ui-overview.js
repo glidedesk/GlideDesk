@@ -180,8 +180,11 @@ UI.tab({
         status.textContent = stopped ? (l.message || 'Disconnected').replace(/\{Name\}/g, s.paired.macName) + '.' : busyBy + '.';
       }
       discBtn.hidden = !connected;
-      againBtn.hidden = connected || !s.paired || !(stopped || busyBy);
-      againBtn.textContent = busyBy || (stopped && l.message) ? 'Take over' : 'Connect';
+      // One Connect for the paired computer, and it is here: the same action also
+      // sat beside its name in both lists below, so a single reconnect looked like
+      // two steps the person had to take.
+      againBtn.hidden = connected || !s.paired;
+      againBtn.textContent = busyBy ? 'Take over' : stopped ? 'Reconnect' : 'Connect';
       sessionBtns.hidden = discBtn.hidden && againBtn.hidden;
       // Moving the session to Wi-Fi (files, screens through Bluetooth: netlink.js)
       const n = s.net || {};
@@ -272,12 +275,9 @@ UI.tab({
           // Either Mac or Windows can host or be guest. Unpaired devices show "Pair".
           const btn = online || isKnown ? null : UI.button('Pair', () => api.pair(dev.id), 'small' + (dev.invited ? ' primary' : ''));
           if (btn) btn.disabled = busy || connected;
-          // Paired devices show "Connect".
-          const take = !online && isKnown ? UI.button('Connect', () => (s.paired && dev.id === s.paired.macId ? api.connectAgain() : api.connectGuest(dev.id)), 'small') : null;
-          if (take) take.disabled = busy;
           if (btn && dev.invited && !busy) focus = btn;
           const r = UI.row(dev.name, dev.address + (dev.invited ? ' · wants to connect' : ''), [
-            online ? el('span', { class: 'pill good', text: 'Connected' }) : isKnown ? el('span', { class: 'pill muted', text: 'Paired' }) : null, btn, take]);
+            online ? el('span', { class: 'pill good', text: 'Connected' }) : isKnown ? el('span', { class: 'pill muted', text: 'Paired' }) : null, btn]);
           r.querySelector('.text').prepend(UI.osIcon(dev.os));
           r.classList.add('with-ico');
           return r;
@@ -308,7 +308,7 @@ UI.tab({
           online ? el('span', { class: 'pill good', text: 'Online' }) : null,
           wakeBtn,
           // Switch to it: whatever the session is now, it ends (paired, and nearby to be reached).
-          !online && x.connect ? UI.button(live ? 'Switch' : 'Connect', x.connect, 'small') : null,
+          !online && x.connect && !(s.paired && x.id === s.paired.macId) ? UI.button(live ? 'Switch' : 'Connect', x.connect, 'small') : null,
           UI.button('Forget', x.forget, 'small'),
         ]);
         r.querySelector('.text').prepend(UI.osIcon(x.os));

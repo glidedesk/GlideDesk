@@ -61,6 +61,15 @@ const MOTION_BACKLOG_LIMIT: u64 = 64 * 1024;
 const MOTION_MAX_WAIT: Duration = Duration::from_millis(20);
 const MOTION_RETRY_MS: u64 = 2;
 
+/// How many messages may be waiting before a screen frame is skipped.
+///
+/// Screen frames are the only traffic that can be thrown away without anyone
+/// noticing: every one is replaced a moment later by the next capture, while a
+/// pointer move held behind a queue of them is felt immediately. A slow link used
+/// to let the queue fill with frames, and the pointer then crawled on the other
+/// computer even though the moves themselves were tiny.
+const SCREEN_MAX_BACKLOG: usize = 4;
+
 /// Peer ids are host names; macOS uses typographic apostrophes in some names while
 /// the same computer can report a straight one elsewhere. Compare them leniently.
 fn same_peer_id(a: &str, b: &str) -> bool {
@@ -4128,7 +4137,12 @@ impl NetworkManager {
     }
 
     /// Broadcast event to all connected mesh peers.
-    pub fn send_packet_sync(&self, mut pkt: WireMessage) {
+    /// Send without waiting, returning how many sessions took the packet.
+    ///
+    /// A zero means the packet never left: the caller is holding a keystroke that
+    /// the person at this desk still expects to see somewhere, so it can let the
+    /// local window have the event instead of swallowing it.
+    pub fn send_packet_sync(&self, mut pkt: WireMessage) -> usize {
         self.flush_motion();
         let target_dests = pkt.d.clone();
         if pkt.o.is_none() {
@@ -4198,6 +4212,7 @@ impl NetworkManager {
                 pkt.t, sent, dropped, skipped
             );
         }
+        sent
     }
 
     /// Async send/broadcast to all active mesh peers.
@@ -4257,6 +4272,18 @@ impl NetworkManager {
                 })
                 .collect()
         };
+
+        // A frame the person never sees costs nothing; a keystroke or a pointer
+        // move held behind a pile of frames is felt at once. When the queue is
+        // more than a few messages deep, let this frame go and keep the next
+        // capture, instead of growing the backlog the input is waiting in.
+        if pkt.t == "media.screen"
+            && senders
+                .iter()
+                .any(|tx| tx.max_capacity().saturating_sub(tx.capacity()) > SCREEN_MAX_BACKLOG)
+        {
+            return;
+        }
 
         for tx in senders {
             let _ = tx.send(pkt.clone()).await;
