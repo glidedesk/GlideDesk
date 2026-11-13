@@ -134,6 +134,20 @@ pub fn can_start_crossing(input: &str, has_peer: bool, sharing_enabled: bool) ->
     input == "home" && has_peer && sharing_enabled
 }
 
+/// Whether a pointer report is somewhere on this computer's desktop.
+///
+/// Windows keeps the real cursor on a screen, but some input drivers (the
+/// Synaptics touchpad here among them) put their own coordinates in mouse
+/// messages, including points outside every monitor. Those are not the pointer
+/// being moved here and must not take control or start a crossing.
+pub fn pointer_report_inside(vx: i32, vy: i32, vw: i32, vh: i32, x: i32, y: i32) -> bool {
+    if vw <= 1 || vh <= 1 {
+        // Bounds could not be read; do not drop real input over it.
+        return true;
+    }
+    x >= vx && x < vx + vw && y >= vy && y < vy + vh
+}
+
 /// Check if cursor coordinates cross the outer edge of the virtual desktop layout.
 #[cfg(any(test, not(windows)))]
 pub fn check_edge_crossed(side: &str, pt_x: f64, pt_y: f64, vx: i32, vy: i32, vw: i32, vh: i32) -> bool {
@@ -3251,13 +3265,7 @@ pub mod hook_engine {
             // like (1501, -21)). Read as a hand move, one of those took control
             // back and even crossed to the other computer while somebody was
             // working here, which looks like the pointer dying for no reason.
-            if vw > 1
-                && vh > 1
-                && (m.pt.x < vx
-                    || m.pt.x >= vx + vw
-                    || m.pt.y < vy
-                    || m.pt.y >= vy + vh)
-            {
+            if !pointer_report_inside(vx, vy, vw, vh, m.pt.x, m.pt.y) {
                 log::debug!(
                     "[KVM] Ignoring pointer report outside the desktop: ({}, {})",
                     m.pt.x,
@@ -5028,6 +5036,30 @@ mod tests {
         assert!(!can_start_crossing("driven", true, true));
         assert!(!can_start_crossing("home", false, true));
         assert!(!can_start_crossing("home", true, false));
+    }
+
+    #[test]
+    fn pointer_reports_from_outside_the_desktop_are_ignored() {
+        // The Synaptics touchpad on the Windows machine here reports its own
+        // coordinates in mouse messages; those are not the pointer moving.
+        let (vx, vy, vw, vh) = (0, 0, 1366, 768);
+        assert!(!pointer_report_inside(vx, vy, vw, vh, 1501, -21));
+        assert!(!pointer_report_inside(vx, vy, vw, vh, 1378, 377));
+        assert!(!pointer_report_inside(vx, vy, vw, vh, 1393, 379));
+
+        // Real points, including the very edges, still get through.
+        assert!(pointer_report_inside(vx, vy, vw, vh, 0, 0));
+        assert!(pointer_report_inside(vx, vy, vw, vh, 1365, 767));
+        assert!(pointer_report_inside(vx, vy, vw, vh, 683, 384));
+
+        // A desktop that starts left of the origin (a monitor to the left) is
+        // covered too, and points in its own negative space are fine.
+        assert!(pointer_report_inside(-1920, 0, 3840, 1080, -960, 540));
+        assert!(pointer_report_inside(-1920, 0, 3840, 1080, 1919, 1079));
+        assert!(!pointer_report_inside(-1920, 0, 3840, 1080, -1921, 540));
+
+        // Unreadable bounds must not throw real input away.
+        assert!(pointer_report_inside(0, 0, 0, 0, 99999, 99999));
     }
 
     #[test]
