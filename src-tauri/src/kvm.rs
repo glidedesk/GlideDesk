@@ -110,6 +110,7 @@ pub fn edge_push_ready(
     vw: i32,
     vh: i32,
     now_ms: u64,
+    dwell_ms: u64,
 ) -> bool {
     let touching = match side {
         "right" => pt_x >= (vx + vw) as f64 - 2.0,
@@ -135,7 +136,7 @@ pub fn edge_push_ready(
         EDGE_TOUCHED_AT_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
         return false;
     }
-    if now_ms.saturating_sub(started) < EDGE_DWELL_MS {
+    if now_ms.saturating_sub(started) < dwell_ms.max(1) {
         return false;
     }
     reset_edge_dwell();
@@ -3822,12 +3823,12 @@ pub mod hook_engine {
     /// synthetic input, which always sends the next event, crossed. Post one move
     /// at the same place once the dwell has passed; the ordinary crossing code
     /// then handles it as if the hand were still moving.
-    fn schedule_edge_wake() {
+    fn schedule_edge_wake(dwell_ms: u64) {
         if EDGE_WAKE_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(EDGE_DWELL_MS + 25));
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(dwell_ms + 25));
             EDGE_WAKE_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
             if EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed) == 0 {
                 // The pointer left the edge in the meantime; nothing to finish.
@@ -4227,6 +4228,12 @@ pub mod hook_engine {
                         return event;
                     }
 
+                    // How long the pointer has to stay pushed into the edge. The
+                    // base hold keeps a brush against the edge from handing the
+                    // session over; the person can make it longer, which is what the
+                    // "Edge resistance" slider means.
+                    let dwell_ms = EDGE_DWELL_MS
+                        + state.inner.read().kvm.resistance_ms.min(2_000) as u64;
                     // Asked on every move, so that leaving the edge clears the
                     // clock and the next approach starts over.
                     let ready = edge_push_ready(
@@ -4238,6 +4245,7 @@ pub mod hook_engine {
                             vw,
                             vh,
                             now_ms,
+                            dwell_ms,
                         );
                     if !ready && EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed) != 0 {
                         // The clock only moves when another event arrives, and a hand
@@ -4246,7 +4254,7 @@ pub mod hook_engine {
                         // worked with synthetic input (which always sends a next event)
                         // and not with a mouse. The wake posts one move in place after
                         // the dwell, and that event finishes the normal crossing code.
-                        schedule_edge_wake();
+                        schedule_edge_wake(dwell_ms);
                     }
                     let crossed = ready
                         && check_edge_crossed(&snap.layout.side, pt.x, pt.y, vx, vy, vw, vh);
@@ -5360,37 +5368,46 @@ mod tests {
         reset_edge_dwell();
 
         // A pointer that is nowhere near the edge neither crosses nor starts a clock.
-        assert!(!edge_push_ready("left", 400.0, 500.0, 0, 0, 1920, 1080, 1_000));
+        assert!(!edge_push_ready("left", 400.0, 500.0, 0, 0, 1920, 1080, 1_000, EDGE_DWELL_MS));
 
         // Reaching the edge is not crossing yet: it only starts the clock.
-        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_000));
-        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_100));
+        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_000, EDGE_DWELL_MS));
+        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_100, EDGE_DWELL_MS));
 
         // Still pressing there after the dwell: this is meant.
-        assert!(edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_160));
+        assert!(edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_160, EDGE_DWELL_MS));
 
         // The crossing cleared the clock, so the next event starts over.
-        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_180));
-        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_250));
+        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_180, EDGE_DWELL_MS));
+        assert!(!edge_push_ready("left", 0.0, 500.0, 0, 0, 1920, 1080, 1_250, EDGE_DWELL_MS));
 
         // Moving away before the dwell means the brush never counts.
-        assert!(!edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_000));
-        assert!(!edge_push_ready("bottom", 500.0, 900.0, 0, 0, 1920, 1080, 2_050));
-        assert!(!edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_100));
-        assert!(edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_270));
+        assert!(!edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_000, EDGE_DWELL_MS));
+        assert!(!edge_push_ready("bottom", 500.0, 900.0, 0, 0, 1920, 1080, 2_050, EDGE_DWELL_MS));
+        assert!(!edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_100, EDGE_DWELL_MS));
+        assert!(edge_push_ready("bottom", 500.0, 1080.0, 0, 0, 1920, 1080, 2_270, EDGE_DWELL_MS));
 
         // A handover leaves the pointer on the seam it travelled back through.
         // Sitting there must not start a new dwell: at that point the machine has
         // only just given control away or taken it back, and a pointer that rested
         // on the edge used to cross again by itself.
-        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_000));
-        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_400));
+        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_000, EDGE_DWELL_MS));
+        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_400, EDGE_DWELL_MS));
 
         // Being seen anywhere else arms the next push...
-        assert!(!edge_push_ready("right", 1000.0, 500.0, 0, 0, 1920, 1080, 3_450));
+        assert!(!edge_push_ready("right", 1000.0, 500.0, 0, 0, 1920, 1080, 3_450, EDGE_DWELL_MS));
         // ...and that push then starts its own clock.
-        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_500));
-        assert!(edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_670));
+        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_500, EDGE_DWELL_MS));
+        assert!(edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 3_670, EDGE_DWELL_MS));
+
+        // A longer hold from the Edge resistance slider means the same push is not
+        // a crossing yet: the clock keeps running and the crossing waits for it.
+        reset_edge_dwell();
+        // Seen away from the edge first, or the dwell stays disarmed by design.
+        assert!(!edge_push_ready("right", 1000.0, 500.0, 0, 0, 1920, 1080, 3_900, 360));
+        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 4_000, 360));
+        assert!(!edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 4_300, 360));
+        assert!(edge_push_ready("right", 1920.0, 500.0, 0, 0, 1920, 1080, 4_360, 360));
         reset_edge_dwell();
     }
 

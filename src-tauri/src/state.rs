@@ -160,8 +160,11 @@ pub struct KvmSettings {
     pub peer_screen: Option<(f64, f64)>,
     #[serde(default = "default_true")]
     pub ble: bool,
-    #[serde(rename = "resistancePx", default)]
-    pub resistance_px: u32,
+    /// How much longer than the base hold the pointer must stay pushed into the
+    /// edge before control is handed over. In milliseconds: the pointer stops at
+    /// the edge, so extra distance cannot be measured there, but extra time can.
+    #[serde(rename = "resistanceMs", default)]
+    pub resistance_ms: u32,
 }
 
 impl Default for KvmSettings {
@@ -184,7 +187,7 @@ impl Default for KvmSettings {
             ),
             peer_screen: None,
             ble: true,
-            resistance_px: 0,
+            resistance_ms: 0,
         }
     }
 }
@@ -1850,6 +1853,16 @@ impl AppState {
             initial_state.layout.along = along;
         }
 
+        // Pointer speed and the other Cursor preferences, so a slider that was moved
+        // is still where it was left next time the app opens.
+        #[cfg(not(test))]
+        if let Some(k) = crate::pairstore::load_kvm() {
+            initial_state.kvm.speed = k.speed;
+            initial_state.kvm.reverse_scroll = k.reverse_scroll;
+            initial_state.kvm.gestures = k.gestures;
+            initial_state.kvm.resistance_ms = k.resistance_ms;
+        }
+
         // The Files page choices (folder shared, sharing on or off, received folder,
         // direction switches), so a restart keeps the setup instead of asking again.
         #[cfg(not(test))]
@@ -2556,7 +2569,7 @@ mod tests {
             "notifs.apps", "notifs.hideText", "notifs.historyIcons", "notifs.readable",
             "notifs.sent", "notifs.shown",
             "keys.swapCtrlCmd",
-            "kvm.ble", "kvm.resistancePx",
+            "kvm.ble", "kvm.resistanceMs",
             "kvmState.lockError",
             "wake.on", "wake.checked", "wake.busy", "wake.error",
             "firewall.message", "firewall.error",

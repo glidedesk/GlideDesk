@@ -64,9 +64,11 @@ pub fn set_kvm(partial: Value, state: State<'_, AppState>, app: AppHandle) -> Re
         if let Some(ble) = partial.get("ble").and_then(|v| v.as_bool()) {
             s.kvm.ble = ble;
         }
-        if let Some(px) = partial.get("resistancePx").and_then(|v| v.as_u64()) {
-            s.kvm.resistance_px = px.min(u32::MAX as u64) as u32;
+        if let Some(ms) = partial.get("resistanceMs").and_then(|v| v.as_u64()) {
+            s.kvm.resistance_ms = ms.min(u32::MAX as u64) as u32;
         }
+        // Pointer speed and the rest are preferences: keep them for the next launch.
+        crate::pairstore::save_kvm(&s.kvm);
     }
     push_state(&app, &state);
     Ok(())

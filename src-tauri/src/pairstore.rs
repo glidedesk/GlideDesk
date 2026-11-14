@@ -243,6 +243,72 @@ pub fn save_net(net: &crate::state::NetState) {
     }
 }
 
+/// Where the pointer settings are kept: pointer speed, scroll direction, gestures
+/// and edge resistance.
+///
+/// These are the person's preferences, not runtime state. They used to live only in
+/// memory, so a slider that was moved came back at its old position after every
+/// restart and looked like it had done nothing.
+pub fn kvm_path() -> PathBuf {
+    let mut p = store_path();
+    p.set_file_name("kvm.json");
+    p
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KvmFile {
+    #[serde(default = "one")]
+    pub speed: f32,
+    #[serde(rename = "reverseScroll", default)]
+    pub reverse_scroll: bool,
+    #[serde(default = "yes")]
+    pub gestures: bool,
+    #[serde(rename = "resistanceMs", default)]
+    pub resistance_ms: u32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+/// The last pointer settings, if any were ever made.
+pub fn load_kvm() -> Option<KvmFile> {
+    let path = kvm_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<KvmFile>(&text) {
+        Ok(k) => Some(k),
+        Err(e) => {
+            log::warn!("[KVM] Ignoring unreadable {}: {}", path.display(), e);
+            None
+        }
+    }
+}
+
+/// Remember the pointer settings, so a restart comes back as the person left them.
+pub fn save_kvm(kvm: &crate::state::KvmSettings) {
+    if cfg!(test) {
+        return; // tests never touch the developer's real files
+    }
+    let path = kvm_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = KvmFile {
+        speed: kvm.speed,
+        reverse_scroll: kvm.reverse_scroll,
+        gestures: kvm.gestures,
+        resistance_ms: kvm.resistance_ms,
+    };
+    match serde_json::to_string_pretty(&file) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(&path, text) {
+                log::warn!("[KVM] Could not write {}: {}", path.display(), e);
+            }
+        }
+        Err(e) => log::warn!("[KVM] Could not encode pointer settings: {}", e),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LayoutFile {
     #[serde(default = "default_layout_side")]

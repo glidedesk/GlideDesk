@@ -44,7 +44,10 @@ UI.tab({
     const gestureRow = UI.row('Trackpad gestures', 'Pinch to zoom, swipe between desktops, Task View / Mission Control, back and forward — done the native way on {name}. The same on both', [gestures]);
     const ble = UI.switch((v) => set({ ble: v }), { label: 'Over Bluetooth' });
     const bleRow = UI.row('Over Bluetooth', 'When {name} isn’t on this network and you’re connected through Bluetooth (slower). Off: nothing crosses until you’re on Wi-Fi again. The same on both', [ble]);
-    const resistance = UI.slider({ min: 0, max: 400, step: 10, format: (v) => (v ? v + ' px' : 'None') }, (v) => set({ resistancePx: v }));
+    // The pointer stops at the edge, so extra distance cannot be measured there —
+    // extra time can. The base hold is what stops a brush against the edge from
+    // handing the session over; this slider is how much longer it has to be held.
+    const resistance = UI.slider({ min: 0, max: 400, step: 20, format: (v) => (160 + v) + ' ms' }, (v) => set({ resistanceMs: v }));
     // A phone as the peer: how the pointer and keys reach it (settings.phone.input, the phone's own toggle too).
     const via = UI.segmented([{ value: 'adb', label: 'ADB' }, { value: 'phone', label: 'Accessibility' }], (v) => api.setPhone({ input: v, inputPicked: true }));
     const viaRow = UI.row('Through', 'ADB: full control. Accessibility: GlideDesk on the phone taps and types itself, over Wi-Fi, Wi-Fi Direct or Bluetooth, no developer options', [via.el]);
@@ -53,8 +56,8 @@ UI.tab({
         UI.row('Reverse scrolling', '', [reverse]),
       ] },
       { on: { get: (s) => s.kvm.driveOther, set: (v) => set({ driveOther: v }) }, label: 'Use {me}’s mouse and keyboard on {name}', hint: 'Push the pointer past the edge', rows: [
-        UI.row('Pointer speed there', 'How far {name}’s pointer moves for the same hand travel', [speed]),
-        UI.row('Edge resistance', 'Push a little further to cross', [resistance]),
+        UI.row('Pointer speed there', '', [speed]),
+        UI.row('Edge resistance', '', [resistance]),
         viaRow,
       ] },
     );
@@ -92,7 +95,7 @@ UI.tab({
       reverse.set(k.reverseScroll);
       gestures.set(k.gestures !== false);
       ble.set(k.ble !== false);
-      resistance.set(k.resistancePx);
+      resistance.set(k.resistanceMs || 0);
       const p = UI.peer(s);
       const side = resolveSide(s);
       cells.forEach((c, i) => {
