@@ -990,6 +990,28 @@ pub fn mark_injected_event(event: macos_ffi::CGEventRef) {
     }
 }
 
+/// The kind of move event to post while a button is held for the other computer.
+///
+/// A pointer that is dragged has to arrive as a drag: apps track the mouse button
+/// through the event type, and a plain "moved" event while the button is down is
+/// not a selection, a window drag or a scrollbar grab on macOS. The buttons this
+/// computer pressed on the other one's behalf are already tracked for release, so
+/// the same set says which drag this is.
+#[cfg(target_os = "macos")]
+fn held_button_drag_event() -> Option<(macos_ffi::CGEventType, macos_ffi::CGMouseButton)> {
+    let held = HELD_BUTTONS.lock();
+    let set = held.as_ref()?;
+    if set.contains(&0) {
+        Some((macos_ffi::kCGEventLeftMouseDragged, macos_ffi::kCGMouseButtonLeft))
+    } else if set.contains(&1) {
+        Some((macos_ffi::kCGEventRightMouseDragged, macos_ffi::kCGMouseButtonRight))
+    } else if set.contains(&2) {
+        Some((macos_ffi::kCGEventOtherMouseDragged, macos_ffi::kCGMouseButtonCenter))
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn is_injected_event(event: macos_ffi::CGEventRef) -> bool {
     if event.is_null() {
@@ -2084,11 +2106,16 @@ impl NativeInputInjector {
                 };
                 let _ = CGWarpMouseCursorPosition(target);
                 hook_engine::note_injected_pointer(target.x, target.y);
+                // A drag has to arrive as a drag while a button is down, or the app
+                // under the pointer sees the pointer move without the button and the
+                // selection, window drag or slider grab is lost.
+                let (ev_type, button) =
+                    held_button_drag_event().unwrap_or((kCGEventMouseMoved, kCGMouseButtonLeft));
                 let ev = CGEventCreateMouseEvent(
                     hook_engine::event_source(),
-                    kCGEventMouseMoved,
+                    ev_type,
                     target,
-                    kCGMouseButtonLeft,
+                    button,
                 );
                 if !ev.is_null() {
                     crate::kvm::mark_injected_event(ev);
