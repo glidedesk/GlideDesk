@@ -382,6 +382,26 @@ pub fn motion_scale(local_w: f64, local_h: f64, peer_w: f64, peer_h: f64) -> (f6
     )
 }
 
+/// The person's pointer-speed setting, as a multiplier on movement sent to the
+/// other computer.
+///
+/// `motion_scale` keeps the two screens proportional, which is right but not
+/// always comfortable: the same fraction of travel in the hand can still feel
+/// slow when the other screen is the smaller one, and the pointer there crawls
+/// across it. This is the slider in the Cursor tab — the one that used to be
+/// saved and never read — applied where the movement leaves this computer, so the
+/// speed can be set from the machine the hand is on and the pointer that feels
+/// slow is the one that changes. 1× leaves movement exactly as it was, so an
+/// untouched setting changes nothing, and a value that never arrived or is out of
+/// range cannot turn a movement into a jump.
+pub fn pointer_speed_multiplier(speed: f32) -> f64 {
+    let speed = speed as f64;
+    if !speed.is_finite() || speed <= 0.0 {
+        return 1.0;
+    }
+    speed.clamp(0.25, 3.0)
+}
+
 /// Say once, in the log, how the two desktops differ and what that does to movement.
 ///
 /// When pointer travel looks wrong, the first thing worth knowing is whether the two
@@ -1571,6 +1591,17 @@ fn track_button(button: MouseButton, is_down: bool) {
     }
 }
 
+/// Stamped into `dwExtraInfo` on every mouse and keyboard event this app injects
+/// on Windows.
+///
+/// The low-level hooks installed here see injected events as well as the person's,
+/// so each one would otherwise be read as local input: a forwarded click looked
+/// like someone grabbing the mouse, and the computer that was being driven took
+/// control back the moment the other one clicked. Every injection has to carry the
+/// mark; missing it on one path is enough to break that path.
+#[cfg(windows)]
+pub const WINDOWS_INJECTION_MARK: usize = 0x474C4944;
+
 /// Native platform input injection implementation with pre-login and lock screen desktop synchronization.
 pub struct NativeInputInjector;
 
@@ -1819,7 +1850,7 @@ impl NativeInputInjector {
                             | MOUSEEVENTF_ABSOLUTE
                             | MOUSEEVENTF_VIRTUALDESK,
                         time: 0,
-                        dwExtraInfo: 0x474C4944,
+                        dwExtraInfo: WINDOWS_INJECTION_MARK,
                     },
                 },
             };
@@ -2131,7 +2162,10 @@ impl NativeInputInjector {
                     mouseData: 0,
                     dwFlags: dw_flags,
                     time: 0,
-                    dwExtraInfo: 0,
+                    // Marked as ours: an unmarked click looked like the person at
+                    // this desk taking the mouse back, so the click handed control
+                    // to the other computer instead of reaching the window under it.
+                    dwExtraInfo: WINDOWS_INJECTION_MARK,
                 },
             },
         };
@@ -2278,7 +2312,7 @@ impl NativeInputInjector {
                         mouseData: (dy * 120) as u32,
                         dwFlags: MOUSEEVENTF_WHEEL,
                         time: 0,
-                        dwExtraInfo: 0,
+                        dwExtraInfo: WINDOWS_INJECTION_MARK,
                     },
                 },
             });
@@ -2293,7 +2327,7 @@ impl NativeInputInjector {
                         mouseData: (dx * 120) as u32,
                         dwFlags: MOUSEEVENTF_HWHEEL,
                         time: 0,
-                        dwExtraInfo: 0,
+                        dwExtraInfo: WINDOWS_INJECTION_MARK,
                     },
                 },
             });
@@ -2438,7 +2472,7 @@ impl NativeInputInjector {
                     time: 0,
                     // Marked as ours so this app's own hook passes it through instead of
                     // forwarding it back to the other computer.
-                    dwExtraInfo: 0x474C4944,
+                    dwExtraInfo: WINDOWS_INJECTION_MARK,
                 },
             },
         };
@@ -3142,7 +3176,7 @@ pub mod hook_engine {
                         | MOUSEEVENTF_ABSOLUTE
                         | MOUSEEVENTF_VIRTUALDESK,
                     time: 0,
-                    dwExtraInfo: 0x474C4944,
+                    dwExtraInfo: WINDOWS_INJECTION_MARK,
                 },
             },
         };
@@ -3304,7 +3338,7 @@ pub mod hook_engine {
             let m = *(l_param.0 as *const MSLLHOOKSTRUCT);
 
             // Bypass hook for inputs injected by GlideDesk itself
-            if m.dwExtraInfo == 0x474C4944 {
+            if m.dwExtraInfo == WINDOWS_INJECTION_MARK {
                 return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
             }
 
@@ -3573,7 +3607,7 @@ pub mod hook_engine {
 
             // Pass on keys this app injected itself, otherwise remote keystrokes would be
             // forwarded back to the computer they came from.
-            if k.dwExtraInfo == 0x474C4944 {
+            if k.dwExtraInfo == WINDOWS_INJECTION_MARK {
                 return CallNextHookEx(HHOOK::default(), n_code, w_param, l_param);
             }
 
@@ -5003,6 +5037,24 @@ mod tests {
         assert_eq!(motion_scale(1920.0, 1080.0, 0.0, 0.0), (1.0, 1.0));
         // A nonsensical size must not turn a normal move into a jump.
         assert_eq!(motion_scale(1920.0, 1080.0, 100.0, 10_000_000.0), (0.25, 4.0));
+    }
+
+    #[test]
+    fn the_speed_setting_stretches_movement_without_breaking_it() {
+        // The middle of the slider is the old behaviour: nothing changes.
+        assert_eq!(pointer_speed_multiplier(1.0), 1.0);
+        // Above and below it scale the same movement sent to the other computer.
+        assert!((pointer_speed_multiplier(2.0) - 2.0).abs() < 1e-9);
+        assert!((pointer_speed_multiplier(0.5) - 0.5).abs() < 1e-9);
+        // The ends of the slider are the ends of the range.
+        assert_eq!(pointer_speed_multiplier(9.0), 3.0);
+        assert_eq!(pointer_speed_multiplier(0.01), 0.25);
+        // A value that never arrived, or one that cannot be multiplied, is ignored
+        // rather than freezing the pointer.
+        assert_eq!(pointer_speed_multiplier(0.0), 1.0);
+        assert_eq!(pointer_speed_multiplier(-2.0), 1.0);
+        assert_eq!(pointer_speed_multiplier(f32::NAN), 1.0);
+        assert_eq!(pointer_speed_multiplier(f32::INFINITY), 1.0);
     }
 
     #[test]

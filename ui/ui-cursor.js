@@ -50,10 +50,10 @@ UI.tab({
     const viaRow = UI.row('Through', 'ADB: full control. Accessibility: GlideDesk on the phone taps and types itself, over Wi-Fi, Wi-Fi Direct or Bluetooth, no developer options', [via.el]);
     const pair = UI.dirCards(
       { on: { get: (s) => s.kvm.beDriven, set: (v) => set({ beDriven: v }) }, label: 'Use {name}’s mouse and keyboard on {me}', hint: 'Push the pointer past the edge there', rows: [
-        UI.row('Pointer speed here', '', [speed]),
         UI.row('Reverse scrolling', '', [reverse]),
       ] },
       { on: { get: (s) => s.kvm.driveOther, set: (v) => set({ driveOther: v }) }, label: 'Use {me}’s mouse and keyboard on {name}', hint: 'Push the pointer past the edge', rows: [
+        UI.row('Pointer speed there', 'How far {name}’s pointer moves for the same hand travel', [speed]),
         UI.row('Edge resistance', 'Push a little further to cross', [resistance]),
         viaRow,
       ] },

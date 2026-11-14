@@ -2294,9 +2294,13 @@ impl MeshServer {
                 }
             }
             "k.wh" | "remote.wh" => {
-                // Mouse wheel / trackpad scroll
+                // Mouse wheel / trackpad scroll. The direction is decided where the
+                // scroll lands: the setting sits with the computer being driven, and
+                // that is also the one whose apps move under it.
                 let dx = pkt.dx.unwrap_or(0.0) as i32;
                 let dy = pkt.dy.unwrap_or(0.0) as i32;
+                let reverse = state.inner.read().kvm.reverse_scroll;
+                let (dx, dy) = if reverse { (-dx, -dy) } else { (dx, dy) };
                 crate::kvm::NativeInputInjector::mouse_wheel(dx, dy);
             }
             "k.kd" | "remote.kd" => {
@@ -4123,11 +4127,19 @@ impl NetworkManager {
         // The other computer's desktop is rarely the same size. Scale the sum
         // (not each event) so the same fraction of travel here covers the same
         // fraction there; without it a smaller screen could only reach part of
-        // a bigger one before its pointer hit its own edge.
+        // a bigger one before its pointer hit its own edge. The person's speed
+        // setting is applied on top of that: it is the same movement leaving this
+        // computer, so setting it here is what changes how fast the other pointer
+        // travels, which is the thing that feels slow.
         let (sx, sy) = {
             let (lw, lh) = crate::kvm::virtual_desktop_size();
-            let peer = self.state.inner.read().kvm.peer_screen.unwrap_or((0.0, 0.0));
-            crate::kvm::motion_scale(lw, lh, peer.0, peer.1)
+            let (peer, speed) = {
+                let s = self.state.inner.read();
+                (s.kvm.peer_screen.unwrap_or((0.0, 0.0)), s.kvm.speed)
+            };
+            let (mx, my) = crate::kvm::motion_scale(lw, lh, peer.0, peer.1);
+            let boost = crate::kvm::pointer_speed_multiplier(speed);
+            (mx * boost, my * boost)
         };
         let msg = WireMessage {
             t: "k.mm".to_string(),
