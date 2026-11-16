@@ -86,12 +86,79 @@ fn edge_code(side: &str) -> u8 {
     }
 }
 
+pub fn current_touched_side() -> Option<&'static str> {
+    match EDGE_TOUCHED_SIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some("left"),
+        2 => Some("right"),
+        3 => Some("top"),
+        4 => Some("bottom"),
+        _ => None,
+    }
+}
+
+static DRIVING_SIDE_CODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_driving_side(side: &str) {
+    DRIVING_SIDE_CODE.store(edge_code(side), std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn clear_driving_side() {
+    DRIVING_SIDE_CODE.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn current_driving_side() -> Option<&'static str> {
+    match DRIVING_SIDE_CODE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => Some("left"),
+        2 => Some("right"),
+        3 => Some("top"),
+        4 => Some("bottom"),
+        _ => None,
+    }
+}
+
+/// Find which configured edge the cursor is currently touching (if any).
+/// Prioritizes the edge whose dwell clock is already running.
+pub fn active_touching_edge(
+    state: &AppState,
+    pt_x: f64,
+    pt_y: f64,
+    vx: i32,
+    vy: i32,
+    vw: i32,
+    vh: i32,
+) -> Option<&'static str> {
+    if let Some(started) = current_touched_side() {
+        if check_edge_crossed(started, pt_x, pt_y, vx, vy, vw, vh) {
+            let target = state.crossing_target(started);
+            if !matches!(target, crate::mesh::CrossingTarget::Nobody) {
+                return Some(started);
+            }
+        }
+    }
+    for &side in &crate::mesh::SIDES {
+        if check_edge_crossed(side, pt_x, pt_y, vx, vy, vw, vh) {
+            let target = state.crossing_target(side);
+            if !matches!(target, crate::mesh::CrossingTarget::Nobody) {
+                return Some(side);
+            }
+        }
+    }
+    None
+}
+
 /// Forget an edge touch in progress and keep it forgotten until the pointer has
 /// moved away from the edge again (after a crossing, a return, or a click).
 pub fn reset_edge_dwell() {
     EDGE_TOUCHED_AT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     EDGE_TOUCHED_SIDE.store(0, std::sync::atomic::Ordering::Relaxed);
     EDGE_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Pointer has moved away from the edge into the screen interior, rearming the edge dwell.
+pub fn rearm_edge_dwell() {
+    EDGE_TOUCHED_AT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    EDGE_TOUCHED_SIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+    EDGE_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// True once the pointer has *stayed* on the edge long enough to mean it.
@@ -120,9 +187,7 @@ pub fn edge_push_ready(
         _ => false,
     };
     if !touching {
-        EDGE_TOUCHED_AT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
-        EDGE_TOUCHED_SIDE.store(0, std::sync::atomic::Ordering::Relaxed);
-        EDGE_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+        rearm_edge_dwell();
         return false;
     }
     if !EDGE_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -685,6 +750,7 @@ fn request_pointer(
     mouse: bool,
 ) -> Option<u64> {
     let route = state.begin_mesh_take(target)?;
+    set_driving_side(side);
     let keyboard = state.inner.read().kvm.keyboard;
     net.send_packet_to(
         target,
@@ -703,6 +769,7 @@ fn arm_take_timeout(state: &AppState, app: &AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(crate::mesh::TAKE_TIMEOUT_MS + 60));
         if state.mesh_take_timeout() {
+            clear_driving_side();
             log::warn!(
                 "[Mesh] The other device did not answer; the pointer is home again"
             );
@@ -2167,6 +2234,8 @@ impl NativeInputInjector {
     #[cfg(not(any(windows, target_os = "macos")))]
     pub fn warp_cursor(x: i32, y: i32) {
         record_injection_timestamp();
+        #[cfg(target_os = "linux")]
+        note_linux_injected_pointer(x as f64, y as f64);
         if let Some(backend) = get_custom_backend() {
             let res = backend.warp(x, y);
             handle_injection_result(InjectionErrorKind::Warp, res);
@@ -3506,25 +3575,32 @@ pub mod hook_engine {
             };
             let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
             let dwell = EDGE_DWELL_MS + state.inner.read().kvm.resistance_ms.min(2_000) as u64;
-            let ready = edge_push_ready(
-                &view.side,
-                px,
-                py,
-                vx,
-                vy,
-                vw,
-                vh,
-                super::now_millis(),
-                dwell,
-            );
-            if !ready || !check_edge_crossed(&view.side, px, py, vx, vy, vw, vh) {
+            let active_side = super::active_touching_edge(&state, px, py, vx, vy, vw, vh);
+            let ready = if let Some(side) = active_side {
+                edge_push_ready(
+                    side,
+                    px,
+                    py,
+                    vx,
+                    vy,
+                    vw,
+                    vh,
+                    super::now_millis(),
+                    dwell,
+                )
+            } else {
+                super::rearm_edge_dwell();
+                false
+            };
+            if !ready || active_side.is_none() {
                 return;
             }
+            let side = active_side.unwrap();
             cross_to_peer(
                 &state,
                 &net,
                 &app,
-                &view.side,
+                side,
                 POINT {
                     x: px.round() as i32,
                     y: py.round() as i32,
@@ -3588,7 +3664,11 @@ pub mod hook_engine {
         HookView {
             driving: s.input == "driving",
             driven: s.input == "driven",
-            has_peer: s.client.is_some() || s.peer.is_some() || s.link.state == "connected",
+            has_peer: s.client.is_some()
+                || s.peer.is_some()
+                || !s.clients.is_empty()
+                || s.link.state == "connected"
+                || !s.mesh.sessions.is_empty(),
             keyboard: s.kvm.keyboard,
             mouse: s.kvm.mouse,
             linked: s.kvm.linked,
@@ -3895,6 +3975,7 @@ pub mod hook_engine {
                     // Give up the mesh handover as well: the page stops saying "driven", and a
                     // late packet from the device that was driving is no longer the person's input.
                     state.mesh_local_takeover();
+                    super::clear_driving_side();
                     refresh_view_now();
                     crate::kvm::reset_pending_motion();
                     crate::fileclip::reset();
@@ -3922,32 +4003,37 @@ pub mod hook_engine {
                     // scrollbar or a menu hand the session away.
                     let dwell_ms = EDGE_DWELL_MS
                         + state.inner.read().kvm.resistance_ms.min(2_000) as u64;
-                    let ready = edge_push_ready(
-                        &view.side,
+                    let active_side = super::active_touching_edge(
+                        state,
                         m.pt.x as f64,
                         m.pt.y as f64,
                         vx,
                         vy,
                         vw,
                         vh,
-                        super::now_millis(),
-                        dwell_ms,
                     );
-                    if !ready && EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed) != 0 {
-                        // The hand has stopped, so no further event will finish the
-                        // hold; look again when it has passed.
-                        schedule_edge_wake(dwell_ms);
-                    }
-                    let crossed = ready
-                        && check_edge_crossed(
-                            &view.side,
+                    let ready = if let Some(side) = active_side {
+                        edge_push_ready(
+                            side,
                             m.pt.x as f64,
                             m.pt.y as f64,
                             vx,
                             vy,
                             vw,
                             vh,
-                        );
+                            super::now_millis(),
+                            dwell_ms,
+                        )
+                    } else {
+                        super::rearm_edge_dwell();
+                        false
+                    };
+                    if !ready && EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+                        // The hand has stopped, so no further event will finish the
+                        // hold; look again when it has passed.
+                        schedule_edge_wake(dwell_ms);
+                    }
+                    let crossed = ready && active_side.is_some();
 
                     // Only a computer whose pointer is being used here hands it over.
                     // The cached view can be a beat behind the pointer changing hands,
@@ -3958,7 +4044,8 @@ pub mod hook_engine {
                             can_start_crossing(&s.input, has_peer, sharing_enabled)
                         }
                     {
-                        cross_to_peer(state, net, app, &view.side, m.pt, vx, vy, vw, vh);
+                        let side = active_side.unwrap();
+                        cross_to_peer(state, net, app, side, m.pt, vx, vy, vw, vh);
                         return LRESULT(1);
                     }
                 } else if is_driving {
@@ -3977,19 +4064,21 @@ pub mod hook_engine {
                             VIRTUAL_REMOTE_X += dx;
                             VIRTUAL_REMOTE_Y += dy;
 
+                            let driving_side = super::current_driving_side().unwrap_or(&view.side);
                             let returned = check_edge_returned(
-                                &view.side,
+                                driving_side,
                                 VIRTUAL_REMOTE_X,
                                 VIRTUAL_REMOTE_Y,
                             );
 
                             if returned {
-                                log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", view.side, VIRTUAL_REMOTE_X);
+                                log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", driving_side, VIRTUAL_REMOTE_X);
                                 state.set_where_input("home");
                                 // The pointer came home by hand: give up the mesh handover here
                                 // too, so this device stops being "driving" and the other side is
                                 // told by the `kvm.home` below.
                                 state.mesh_local_takeover();
+                                super::clear_driving_side();
                                 refresh_view_now();
                                 NativeInputInjector::release_all_keys();
                                 let new_snap = state.snapshot();
@@ -4009,7 +4098,7 @@ pub mod hook_engine {
                                 // while it drives the other one, so its position here
                                 // says nothing about where it was left.
                                 let (return_x, return_y) = seam_return_point(
-                                    &view.side,
+                                    driving_side,
                                     edge_entry_fraction(),
                                     VIRTUAL_REMOTE_X,
                                     VIRTUAL_REMOTE_Y,
@@ -4675,7 +4764,11 @@ pub mod hook_engine {
             }
 
             let snap = state.snapshot();
-            let has_peer = snap.client.is_some() || snap.peer.is_some() || snap.link.state == "connected";
+            let has_peer = snap.client.is_some()
+                || snap.peer.is_some()
+                || !snap.clients.is_empty()
+                || snap.link.state == "connected"
+                || state.mesh_active();
             let is_driving = snap.input == "driving";
 
             let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
@@ -4714,6 +4807,7 @@ pub mod hook_engine {
                 // Give up the mesh handover as well: the page stops saying "driven", and a
                 // late packet from the device that was driving is no longer the person's input.
                 state.mesh_local_takeover();
+                super::clear_driving_side();
                 crate::kvm::reset_pending_motion();
                 crate::fileclip::reset();
                 NativeInputInjector::release_all_keys();
@@ -4753,10 +4847,18 @@ pub mod hook_engine {
                     // "Edge resistance" slider means.
                     let dwell_ms = EDGE_DWELL_MS
                         + state.inner.read().kvm.resistance_ms.min(2_000) as u64;
-                    // Asked on every move, so that leaving the edge clears the
-                    // clock and the next approach starts over.
-                    let ready = edge_push_ready(
-                            &snap.layout.side,
+                    let active_side = super::active_touching_edge(
+                        state,
+                        pt.x,
+                        pt.y,
+                        vx,
+                        vy,
+                        vw,
+                        vh,
+                    );
+                    let ready = if let Some(side) = active_side {
+                        super::edge_push_ready(
+                            side,
                             pt.x,
                             pt.y,
                             vx,
@@ -4765,7 +4867,11 @@ pub mod hook_engine {
                             vh,
                             now_ms,
                             dwell_ms,
-                        );
+                        )
+                    } else {
+                        super::rearm_edge_dwell();
+                        false
+                    };
                     if !ready && EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed) != 0 {
                         // The clock only moves when another event arrives, and a hand
                         // that has pushed the pointer into the edge sends none: the
@@ -4775,13 +4881,13 @@ pub mod hook_engine {
                         // the dwell, and that event finishes the normal crossing code.
                         schedule_edge_wake(dwell_ms);
                     }
-                    let crossed = ready
-                        && check_edge_crossed(&snap.layout.side, pt.x, pt.y, vx, vy, vw, vh);
+                    let crossed = ready && active_side.is_some();
 
                     if crossed {
+                        let side = active_side.unwrap();
                         VIRTUAL_REMOTE_X = 0.0;
                         VIRTUAL_REMOTE_Y = 0.0;
-                        log::info!("[KVM] Cursor crossed to peer: side={}, pt=({:.1}, {:.1})", snap.layout.side, pt.x, pt.y);
+                        log::info!("[KVM] Cursor crossed to peer: side={}, pt=({:.1}, {:.1})", side, pt.x, pt.y);
                         let is_left_drag = r#type == kCGEventLeftMouseDragged;
                         let flags = CGEventGetFlags(event);
                         let cmd_held = (flags & kCGEventFlagMaskCommand) != 0;
@@ -4791,12 +4897,12 @@ pub mod hook_engine {
                             let _ = app.emit("window-handoff-trigger", serde_json::json!({
                                 "x": pt.x,
                                 "y": pt.y,
-                                "side": snap.layout.side,
+                                "side": side,
                             }));
                         }
 
                         let entry = entry_fraction(
-                            &snap.layout.side,
+                            side,
                             pt.x,
                             pt.y,
                             vx,
@@ -4808,8 +4914,7 @@ pub mod hook_engine {
 
                         // The device on this side, or nothing to cross to. A side leading to a
                         // device that is gone shows the reason once and leaves the pointer here.
-                        let side = snap.layout.side.clone();
-                        let target = match state.crossing_target(&side) {
+                        let target = match state.crossing_target(side) {
                             crate::mesh::CrossingTarget::Device(id) => id,
                             crate::mesh::CrossingTarget::Nobody => {
                                 super::reset_edge_dwell();
@@ -4865,14 +4970,16 @@ pub mod hook_engine {
                         VIRTUAL_REMOTE_X += dx;
                         VIRTUAL_REMOTE_Y += dy;
 
-                        let returned = check_edge_returned(&snap.layout.side, VIRTUAL_REMOTE_X, VIRTUAL_REMOTE_Y);
+                        let driving_side = super::current_driving_side().unwrap_or(&snap.layout.side);
+                        let returned = check_edge_returned(driving_side, VIRTUAL_REMOTE_X, VIRTUAL_REMOTE_Y);
 
                         if returned {
-                            log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, VIRTUAL_REMOTE_X);
+                            log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", driving_side, VIRTUAL_REMOTE_X);
                             state.set_where_input("home");
                             // Home by hand: give up the mesh handover here too, so the page stops
                             // saying this device is driving and the other side is told below.
                             state.mesh_local_takeover();
+                            super::clear_driving_side();
                             NativeInputInjector::release_all_keys();
                             let new_snap = state.snapshot();
                             let _ = app.emit("state-change", &new_snap);
@@ -4891,7 +4998,7 @@ pub mod hook_engine {
                             // Come home on the spot of the seam the handover used,
                             // carried along by how far the hand has travelled since.
                             let (rx, ry) = seam_return_point(
-                                &snap.layout.side,
+                                driving_side,
                                 edge_entry_fraction(),
                                 VIRTUAL_REMOTE_X,
                                 VIRTUAL_REMOTE_Y,
@@ -5324,9 +5431,10 @@ fn run_linux_x11_capture_loop(
             inj_y,
             HAND_MOVED_TOLERANCE_PX,
         );
+        let user_moved_mouse = (root_x != last_x || root_y != last_y) && hand_moved;
         let pressed_buttons =
             (mask & !prev_mask) & (BUTTON1_MASK | BUTTON2_MASK | BUTTON3_MASK);
-        let local_pointer_input = hand_moved || pressed_buttons != 0;
+        let local_pointer_input = user_moved_mouse || pressed_buttons != 0;
 
         if suppressed && !local_pointer_input {
             // Self-echo suppression: drop inputs injected by GlideDesk itself
@@ -5338,7 +5446,11 @@ fn run_linux_x11_capture_loop(
         }
 
         let snap = state.snapshot();
-        let has_peer = snap.client.is_some() || snap.peer.is_some() || snap.link.state == "connected";
+        let has_peer = snap.client.is_some()
+            || snap.peer.is_some()
+            || !snap.clients.is_empty()
+            || snap.link.state == "connected"
+            || state.mesh_active();
         let is_driving = snap.input == "driving";
         let is_driven = snap.input == "driven";
 
@@ -5354,15 +5466,8 @@ fn run_linux_x11_capture_loop(
                 last_move_ms = now_ms;
             }
             let push_recent = now_ms.saturating_sub(last_move_ms) <= dwell_ms + 250;
-            let touching = check_edge_crossed(
-                &snap.layout.side,
-                root_x as f64,
-                root_y as f64,
-                vx,
-                vy,
-                vw,
-                vh,
-            );
+            let active_side = active_touching_edge(&state, root_x as f64, root_y as f64, vx, vy, vw, vh);
+            let touching = active_side.is_some();
             let crossed = edge_hold_ready(
                 touching,
                 push_recent,
@@ -5371,9 +5476,10 @@ fn run_linux_x11_capture_loop(
                 dwell_ms,
             );
             if crossed {
+                let side = active_side.unwrap();
                 virtual_remote_x = 0.0;
                 virtual_remote_y = 0.0;
-                log::info!("[KVM] Cursor crossed to peer: side={}, pt=({}, {})", snap.layout.side, root_x, root_y);
+                log::info!("[KVM] Cursor crossed to peer: side={}, pt=({}, {})", side, root_x, root_y);
 
                 let is_left_down = (mask & BUTTON1_MASK) != 0;
                 let is_ctrl_down = (mask & CONTROL_MASK) != 0;
@@ -5382,12 +5488,12 @@ fn run_linux_x11_capture_loop(
                     let _ = app.emit("window-handoff-trigger", serde_json::json!({
                         "x": root_x,
                         "y": root_y,
-                        "side": snap.layout.side,
+                        "side": side,
                     }));
                 }
 
                 let entry = entry_fraction(
-                    &snap.layout.side,
+                    side,
                     root_x as f64,
                     root_y as f64,
                     vx,
@@ -5397,8 +5503,7 @@ fn run_linux_x11_capture_loop(
                 );
                 note_edge_entry_fraction(entry);
                 // The device on this side, or nothing to cross to (`FR-014`).
-                let side = snap.layout.side.clone();
-                let target = match state.crossing_target(&side) {
+                let target = match state.crossing_target(side) {
                     crate::mesh::CrossingTarget::Device(id) => id,
                     crate::mesh::CrossingTarget::Nobody => {
                         reset_edge_dwell();
@@ -5415,7 +5520,7 @@ fn run_linux_x11_capture_loop(
                         continue;
                     }
                 };
-                if request_pointer(state, network, app, &target, &side, entry, true).is_none() {
+                if request_pointer(&state, &network, &app, &target, side, entry, true).is_none() {
                     if state.note_crossing_refusal(&target, "not_connected") {
                         let s = state.snapshot();
                         let _ = app.emit("state-change", &s);
@@ -5440,7 +5545,7 @@ fn run_linux_x11_capture_loop(
             // A computer the other one is using gives control back as soon as its own
             // mouse is touched. Without this the pointer stayed frozen for the whole
             // time the other computer drove, with no way to take it back by hand.
-            if local_pointer_input {
+            if local_pointer_input && !suppressed {
                 log::info!("[KVM] Local mouse took control back from the other computer");
                 // Read the handover route before giving it up: it is the answer the device that
                 // was driving compares against, and clearing the role would lose it.
@@ -5449,6 +5554,7 @@ fn run_linux_x11_capture_loop(
                 // Give up the mesh handover as well: the page stops saying "driven", and a
                 // late packet from the device that was driving is no longer the person's input.
                 state.mesh_local_takeover();
+                clear_driving_side();
                 crate::kvm::reset_pending_motion();
                 crate::fileclip::reset();
                 NativeInputInjector::release_all_keys();
@@ -5494,13 +5600,15 @@ fn run_linux_x11_capture_loop(
             virtual_remote_x += dx;
             virtual_remote_y += dy;
 
-            let returned = check_edge_returned(&snap.layout.side, virtual_remote_x, virtual_remote_y);
+            let driving_side = current_driving_side().unwrap_or(snap.layout.side.as_str());
+            let returned = check_edge_returned(driving_side, virtual_remote_x, virtual_remote_y);
             if returned {
-                log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, virtual_remote_x);
+                log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", driving_side, virtual_remote_x);
                 state.set_where_input("home");
                 // Home by hand: give up the mesh handover here too, so the page stops saying this
                 // device is driving and the other side is told by the `kvm.home` below.
                 state.mesh_local_takeover();
+                clear_driving_side();
                 NativeInputInjector::release_all_keys();
                 let new_snap = state.snapshot();
                 let _ = app.emit("state-change", &new_snap);
@@ -5517,7 +5625,7 @@ fn run_linux_x11_capture_loop(
                 // the hand has travelled — not the middle of the edge, which is where
                 // the parked pointer happens to sit while driving the other computer.
                 let (return_x, return_y) = seam_return_point(
-                    &snap.layout.side,
+                    driving_side,
                     edge_entry_fraction(),
                     virtual_remote_x,
                     virtual_remote_y,

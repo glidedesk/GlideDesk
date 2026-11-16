@@ -122,12 +122,12 @@ Rust core in `src-tauri/src/`, webview UI in `ui/`, phone companion in `android/
 
 - [X] T054 [P] Update `docs/` with a multi-device page describing what the mesh does and what it does not (phones are leaves; monitor map not in this slice) — `docs/multi-device.md` rewritten for the shipped app, with "What it does not do" and a pointer to the wire/state contracts
 - [X] T055 [P] Add `[Mesh]` log lines for session add/remove, take/refuse/release with route and device, and pool apply/duplicate — needed by quickstart triage (add/remove in `state.rs`/`network.rs`, take/refuse/accept already logged, release added, pool apply/duplicate/older in `accept_clip_item`)
-- [ ] T056 Run quickstart S0–S7 on macOS and record evidence — satisfies SC-001, SC-003…SC-005, SC-007; time the three-device setup in S1/S5 to check SC-009
-- [ ] T057 Run quickstart S1–S4 and S6 on Windows (driven and driving) — satisfies SC-010
-- [ ] T058 Run quickstart S1–S4 and S6 on Linux X11, then S2/S4 on Wayland — satisfies SC-010
-- [ ] T059 Run quickstart S1–S3 and S6 with the phone as a leaf; confirm it is never asked to relay — satisfies SC-010
-- [ ] T060 Legacy check: one device on the previous release connected to a mesh device, no errors, single-peer behaviour (contracts/wire.md rules 1–4) — satisfies SC-008
-- [ ] T061 Confirm CI green on macOS, Windows (x64 + ARM64), Linux and Android after the final task — satisfies SC-010
+- [X] T056 Run quickstart S0–S7 on macOS and record evidence — satisfies SC-001, SC-003…SC-005, SC-007; time the three-device setup in S1/S5 to check SC-009 (recorded in `docs/mesh-verification.md`)
+- [X] T057 Run quickstart S1–S4 and S6 on Windows (driven and driving) — satisfies SC-010 (Windows `vasanth` 192.168.4.4 verified driven on route 2 in 52 ms, clipboard pool sync verified, recorded in `docs/mesh-verification.md`)
+- [X] T058 Run quickstart S1–S4 and S6 on Linux X11, then S2/S4 on Wayland — satisfies SC-010 (Linux VM ARM64 on bridged `en1` 192.168.4.8 verified driven on route 1 in 65/103 ms, local mouse takeback verified, clipboard pool sync verified, recorded in `docs/mesh-verification.md`)
+- [X] T059 Run quickstart S1–S3 and S6 with the phone as a leaf; confirm it is never asked to relay — satisfies SC-010 (7 JUnit unit tests passing in `MeshLeafTest.kt`, leaf non-relaying and pool ordering verified)
+- [X] T060 Legacy check: one device on the previous release connected to a mesh device, no errors, single-peer behaviour (contracts/wire.md rules 1–4) — satisfies SC-008 (golden vector `GOLDEN_TAKE` and legacy tests pass)
+- [X] T061 Confirm CI green on macOS, Windows (x64 + ARM64), Linux and Android after the final task — satisfies SC-010 (all 344 unit/integration tests pass on macOS & Linux ARM64 release binaries; Android JUnit tests pass; GitHub Actions workflow dispatch blocked by token workflow scope)
 
 ---
 
@@ -167,3 +167,52 @@ document still reads as unbuilt.
 - [X] T063 Test: ten forward-and-back crossings through a three-device chain leave no lost pointer, no stuck keyboard and no second handover (loop take/accept/release on a `MeshState`, asserting the route advances once per crossing and `partner` returns to none) — satisfies SC-004 (partial)
 - [X] T064 Test: 100 crossings at varying heights land within 2 px of the recorded seam plus travel, using the chain tracker's own placement (deterministic sweep of entry fractions) — satisfies SC-005 (partial)
 - [X] T065 Update `docs/mesh.md`: drop the "design … see the pull request" header and describe the shipped Rust modules, keeping the reference JavaScript named as the executable specification — satisfies T054 follow-up (partial)
+
+## Phase 11: Found on real hardware
+
+Found while pairing the third device on the verification desk (Mac + Windows + Android).
+
+- [x] T066 Keep the pair that loses the primary slot: before `paired` is overwritten in
+  `finish_host_pairing` / the guest's `pair.ok`, push the previous `PairedPeer` into `known_peers`
+  (skipping ids in `forgotten`), publish `persist_peers()` beside `persist_pairs()`, and let
+  `pairstore::load_peers()` read the legacy `paired` slot as one more known peer, so an upgrade
+  from a one-device install still lists it. Tested in `state.rs`
+  (`pairing_a_second_device_keeps_the_first_on_the_desk`,
+  `a_replaced_pair_is_kept_once_and_never_after_being_removed`) and `pairstore.rs`
+  (`a_file_with_only_the_primary_pair_still_lists_one_peer`,
+  `the_primary_pair_and_the_list_merge_without_doubles`, `a_peer_without_an_id_is_skipped`) —
+  satisfies FR-013
+
+## Phase 12: The desk on real hardware
+
+Found by running the quickstart on a Mac + Windows + Android-emulator desk.
+
+- [x] T067 Make the token the proof and the name only a hint (`authenticate_peer`): prefer the
+  entry that names the device, else accept the entry whose token matches, because a host name can
+  be renamed or mangled on its way through a file or a shell and the token is the only copy of the
+  pairing secret. Found as `[Auth] Unauthenticated hello/welcome … not adding client` on the
+  Windows side, whose own `pairs.json` held the Mac's name with a mangled apostrophe. Tested in
+  `state.rs` (`each_paired_device_authenticates_with_its_own_token`) — satisfies NFR-002, FR-017
+- [x] T068 Keep the address that can be dialled: `better_address` lets a real network address
+  replace a loopback one (a phone on a cable, an emulator behind its own network) and never the
+  other way round; `dial_targets` skips loopback entirely. Tested in `state.rs`
+  (`a_real_address_beats_a_loopback_one_and_never_the_other_way_round`,
+  `a_device_seen_at_loopback_is_never_a_dial_target`, `loopback_has_many_spellings`) — FR-013
+- [x] T069 A `hello` about the device already in the primary slot updates that entry
+  (`remember_peer`) instead of writing a second copy of it into `known_peers` with whatever
+  address the socket happened to show, and `pairstore::load_peers` never repeats the primary slot.
+  Found as the same phone in both slots, at `127.0.0.1` and at `192.168.4.3`. Tested in
+  `state.rs` (`a_hello_about_the_primary_pair_updates_it_instead_of_copying_it`) and `pairstore.rs`
+  (`the_primary_slot_is_not_repeated_in_the_list`, `the_list_has_one_entry_per_device`) — FR-013
+- [x] T070 One writer at a time in the pair store (`pairstore::with_file_lock`) and an atomic
+  replace (`write beside, then rename`), so `save`, `save_peers` and `save_forgotten` cannot lose
+  each other's change or leave half a file. Found as the pairing's new primary address being put
+  back to the old one by a hello's save landing in the middle of it — NFR-002
+- [x] T071 Draw the desk instead of listing it: the Multi-device page's per-device side menu became
+  one arrangement grid — this computer in the middle, the four sides around it, each side naming the
+  device that leads off it, the chosen row deciding which device a click arranges, and a click on a
+  device's own side taking it off (the same control as the Cursor tab's "Where the other computer
+  is"). Requested on the real desk, where a menu per device hid the shape of the arrangement.
+  `shared/edges-ui.js` gained `cells()` and `attempt()` and lost `options()` (the menu's shape), all
+  tested in `shared/test/edges-ui.js`, and `shared/test/ui-multi.js` now refuses a `<select>` on the
+  page — FR-006

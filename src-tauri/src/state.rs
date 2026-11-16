@@ -1783,6 +1783,33 @@ fn note_session_connected(s: &mut FullState, c: &PeerInfo) -> bool {
     s.mesh.upsert(sess, &self_id)
 }
 
+impl FullState {
+    /// Keep the pair that is about to be replaced in the primary slot, as one more known peer.
+    ///
+    /// Pairing used to overwrite `paired` and nothing else, so pairing a second device quietly
+    /// dropped the first from the desk: its token went with it, and the next dial met a refusal
+    /// with no way back but a new code. Additive: the desk keeps every device it was introduced
+    /// to (`FR-013`, `specs/001-multi-device-mesh`).
+    ///
+    /// Called with the state already locked for writing, so it does no I/O of its own: the caller
+    /// persists the peers list once the new pair is in place.
+    pub fn retire_replaced_pair(&mut self) {
+        let Some(old) = self.paired.clone() else {
+            return;
+        };
+        if old.mac_id.is_empty() {
+            return;
+        }
+        if self.forgotten.iter().any(|f| f.eq_ignore_ascii_case(&old.mac_id)) {
+            return; // the person removed it here; a new pairing must not bring it back
+        }
+        if self.known_peers.iter().any(|p| p.mac_id.eq_ignore_ascii_case(&old.mac_id)) {
+            return; // already on the desk, nothing to keep
+        }
+        self.known_peers.push(old);
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub inner: Arc<RwLock<FullState>>,
@@ -2279,43 +2306,71 @@ impl AppState {
             if s.forgotten.iter().any(|f| f.eq_ignore_ascii_case(id)) {
                 return;
             }
-            match s
-                .known_peers
-                .iter_mut()
-                .find(|p| p.mac_id.eq_ignore_ascii_case(id))
-            {
-                Some(existing) => {
-                    let mut changed = false;
-                    if !name.is_empty() && existing.mac_name != name {
-                        existing.mac_name = name.to_string();
-                        changed = true;
-                    }
-                    if !os.is_empty() && existing.os != os {
-                        existing.os = os.to_string();
-                        changed = true;
-                    }
-                    if address.is_some() && existing.address != address {
-                        existing.address = address;
-                        changed = true;
-                    }
-                    // A token is only ever added, never cleared by a hello that did not carry one.
-                    if token.is_some() && existing.token != token {
-                        existing.token = token;
-                        changed = true;
-                    }
-                    changed
+            // The primary pair is one of the desk's devices too. A live hello about it used to be
+            // written beside it as a second entry with the address the hello happened to see
+            // (found on the desk: the phone in the primary slot at loopback, and the same phone
+            // again in the list at its Wi-Fi address), so it is updated in place instead.
+            let is_primary = s
+                .paired
+                .as_ref()
+                .map(|p| p.mac_id.eq_ignore_ascii_case(id))
+                .unwrap_or(false);
+            if is_primary {
+                let p = s.paired.as_mut().unwrap();
+                let mut changed = false;
+                if !name.is_empty() && p.mac_name != name {
+                    p.mac_name = name.to_string();
+                    changed = true;
                 }
-                None => {
-                    let tls_fingerprint = s.peer_fingerprints.get(id).cloned();
-                    s.known_peers.push(PairedPeer {
-                        mac_id: id.to_string(),
-                        mac_name: name.to_string(),
-                        os: os.to_string(),
-                        address,
-                        token,
-                        tls_fingerprint,
-                    });
-                    true
+                if !os.is_empty() && p.os != os {
+                    p.os = os.to_string();
+                    changed = true;
+                }
+                if let Some(addr) = better_address(p.address.as_ref(), address.as_ref()) {
+                    p.address = Some(addr);
+                    changed = true;
+                }
+                changed
+            } else {
+                match s
+                    .known_peers
+                    .iter_mut()
+                    .find(|p| p.mac_id.eq_ignore_ascii_case(id))
+                {
+                    Some(existing) => {
+                        let mut changed = false;
+                        if !name.is_empty() && existing.mac_name != name {
+                            existing.mac_name = name.to_string();
+                            changed = true;
+                        }
+                        if !os.is_empty() && existing.os != os {
+                            existing.os = os.to_string();
+                            changed = true;
+                        }
+                        if let Some(addr) = better_address(existing.address.as_ref(), address.as_ref())
+                        {
+                            existing.address = Some(addr);
+                            changed = true;
+                        }
+                        // A token is only ever added, never cleared by a hello that did not carry one.
+                        if token.is_some() && existing.token != token {
+                            existing.token = token;
+                            changed = true;
+                        }
+                        changed
+                    }
+                    None => {
+                        let tls_fingerprint = s.peer_fingerprints.get(id).cloned();
+                        s.known_peers.push(PairedPeer {
+                            mac_id: id.to_string(),
+                            mac_name: name.to_string(),
+                            os: os.to_string(),
+                            address,
+                            token,
+                            tls_fingerprint,
+                        });
+                        true
+                    }
                 }
             }
         };
@@ -2329,6 +2384,12 @@ impl AppState {
     /// Every paired device has its own copy of the secret, so a desk with several screens does not
     /// depend on which one paired last. Returns the id of the device that matched, which is the id
     /// the session is recorded under, even when the peer only named its address.
+    ///
+    /// The token is the proof. The name is only a hint: it is the device's own host name, which a
+    /// person may change at any time, and which travels badly through files and shells — found on
+    /// the desk as a `hello` refused because this computer's own store held the Mac's name with a
+    /// mangled apostrophe. So an entry that names the device is preferred, and a token that
+    /// matches an entry is accepted whatever the peer calls itself.
     pub fn authenticate_peer(
         &self,
         claimed_id: Option<&str>,
@@ -2346,21 +2407,25 @@ impl AppState {
             }
         };
         let s = self.inner.read();
-        for p in &s.known_peers {
-            if let Some(exp) = p.token.as_deref() {
-                if tokens_match(exp, recv) && id_ok(&p.mac_id) {
-                    return Some(p.mac_id.clone());
-                }
-            }
+        let token_ok = |p: &PairedPeer| -> bool {
+            p.token
+                .as_deref()
+                .map(|exp| tokens_match(exp, recv))
+                .unwrap_or(false)
+        };
+        let candidates: Vec<&PairedPeer> = s.known_peers.iter().chain(s.paired.iter()).collect();
+        if let Some(p) = candidates
+            .iter()
+            .copied()
+            .find(|p| token_ok(p) && id_ok(&p.mac_id))
+        {
+            return Some(p.mac_id.clone());
         }
-        if let Some(p) = &s.paired {
-            if let Some(exp) = p.token.as_deref() {
-                if tokens_match(exp, recv) && id_ok(&p.mac_id) {
-                    return Some(p.mac_id.clone());
-                }
-            }
-        }
-        None
+        candidates
+            .iter()
+            .copied()
+            .find(|p| token_ok(p))
+            .map(|p| p.mac_id.clone())
     }
 
     /// The token this app shares with `peer_id`, if it has one.
@@ -2454,6 +2519,11 @@ impl AppState {
             if addr.trim().is_empty() {
                 return;
             }
+            // Loopback is this computer by another name. A device seen at 127.0.0.1 is one that
+            // reaches us through a cable or an emulator, and it is the side that dials.
+            if is_loopback_address(addr) {
+                return;
+            }
             if s.forgotten.iter().any(|f| f.eq_ignore_ascii_case(id)) {
                 return;
             }
@@ -2475,8 +2545,7 @@ impl AppState {
     }
 
     /// Write every paired device back, so the next launch can dial them.
-    fn persist_peers(&self) {
-        let peers = self.inner.read().known_peers.clone();
+    pub(crate) fn persist_peers(&self) {        let peers = self.inner.read().known_peers.clone();
         #[cfg(not(test))]
         crate::pairstore::save_peers(&peers);
         #[cfg(test)]
@@ -2607,34 +2676,22 @@ impl AppState {
     /// crossing is exactly the crossing it was before this feature existed.
     pub fn crossing_target(&self, side: &str) -> crate::mesh::CrossingTarget {
         let s = self.inner.read();
-        if !s.mesh.active {
-            if side != s.layout.side {
-                return crate::mesh::CrossingTarget::Nobody;
-            }
-            return match s.mesh.sessions.first() {
-                Some(only) => crate::mesh::CrossingTarget::Device(only.id.clone()),
-                None => crate::mesh::CrossingTarget::Nobody,
+        if let Some(id) = s.layout.edges.get(side) {
+            return if s.mesh.session(id).is_some() {
+                crate::mesh::CrossingTarget::Device(id.to_string())
+            } else {
+                crate::mesh::CrossingTarget::Missing(id.to_string())
             };
         }
-        match s.layout.edges.get(side) {
-            Some(id) => {
-                if s.mesh.session(id).is_some() {
-                    crate::mesh::CrossingTarget::Device(id.to_string())
-                } else {
-                    crate::mesh::CrossingTarget::Missing(id.to_string())
-                }
-            }
-            // No edge assigned for this side. The seam the two-device app used still leads
-            // somewhere: the device holding the pointer, or the first device that connected, so
-            // the desk behaves as it did before the person arranges it.
-            None if side == s.layout.side => match s.mesh.partner_id() {
-                Some(id) => crate::mesh::CrossingTarget::Device(id.to_string()),
-                None => match s.mesh.sessions.first() {
-                    Some(first) => crate::mesh::CrossingTarget::Device(first.id.clone()),
-                    None => crate::mesh::CrossingTarget::Nobody,
-                },
+        if side != s.layout.side {
+            return crate::mesh::CrossingTarget::Nobody;
+        }
+        match s.mesh.partner_id() {
+            Some(id) => crate::mesh::CrossingTarget::Device(id.to_string()),
+            None => match s.mesh.sessions.first() {
+                Some(first) => crate::mesh::CrossingTarget::Device(first.id.clone()),
+                None => crate::mesh::CrossingTarget::Nobody,
             },
-            None => crate::mesh::CrossingTarget::Nobody,
         }
     }
 
@@ -2774,13 +2831,14 @@ impl AppState {
     /// the partner bookkeeping would hold a spelling no session answers to (and the next take would
     /// be refused as coming from a stranger).
     pub fn device_id_for(&self, peer_id: Option<&str>, address: &str) -> String {
+        let addr_host = address.split(':').next().unwrap_or(address);
         let known = {
             let s = self.inner.read();
             s.mesh
                 .session_by_address(address)
                 .map(|m| m.id.clone())
                 .or_else(|| s.clients.iter().find(|c| {
-                    c.address.as_deref() == Some(address)
+                    c.address.as_deref().map(|a| a == address || a.split(':').next().unwrap_or(a) == addr_host).unwrap_or(false)
                 }).map(|c| c.id.clone()))
         };
         known
@@ -2846,6 +2904,38 @@ impl AppState {
     }
 }
 
+/// Is this address only ever "this computer"?
+///
+/// A device seen at loopback is one that reaches us through a cable (`adb reverse`) or an
+/// emulator's own network: it is that side which dials, so it is never a dial target here.
+pub fn is_loopback_address(addr: &str) -> bool {
+    let addr = addr.trim();
+    let addr = addr.trim_start_matches("ws://").trim_start_matches("wss://");
+    // An IPv6 address carries colons of its own, so the whole string is checked before the port
+    // is split off, and `::1` must not be read as host ":" port "1".
+    if addr.eq_ignore_ascii_case("localhost") || addr == "::1" || addr == "[::1]" {
+        return true;
+    }
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
+}
+
+/// Which of a device's two known addresses is the better one to keep?
+///
+/// `None` means "leave what is written alone": the new one is empty or the same. A real network
+/// address replaces a loopback one (a phone on a cable, an emulator behind its own network), but a
+/// loopback address never replaces a real one, and otherwise the newer sighting wins.
+fn better_address(current: Option<&String>, new: Option<&String>) -> Option<String> {
+    let new = new.map(|s| s.trim()).filter(|s| !s.is_empty())?;
+    match current.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        None => Some(new.to_string()),
+        Some(cur) if cur == new => None,
+        Some(cur) if is_loopback_address(new) && !is_loopback_address(cur) => None,
+        Some(_) => Some(new.to_string()),
+    }
+}
+
 /// Collect all non-loopback LAN IPv4 addresses this machine is reachable on.
 pub fn local_ip_addresses() -> Vec<String> {
     let mut addrs = Vec::new();
@@ -2906,6 +2996,15 @@ pub fn whoami_host() -> String {
             let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !name.is_empty() {
                 return name;
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+            let trimmed = h.trim().to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
             }
         }
     }
@@ -3045,6 +3144,74 @@ mod tests {
         assert_eq!(disc_snap.link.state, "disconnected");
         assert_eq!(disc_snap.link.mac_name, None);
         assert!(disc_snap.peer.is_none());
+    }
+
+    #[test]
+    fn pairing_a_second_device_keeps_the_first_on_the_desk() {
+        // Seen for real: the Mac was paired with the Windows machine, then paired the phone, and
+        // the Windows pair was gone from pairs.json — token and all — so the next dial was
+        // refused with nothing on screen to explain it.
+        let app_state = AppState::new();
+        {
+            let mut s = app_state.inner.write();
+            s.paired = Some(PairedPeer {
+                mac_id: "vasanth".to_string(),
+                mac_name: "VASANTH".to_string(),
+                os: "win".to_string(),
+                address: Some("192.168.4.4".to_string()),
+                token: Some("BEAM_AUTH_V1:aa:bb".to_string()),
+                tls_fingerprint: None,
+            });
+            s.retire_replaced_pair();
+            s.paired = Some(PairedPeer {
+                mac_id: "pixel".to_string(),
+                mac_name: "Pixel".to_string(),
+                os: "android".to_string(),
+                address: None,
+                token: Some("BEAM_AUTH_V1:cc:dd".to_string()),
+                tls_fingerprint: None,
+            });
+        }
+        let s = app_state.inner.read();
+        assert_eq!(s.paired.as_ref().map(|p| p.mac_id.as_str()), Some("pixel"));
+        let kept = s.known_peers.iter().find(|p| p.mac_id == "vasanth");
+        let kept = kept.expect("the first pair stays on the desk");
+        assert_eq!(kept.token.as_deref(), Some("BEAM_AUTH_V1:aa:bb"), "with its token");
+        assert_eq!(kept.address.as_deref(), Some("192.168.4.4"), "and where it was");
+    }
+
+    #[test]
+    fn a_replaced_pair_is_kept_once_and_never_after_being_removed() {
+        let app_state = AppState::new();
+        {
+            let mut s = app_state.inner.write();
+            s.paired = Some(PairedPeer {
+                mac_id: "vasanth".to_string(),
+                mac_name: "VASANTH".to_string(),
+                os: "win".to_string(),
+                address: None,
+                token: Some("BEAM_AUTH_V1:aa:bb".to_string()),
+                tls_fingerprint: None,
+            });
+            s.retire_replaced_pair();
+            s.retire_replaced_pair();
+            assert_eq!(s.known_peers.len(), 1, "keeping it twice would show two rows");
+
+            // The person removed it here; a later pairing must not bring it back through the
+            // side door of the replaced-pair slot.
+            s.known_peers.clear();
+            s.forgotten.push("vasanth".to_string());
+            s.paired = Some(PairedPeer {
+                mac_id: "vasanth".to_string(),
+                mac_name: "VASANTH".to_string(),
+                os: "win".to_string(),
+                address: None,
+                token: Some("BEAM_AUTH_V1:aa:bb".to_string()),
+                tls_fingerprint: None,
+            });
+            s.retire_replaced_pair();
+            assert!(s.known_peers.is_empty(), "a forgotten device stays forgotten");
+        }
     }
 
     #[test]
@@ -3388,6 +3555,79 @@ mod tests {
             .any(|d| d.id == "phone"));
     }
 
+    #[test]
+    fn a_device_seen_at_loopback_is_never_a_dial_target() {
+        // The phone on the emulator reaches the Mac through the emulator's own network, so the Mac
+        // records it at 127.0.0.1. Dialling that reached this computer instead, once every eight
+        // seconds, and said so in the log. The phone dials; this side does not.
+        let a = AppState::new();
+        a.remember_peer("phone", "Phone", "android", Some("127.0.0.1".to_string()), Some("tok".to_string()));
+        a.remember_peer("desktop", "Desk", "win", Some("192.168.4.4".to_string()), Some("tok".to_string()));
+        let targets = a.dial_targets();
+        assert_eq!(targets.len(), 1, "only the LAN device is worth dialling");
+        assert_eq!(targets[0].0, "desktop");
+    }
+
+    #[test]
+    fn a_real_address_beats_a_loopback_one_and_never_the_other_way_round() {
+        let lan = Some("192.168.4.3".to_string());
+        let loopback = Some("127.0.0.1".to_string());
+        assert_eq!(better_address(None, lan.as_ref()), lan, "first sighting is kept");
+        assert_eq!(better_address(loopback.as_ref(), lan.as_ref()), lan, "a dialable address wins");
+        assert_eq!(better_address(lan.as_ref(), loopback.as_ref()), None, "and is not lost again");
+        assert_eq!(better_address(lan.as_ref(), lan.as_ref()), None, "the same address is no change");
+        assert_eq!(better_address(lan.as_ref(), Some(&String::new())), None, "empty is no change");
+        assert_eq!(
+            better_address(Some(&"192.168.4.9".to_string()), lan.as_ref()),
+            lan,
+            "a moved device is followed"
+        );
+    }
+
+    #[test]
+    fn a_hello_about_the_primary_pair_updates_it_instead_of_copying_it() {
+        // Seen on the desk: pairing the phone put it in the primary slot, and the very next
+        // hello wrote a second copy of the same phone into the list, at a different address.
+        let a = AppState::new();
+        {
+            let mut s = a.inner.write();
+            s.paired = Some(PairedPeer {
+                mac_id: "phone".to_string(),
+                mac_name: "Phone".to_string(),
+                os: "android".to_string(),
+                address: Some("127.0.0.1".to_string()),
+                token: Some("tok".to_string()),
+                tls_fingerprint: None,
+            });
+        }
+
+        a.remember_peer("phone", "Phone", "android", Some("192.168.4.3".to_string()), None);
+
+        let s = a.inner.read();
+        assert!(s.known_peers.is_empty(), "the primary pair is not copied into the list");
+        let p = s.paired.as_ref().expect("still paired");
+        assert_eq!(p.address.as_deref(), Some("192.168.4.3"), "its address is brought up to date");
+        assert_eq!(p.token.as_deref(), Some("tok"), "and its token is kept");
+
+        // A loopback sighting never overwrites the real address.
+        drop(s);
+        a.remember_peer("phone", "Phone", "android", Some("127.0.0.1".to_string()), None);
+        assert_eq!(
+            a.inner.read().paired.as_ref().unwrap().address.as_deref(),
+            Some("192.168.4.3")
+        );
+    }
+
+    #[test]
+    fn loopback_has_many_spellings() {
+        for addr in ["127.0.0.1", "127.0.0.1:47800", "localhost", "localhost:47800", "::1", "[::1]:47800", "ws://127.0.0.1:47800"] {
+            assert!(is_loopback_address(addr), "{addr} is this computer");
+        }
+        for addr in ["192.168.4.4", "192.168.4.4:47800", "10.0.2.2", "fe80::1"] {
+            assert!(!is_loopback_address(addr), "{addr} is somewhere else");
+        }
+    }
+
     /// Forgetting wins: the device is not added back, not dialled, and not learned again from a
     /// peer's roster (`FR-022`, `contracts/wire.md` rule 5).
     #[test]
@@ -3502,8 +3742,8 @@ mod tests {
         );
         assert_eq!(
             a.authenticate_peer(Some("desktop"), Some("tok-b"), None),
-            None,
-            "a token belongs to one device only"
+            Some("laptop".to_string()),
+            "the token decides who it is, never the name it claims"
         );
         assert_eq!(
             a.authenticate_peer(None, Some("tok-a"), Some("192.168.4.11")),
@@ -3512,6 +3752,15 @@ mod tests {
         );
         assert_eq!(a.token_for("laptop").as_deref(), Some("BEAM_AUTH_V1:tok-b:CC:DD"));
         assert_eq!(a.token_for("stranger"), None);
+
+        // The name is a hint, not the proof: the device's own host name can be renamed, or
+        // mangled on its way into this computer's store, and the token is still the only copy of
+        // the secret that proves the pair.
+        assert_eq!(
+            a.authenticate_peer(Some("desktop-renamed"), Some("tok-a"), None),
+            Some("desktop".to_string()),
+            "a renamed device is the same device"
+        );
 
         // A device the person forgot cannot authenticate.
         a.forget_peer("laptop");

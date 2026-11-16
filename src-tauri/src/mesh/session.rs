@@ -216,11 +216,12 @@ impl MeshState {
         if address.is_empty() {
             return None;
         }
+        let addr_host = address.split(':').next().unwrap_or(address);
         self.sessions.iter().find(|s| {
-            s.address.as_deref().map(|a| a == address
-                || a.split(':').next().map(|host| host == address).unwrap_or(false)
-                || address.split(':').next().map(|host| host == a).unwrap_or(false))
-                .unwrap_or(false)
+            s.address.as_deref().map(|a| {
+                a == address
+                    || a.split(':').next().unwrap_or(a) == addr_host
+            }).unwrap_or(false)
         })
     }
 
@@ -468,7 +469,7 @@ impl MeshState {
     /// answer to an older route cannot keep a handover alive that has already come home.
     pub fn confirm_take(&mut self, from: &str, route: u64) -> bool {
         match &self.pending {
-            Some(p) if p.target == from && p.route <= route => {
+            Some(p) if (p.target == from || p.target.eq_ignore_ascii_case(from)) && p.route <= route => {
                 self.pending = None;
                 self.route = self.route.max(route);
                 true
@@ -483,7 +484,7 @@ impl MeshState {
     /// that arrives after the person went home by hand from taking the pointer away a second time.
     pub fn refuse_take(&mut self, from: &str, route: u64) -> bool {
         match &self.pending {
-            Some(p) if p.target == from && p.route <= route => {
+            Some(p) if (p.target == from || p.target.eq_ignore_ascii_case(from)) && p.route <= route => {
                 self.pending = None;
                 self.clear_partner();
                 true
@@ -521,7 +522,7 @@ impl MeshState {
         match self.role.as_str() {
             "driving" => return TakeDecision::Refuse("busy"),
             "driven" => {
-                if self.partner.as_deref() != Some(from) {
+                if !self.partner.as_deref().map(|p| p == from || p.eq_ignore_ascii_case(from)).unwrap_or(false) {
                     return TakeDecision::Refuse("busy");
                 }
             }
@@ -566,7 +567,7 @@ impl MeshState {
     /// from a device that was driven a while ago must not take the pointer away from the device
     /// driving now.
     pub fn home_from_driven(&mut self, from: &str, route: u64) -> bool {
-        if self.role != "driving" || self.partner.as_deref() != Some(from) {
+        if self.role != "driving" || !self.partner.as_deref().map(|p| p == from || p.eq_ignore_ascii_case(from)).unwrap_or(false) {
             return false;
         }
         if route < self.route {

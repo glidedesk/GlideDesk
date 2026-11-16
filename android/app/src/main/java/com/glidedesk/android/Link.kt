@@ -76,6 +76,7 @@ class Link(
     private var pendingAddress = ""
     private val lastRxOf = java.util.concurrent.ConcurrentHashMap<WebSocket, Long>()
     private var helloTimer: ScheduledFuture<*>? = null
+    private var pairTimer: ScheduledFuture<*>? = null
     var bleRx: () -> Long = { 0L } // Ble.lastDown: bytes arriving through Bluetooth count as alive
     // Fast files (Proto.FX_PATH): the session's token from welcome {fx}; none from a computer that can't.
     @Volatile private var fxToken = ""
@@ -152,12 +153,14 @@ class Link(
         if (p.phase != "code" || mode != "pair") return@run
         raw(msg(Proto.T.PAIR_CONFIRM))
         pair = p.copy(phase = "waiting")
+        awaitAnswer()
         events.onChange()
     }
 
     fun cancelPairing() = run {
         val p = pair ?: return@run
         if (mode == "pair" && p.phase != "failed") raw(msg(Proto.T.PAIR_CANCEL))
+        pairTimer?.cancel(false)
         pair = null
         if (mode == "pair") closeSocket()
         events.onChange()
@@ -407,6 +410,7 @@ class Link(
         if (p.wired || p.qr) {
             raw(msg(Proto.T.PAIR_CONFIRM))
             pair = pair?.copy(phase = "waiting")
+            awaitAnswer()
         }
         events.onChange()
     }
@@ -417,11 +421,13 @@ class Link(
         val token = m.optString("token")
         val id = m.optString("macId")
         if (token.isEmpty() || id.isEmpty()) return pairFailed("The computer sent a bad pairing message.")
+        pairTimer?.cancel(false)
         // Through the cable the address is this phone's own end of adb reverse: the computer's
         // network address comes from discovery when it's seen (Core.connect), else the cable again.
         // Through Bluetooth likewise: no network address yet (Core keeps the pipe for it).
-        val h = if (p.wired || p.ble) Host(id, m.optString("macName").take(64).ifEmpty { p.name }, m.optString("os", "mac"), "127.0.0.1", Proto.PORT, seenFp, token, System.currentTimeMillis())
-            else Host(id, m.optString("macName").take(64).ifEmpty { p.name }, m.optString("os", "mac"), p.address, p.port, seenFp, token, System.currentTimeMillis())
+        val peerName = m.optString("macName").takeIf { it.isNotEmpty() && it != "null" }?.take(64) ?: p.name
+        val h = if (p.wired || p.ble) Host(id, peerName, m.optString("os", "mac"), "127.0.0.1", Proto.PORT, seenFp, token, System.currentTimeMillis())
+            else Host(id, peerName, m.optString("os", "mac"), p.address, p.port, seenFp, token, System.currentTimeMillis())
         store.putHost(h)
         pair = null
         mode = "session"
@@ -436,7 +442,7 @@ class Link(
         if (mode != "session" || state == "connected") return
         helloTimer?.cancel(false)
         val h = host ?: return
-        m.optString("macName").takeIf { it.isNotEmpty() }?.let { h.name = it.take(64) }
+        m.optString("macName").takeIf { it.isNotEmpty() && it != "null" }?.let { h.name = it.take(64) }
         h.lastSeen = System.currentTimeMillis()
         store.putHost(h)
         rttMs = null
@@ -490,9 +496,21 @@ class Link(
 
     private fun pairFailed(error: String) {
         val p = pair ?: return
+        pairTimer?.cancel(false)
         pair = p.copy(phase = "failed", error = error, code = "")
         closeSocket()
         events.onChange()
+    }
+
+    // The person answered on this phone; the computer still has to. Without this the screen sat at
+    // "Pairing…" for good when the other side had already gone (seen on the emulator: the
+    // computer's session ended nineteen seconds in and nothing here ever said so).
+    private fun awaitAnswer() {
+        pairTimer?.cancel(false)
+        pairTimer = exec.schedule({
+            val p = pair
+            if (p != null && p.phase == "waiting") pairFailed("The computer didn’t answer. Try again.")
+        }, Proto.PAIR_ANSWER_MS, TimeUnit.MILLISECONDS)
     }
 
     private fun dropOthers() {

@@ -782,6 +782,25 @@ impl HeartbeatTracker {
     }
 }
 
+/// Is a pairing prompt on screen, unanswered, so the quiet peer is a person rather than a socket
+/// that died? `None` is no pairing at all; `"failed"` is a pairing already over.
+fn pairing_prompt_open(phase: Option<&str>) -> bool {
+    matches!(phase, Some(p) if p != "failed")
+}
+
+/// Is this `welcome` from the device we dialled?
+///
+/// A welcome names itself. When it does, the name has to be the device recorded at that address;
+/// a welcome that names nothing is taken at its address, because the dial already pinned the
+/// certificate. Found on the desk: the side that dials was refusing the answer, since a welcome
+/// carries no token to compare (`[Auth] Unauthenticated hello/welcome … not adding client`).
+fn welcome_identity(claimed: Option<&str>, known_id: &str) -> bool {
+    match claimed.map(|c| c.trim()) {
+        Some(c) if !c.is_empty() => c.eq_ignore_ascii_case(known_id),
+        _ => true,
+    }
+}
+
 /// UDP LAN Discovery: broadcasts our beacon and discovers nearby GlideDesk peers.
 pub struct DiscoveryService {
     app: AppHandle,
@@ -1026,7 +1045,7 @@ impl ClientInfo {
 pub fn is_addressed_to_local(dests: &Option<Vec<String>>, local_id: &str) -> bool {
     match dests {
         None => true,
-        Some(list) => list.iter().any(|d| d == local_id),
+        Some(list) => list.iter().any(|d| same_peer_id(d, local_id)),
     }
 }
 
@@ -1045,7 +1064,7 @@ pub fn addressed_to_local(pkt: &WireMessage, local_id: &str, local_addrs: &[Stri
         Some(list) if list.is_empty() => return true,
         Some(list) => list,
     };
-    if dests.iter().any(|d| d.eq_ignore_ascii_case(local_id)) {
+    if dests.iter().any(|d| same_peer_id(d, local_id)) {
         return true;
     }
     dests.iter().any(|d| {
@@ -1151,7 +1170,7 @@ fn session_matches(
     if target.is_empty() {
         return false;
     }
-    if session_id == target || peer_id == Some(target) {
+    if session_id == target || peer_id.map(|p| same_peer_id(p, target)).unwrap_or(false) {
         return true;
     }
     let ip = peer_addr.ip().to_string();
@@ -1455,7 +1474,16 @@ impl MeshServer {
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
-                    if tracker.is_stale() {
+                    // A pairing prompt is a person reading a code on two screens: that is
+                    // silence, not a dead peer. Timing it out here pulled the session out from
+                    // under the Allow click — found on the desk while pairing a phone that took
+                    // nineteen seconds to compare two six-digit codes against a twelve-second
+                    // timeout. Once the prompt is answered the ordinary rule applies again.
+                    let prompt = {
+                        let s = state.inner.read();
+                        s.pairing.as_ref().map(|p| p.phase.clone())
+                    };
+                    if tracker.is_stale() && !pairing_prompt_open(prompt.as_deref()) {
                         log::warn!("[MeshServer] Peer {} heartbeat timeout (12s silence)", peer_addr);
                         break;
                     }
@@ -1648,6 +1676,8 @@ impl MeshServer {
                         .find(|f| same_peer_id(&f.id, &sess.peer_id))
                         .and_then(|f| f.address.clone())
                 });
+                // Whoever held the primary slot before stays on the desk, with its token.
+                s.retire_replaced_pair();
                 s.paired = Some(crate::state::PairedPeer {
                     mac_id: sess.peer_id.clone(),
                     mac_name: sess.peer_name.clone(),
@@ -1661,6 +1691,7 @@ impl MeshServer {
             }
             // Paired for good: write it down so the next launch comes up paired.
             state.persist_pairs();
+            state.persist_peers();
             let ok_msg = WireMessage {
                 t: "pair.ok".to_string(),
                 v: Some(1),
@@ -1928,6 +1959,8 @@ impl MeshServer {
                     s.peer = Some(p_info.clone());
                     s.client = Some(p_info);
                     let fp = s.peer_fingerprints.get(&host_id).cloned();
+                    // Whoever held the primary slot before stays on the desk, with its token.
+                    s.retire_replaced_pair();
                     s.paired = Some(crate::state::PairedPeer {
                         mac_id: host_id.clone(),
                         mac_name: host_name.clone(),
@@ -1940,6 +1973,7 @@ impl MeshServer {
                 *authenticated.write() = true;
                 // Paired for good: write it down so the next launch comes up paired.
                 state.persist_pairs();
+                state.persist_peers();
                 {
                     let mut pair_guard = pending_pair.write();
                     *pair_guard = None;
@@ -2280,6 +2314,17 @@ impl MeshServer {
                     pkt.token.as_deref(),
                     Some(&peer_addr.ip().to_string()),
                 );
+                // A `welcome` carries no token: it is the answer to a dial that already proved
+                // this side to the other. What proves the other side here is the certificate we
+                // pinned on the way in, so the welcome is trusted only as the device recorded at
+                // that address, and only while it names that device.
+                let matched_peer = matched_peer.or_else(|| {
+                    if pkt.t != "welcome" {
+                        return None;
+                    }
+                    let known = state.paired_at(&peer_addr.ip().to_string())?;
+                    welcome_identity(pkt.id.as_deref(), &known.mac_id).then_some(known.mac_id)
+                });
                 let is_auth = matched_peer.is_some();
 
                 if is_auth {
@@ -3349,6 +3394,7 @@ impl MeshServer {
                     pkt.route.unwrap_or(0)
                 );
                 state.set_where_input("home");
+                crate::kvm::clear_driving_side();
                 crate::kvm::reset_pending_motion();
                 crate::mesh::chain::reset();
                 // A shortcut held over the link must not survive the pointer leaving,
@@ -4216,9 +4262,9 @@ impl NetworkManager {
             c.peer_id
                 .read()
                 .as_deref()
-                .map(|pid| pid.eq_ignore_ascii_case(id))
+                .map(|pid| same_peer_id(pid, id))
                 .unwrap_or(false)
-                || c.id.eq_ignore_ascii_case(id)
+                || same_peer_id(&c.id, id)
         })
     }
 
@@ -4229,19 +4275,29 @@ impl NetworkManager {
     /// device that does not answer is left alone for longer and longer instead of being hammered.
     /// A device the person forgot is never in the list (`AppState::dial_targets`).
     pub fn dial_known_peers(&self) {
+        self.dial_known_peers_except(None);
+    }
+
+    /// Every paired device except `skip`, which the caller is dialling itself.
+    fn dial_known_peers_except(&self, skip: Option<String>) {
         // Dialling must not be part of an incoming packet's own future: a connection attempt
         // starts a session loop, and that loop receives packets. Spawning keeps the two apart.
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
-            this.dial_known_peers_now().await;
+            this.dial_known_peers_now(skip).await;
         });
     }
 
-    async fn dial_known_peers_now(&self) {
-        if !self.state.mesh_active() {
-            return;
-        }
+    async fn dial_known_peers_now(&self, skip: Option<String>) {
+        // Deliberately not gated on `mesh_active()`: that flag means "two or more sessions", and
+        // dialling a second paired device is how the desk gets its second session in the first
+        // place. With one pair there is nothing here to dial, so the guard would have been a
+        // locked door bolted from the inside (found on the desk: three paired screens, none of
+        // them ever dialled the others after a restart).
         for (id, address) in self.state.dial_targets() {
+            if skip.as_deref().map(|s| same_peer_id(s, &id)).unwrap_or(false) {
+                continue; // the caller has this one in hand
+            }
             if self.is_peer_connected(&id) {
                 self.dials.lock().remove(&id);
                 continue;
@@ -4440,8 +4496,13 @@ impl NetworkManager {
                     s.link.manual_off,
                 )
             };
-            let Some(addr) = target else {
-                return; // forgotten: nothing to reconnect to
+            let Some(addr) = target.filter(|a| !crate::state::is_loopback_address(a)) else {
+                // Nothing this side can dial: a forgotten pair, or a device that only ever reaches
+                // us from its own loopback (a phone on a cable, an emulator). It dials us.
+                self.dial_known_peers_except(None);
+                let extra = if manual_off || pairing { 2 } else { 8 };
+                tokio::time::sleep(std::time::Duration::from_secs(extra)).await;
+                continue;
             };
             if pairing || manual_off {
                 // A user-started pairing is in charge, or the user chose Disconnect.
@@ -4470,6 +4531,11 @@ impl NetworkManager {
             // Check again soon while it's down, and now and then once it's up, so a
             // dropped link (the other computer slept, Wi-Fi changed) comes back.
             let wait = if connected { 20 } else { 8 };
+            // The rest of the desk, not only the primary pair: a restart with several screens
+            // brings them all back from `pairs.json` (mesh, `T049`). The primary is this loop's
+            // own business, so it is left out here.
+            let primary_id = self.state.inner.read().paired.as_ref().map(|p| p.mac_id.clone());
+            self.dial_known_peers_except(primary_id);
             tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         }
     }
@@ -5330,8 +5396,10 @@ impl NetworkManager {
                         // Naming the peer rather than the session matches both of its
                         // sessions, so only the agreed one carries the packet.
                         let by_peer = dests.iter().any(|d| {
-                            pid.as_deref() == Some(d.as_str())
+                            pid.as_deref().map(|p| same_peer_id(d, p)).unwrap_or(false)
                                 || d == &client.peer_addr.ip().to_string()
+                                || same_peer_id(d, &self.state.device_id_for(pid.as_deref(), &client.peer_addr.to_string()))
+                                || same_peer_id(d, &self.state.device_id_for(pid.as_deref(), &client.peer_addr.ip().to_string()))
                         });
                         by_session || (by_peer && preferred.contains(&client.id))
                     }
@@ -5632,6 +5700,26 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_welcome_is_taken_only_as_the_device_we_dialled() {
+        assert!(welcome_identity(Some("vasanth"), "vasanth"));
+        assert!(welcome_identity(Some("VASANTH"), "vasanth"), "ids are compared without case");
+        assert!(welcome_identity(Some("  vasanth "), "vasanth"), "a padded name is still the name");
+        assert!(welcome_identity(None, "vasanth"), "a nameless welcome is taken at its address");
+        assert!(welcome_identity(Some(""), "vasanth"), "so is an empty one");
+        assert!(!welcome_identity(Some("someone-else"), "vasanth"), "a different name is not it");
+    }
+
+    #[test]
+    fn a_pairing_prompt_keeps_a_quiet_peer_alive_until_it_is_answered() {
+        // The person is comparing two six-digit codes across the room; the socket has nothing to
+        // say meanwhile. Timing it out dropped the session under the Allow click.
+        assert!(pairing_prompt_open(Some("request")), "waiting for Allow");
+        assert!(pairing_prompt_open(Some("waiting")), "waiting for the other screen");
+        assert!(!pairing_prompt_open(None), "no pairing: the ordinary rule applies");
+        assert!(!pairing_prompt_open(Some("failed")), "a failed pairing is not a person");
+    }
 
     #[test]
     fn motion_coalescer_sums_then_takes() {

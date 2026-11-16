@@ -1,5 +1,5 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Tests for shared/edges-ui.js: the edge picker on the Multi-device page.
+// Tests for shared/edges-ui.js: the arrangement grid on the Multi-device page.
 // Run with: node ui/shared/test/edges-ui.js
 'use strict';
 
@@ -12,9 +12,6 @@ function ok(name, fn) {
   checks++;
   console.log('  ✔ ' + name);
 }
-
-const states = []; // reserved for future page-level checks
-void states;
 
 // The same rules as shared/kvm-edges.js and src-tauri/src/mesh/edges.rs.
 ok('a missing or broken edge map reads as no sides', () => {
@@ -39,26 +36,42 @@ ok('a device is on exactly one side', () => {
   assert.strictEqual(E.deviceOn(edges, 'bottom'), null);
 });
 
-ok('the picker offers every side, marks the current one, and refuses a taken one', () => {
-  const edges = { left: 'desktop', right: null, top: null, bottom: null };
-  const opts = E.options(edges, 'laptop', { desktop: 'Desktop' });
-  assert.strictEqual(opts.length, 5, 'no side plus the four sides');
-  assert.deepStrictEqual(opts.map((o) => o.value), ['', 'left', 'right', 'top', 'bottom']);
-  const current = opts.filter((o) => o.selected);
-  assert.strictEqual(current.length, 1);
-  assert.strictEqual(current[0].value, '', 'the laptop has no side yet');
-  const left = opts.find((o) => o.value === 'left');
-  assert.strictEqual(left.disabled, true, 'left already leads to the desktop');
-  assert.strictEqual(left.holder, 'Desktop', 'and the picker says who is there');
-  assert.strictEqual(opts.find((o) => o.value === 'right').disabled, false);
+ok('the grid puts this computer in the middle and a device on each side', () => {
+  const edges = { left: 'desktop', right: 'laptop', top: null, bottom: null };
+  const cells = E.cells(edges, { desktop: 'Desktop', laptop: 'Laptop' });
+  assert.strictEqual(cells.length, 9, 'a 3×3 grid');
+  assert.deepStrictEqual(cells.slice(0, 3).map((c) => c.kind), ['gap', 'side', 'gap']);
+  assert.deepStrictEqual(cells.slice(3, 6).map((c) => c.kind), ['side', 'here', 'side']);
+  assert.deepStrictEqual(cells.slice(6).map((c) => c.kind), ['gap', 'side', 'gap']);
+  assert.strictEqual(cells[4].kind, 'here', 'the centre is this computer');
+  assert.strictEqual(cells[3].side, 'left', 'left of the centre is the left edge');
+  assert.strictEqual(cells[5].side, 'right');
+  assert.strictEqual(cells[1].side, 'top');
+  assert.strictEqual(cells[7].side, 'bottom');
+  assert.strictEqual(cells[3].name, 'Desktop', 'the cell shows who is there');
+  assert.strictEqual(cells[7].device, null, 'an empty side is empty');
+  assert.strictEqual(cells[7].name, '');
 });
 
-ok('the current side is selected, and a side leading to this same device is not a conflict', () => {
-  const edges = { left: null, right: 'laptop', top: null, bottom: null };
-  const opts = E.options(edges, 'laptop');
-  assert.strictEqual(opts.find((o) => o.value === 'right').selected, true);
-  assert.strictEqual(opts.find((o) => o.value === 'right').disabled, false,
-    'the side it is already on is its own');
+ok('a device with no name on the desk still fills its cell', () => {
+  const cells = E.cells({ top: 'zzz-unknown' });
+  assert.strictEqual(cells[1].name, 'zzz-unknown', 'the id stands in rather than a blank cell');
+  assert.strictEqual(cells[1].label, 'Top');
+});
+
+ok('a click puts the device on the side, or takes it off its own side', () => {
+  const edges = { left: 'desktop', right: 'laptop', top: null, bottom: null };
+  // A free side: the device goes there.
+  assert.deepStrictEqual(E.attempt(edges, 'phone', 'bottom'), { call: { side: 'bottom', deviceId: 'phone' } });
+  // Its own side: the same click clears it, so nothing is ever stuck on an edge.
+  assert.deepStrictEqual(E.attempt(edges, 'laptop', 'right'), { call: { side: 'right', deviceId: null } });
+  // Someone else's side: nothing is sent, and the page says who is in the way.
+  assert.deepStrictEqual(E.attempt(edges, 'phone', 'left', { desktop: 'Desktop' }),
+    { held: 'desktop', name: 'Desktop' });
+  // Nonsense asks for nothing.
+  assert.strictEqual(E.attempt(edges, 'phone', 'diagonal'), null);
+  assert.strictEqual(E.attempt(edges, '', 'left'), null);
+  assert.strictEqual(E.attempt(null, 'phone', 'left').call.deviceId, 'phone', 'no edges yet, nothing held');
 });
 
 ok('a choice becomes the command the app takes', () => {
@@ -75,6 +88,8 @@ ok('the note under the list reads as a sentence', () => {
   assert.strictEqual(E.describe({}), 'No sides assigned yet');
   assert.strictEqual(E.describe(null), 'No sides assigned yet');
   assert.strictEqual(E.describe({ left: 'desktop', bottom: 'phone' }), 'left: desktop, bottom: phone');
+  assert.strictEqual(E.describe({ left: 'vasanth' }, { vasanth: 'VASANTH' }), 'left: VASANTH',
+    'the note names the device, not the id');
 });
 
 console.log('edges-ui: ' + checks + ' checks passed');

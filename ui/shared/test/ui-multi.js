@@ -138,11 +138,13 @@ ok('every control on the page reaches a command', () => {
   assert.ok(commands.includes('pub fn assign_edge'), 'the edge command must exist');
 });
 
-ok('the edge picker uses the tested model, not a second set of rules', () => {
+ok('the arrangement grid uses the tested model, not a second set of rules', () => {
   const page = read('ui/ui-multi.js');
-  assert.ok(page.includes('EdgesUI.options('), 'the choices come from the tested model');
-  assert.ok(page.includes('EdgesUI.change('), 'so does the command to send');
+  assert.ok(page.includes('EdgesUI.cells('), 'the grid is filled from the tested model');
+  assert.ok(page.includes('EdgesUI.attempt('), 'and a click is turned into its command there');
+  assert.ok(page.includes('EdgesUI.sideOf('), 'so is where a device already is');
   assert.ok(!page.includes('edges[sid]'), 'no side logic of its own');
+  assert.ok(!/<select/.test(page), 'sides are drawn on the screen, not chosen from a menu');
   const html = read('ui/index.html');
   const model = html.indexOf('shared/edges-ui.js');
   const self = html.indexOf('src="ui-multi.js"');

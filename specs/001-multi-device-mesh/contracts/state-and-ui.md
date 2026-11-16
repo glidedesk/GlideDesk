@@ -68,8 +68,14 @@ must not survive this work; nothing reads it, and leaving it invites a switch th
   second connection without a reload, because the page reacts to `state-change`.
 - Shows each session with name, OS, address and live role (`idle` / `driving` / `driven`), and a
   disconnect action per row.
-- Edge assignment: four sides, each a picker over connected devices plus "None". A device chosen on
-  one side disappears from the others' lists. Changing an assignment takes effect immediately.
+- Edge assignment: one arrangement grid, this computer in the middle and the four sides around it,
+  the same control the Cursor tab uses (clarified 2026-11-16: a per-device menu hid the shape of the
+  desk). Choosing a device in the list chooses what the grid arranges; a side cell names the device
+  that leads off that edge, clicking a free side puts the chosen device there, and clicking its own
+  side takes it off. A side that already leads to another device is not clickable-to-replace: the
+  page names the device in the way and sends nothing.
+- Every device row says which side it is on, so the arrangement can be read without the grid. A
+  device chosen on one side is on one side only. Changing an assignment takes effect immediately.
 - Shows `mesh.lastRefusal` when a push into an edge was refused, with the reason in words a person
   understands ("Desktop is not connected", "Cursor sharing is off there").
 - "Also on this desk": the devices in `mesh.known` that have no session (a phone paired with one

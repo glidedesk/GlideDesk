@@ -18,6 +18,9 @@ object Proto {
     const val PING_MS = 1000L
     const val TIMEOUT_MS = 8000L // protocol.js: a busy or throttled computer can miss a ping or two
     const val BLE_TIMEOUT_MS = 20000L // through Bluetooth, where one big message takes seconds
+    // The person has compared the code on the phone and tapped "Codes match"; this is how long we
+    // keep saying "Pairing…" while the other screen is still being looked at.
+    const val PAIR_ANSWER_MS = 120000L
     const val PHONE_GRACE_MS = 30000L
     const val CLIP_MAX_BYTES = 256 * 1024
     const val CLIP_IMAGE_MAX_BYTES = 10 * 1024 * 1024 // clipboard picture limit (PNG bytes, before base64)

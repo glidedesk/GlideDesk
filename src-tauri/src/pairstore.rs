@@ -8,10 +8,27 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
 use crate::state::PairedPeer;
+
+/// One writer at a time.
+///
+/// `save`, `save_peers` and `save_forgotten` each read the whole file, change one part of it and
+/// write it back. Two of those in flight at once can lose each other's change — found on the desk:
+/// pairing the phone recorded it in the primary slot at its real address, and the hello that
+/// arrived a moment later put the loopback address back while listing the same phone at the real
+/// one beside it. The lock makes each read-change-write whole.
+static WRITE: Mutex<()> = Mutex::new(());
+
+fn with_file_lock<T>(f: impl FnOnce() -> T) -> T {
+    let guard = WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let out = f();
+    drop(guard);
+    out
+}
 
 /// One paired computer as it is written to disk. The token is included here and only here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,9 +392,34 @@ pub fn save_layout(side: &str, along: f64, edges: &crate::mesh::Edges) {
     }
 }
 
-/// Every device this app has paired with, from the last run.
+/// Every device this app has paired with besides the primary one, from the last run.
+///
+/// The primary `paired` slot is read on its own (`load`) and is deliberately not repeated here: a
+/// device in both slots would be dialled twice and written back twice. An entry that does name
+/// the primary is dropped, which also tidies a file written before this rule existed.
 pub fn load_peers() -> Vec<PairedPeer> {
-    read_file().peers.into_iter().map(StoredPeer::into_peer).collect()
+    let f = read_file();
+    let primary_id = f.paired.as_ref().map(|p| p.mac_id.clone()).unwrap_or_default();
+    unique_peers(f.peers)
+        .into_iter()
+        .filter(|p| !p.mac_id.eq_ignore_ascii_case(&primary_id))
+        .collect()
+}
+
+/// One entry per device, in the order they were met.
+fn unique_peers(peers: Vec<StoredPeer>) -> Vec<PairedPeer> {
+    let mut out: Vec<PairedPeer> = Vec::with_capacity(peers.len());
+    for stored in peers {
+        let peer = stored.into_peer();
+        if peer.mac_id.is_empty() {
+            continue;
+        }
+        if out.iter().any(|p| p.mac_id.eq_ignore_ascii_case(&peer.mac_id)) {
+            continue;
+        }
+        out.push(peer);
+    }
+    out
 }
 
 /// Remember every paired device. The rest of the file is left exactly as it was.
@@ -385,9 +427,11 @@ pub fn save_peers(peers: &[PairedPeer]) {
     if cfg!(test) {
         return; // tests never touch the developer's real files
     }
-    let mut file = read_file();
-    file.peers = peers.iter().map(StoredPeer::from).collect();
-    write_file(&file);
+    with_file_lock(|| {
+        let mut file = read_file();
+        file.peers = peers.iter().map(StoredPeer::from).collect();
+        write_file(&file);
+    });
 }
 
 /// The devices the person removed here, from the last run.
@@ -400,9 +444,11 @@ pub fn save_forgotten(ids: &[String]) {
     if cfg!(test) {
         return;
     }
-    let mut file = read_file();
-    file.forgotten = ids.to_vec();
-    write_file(&file);
+    with_file_lock(|| {
+        let mut file = read_file();
+        file.forgotten = ids.to_vec();
+        write_file(&file);
+    });
 }
 
 fn write_file(file: &PairFile) {
@@ -415,8 +461,16 @@ fn write_file(file: &PairFile) {
     }
     match serde_json::to_string_pretty(file) {
         Ok(text) => {
-            if let Err(e) = std::fs::write(&path, text) {
-                log::warn!("[Pairs] Could not write {}: {}", path.display(), e);
+            // Write beside, then rename: a reader never sees half a file, and a power cut cannot
+            // leave one either.
+            let tmp = path.with_extension("json.tmp");
+            if let Err(e) = std::fs::write(&tmp, &text) {
+                log::warn!("[Pairs] Could not write {}: {}", tmp.display(), e);
+                return;
+            }
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                log::warn!("[Pairs] Could not replace {}: {}", path.display(), e);
+                let _ = std::fs::remove_file(&tmp);
             }
         }
         Err(e) => log::warn!("[Pairs] Could not encode pair store: {}", e),
@@ -447,14 +501,16 @@ pub fn load() -> (Option<PairedPeer>, HashMap<String, String>) {
 pub fn save(paired: &Option<PairedPeer>, fingerprints: &HashMap<String, String>) {
     // The peers and the forgotten list are written by functions of their own: read them back
     // first so saving the primary pair does not erase them.
-    let previous = read_file();
-    let file = PairFile {
-        paired: paired.as_ref().map(StoredPeer::from),
-        peer_fingerprints: fingerprints.clone(),
-        peers: previous.peers,
-        forgotten: previous.forgotten,
-    };
-    write_file(&file);
+    with_file_lock(|| {
+        let previous = read_file();
+        let file = PairFile {
+            paired: paired.as_ref().map(StoredPeer::from),
+            peer_fingerprints: fingerprints.clone(),
+            peers: previous.peers,
+            forgotten: previous.forgotten,
+        };
+        write_file(&file);
+    });
 }
 
 #[cfg(test)]
@@ -488,6 +544,51 @@ mod tests {
         let f = PairFile::default();
         assert!(f.paired.is_none());
         assert!(f.peer_fingerprints.is_empty());
+    }
+
+    fn stored(id: &str, token: &str) -> StoredPeer {
+        StoredPeer {
+            mac_id: id.to_string(),
+            mac_name: id.to_uppercase(),
+            os: "win".to_string(),
+            address: None,
+            token: Some(token.to_string()),
+            tls_fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn the_list_has_one_entry_per_device() {
+        // Two sightings of the same phone in the list (a reconnect that learned it again) must
+        // not become two rows, and two dials, on the next launch.
+        let peers = unique_peers(vec![stored("PHONE", "tok-old"), stored("phone", "tok-new")]);
+        assert_eq!(peers.len(), 1, "one entry per device");
+        assert_eq!(peers[0].token.as_deref(), Some("tok-old"), "the first sighting is kept");
+    }
+
+    #[test]
+    fn the_primary_slot_is_not_repeated_in_the_list() {
+        // Found on the desk: the phone was in the primary slot at its loopback address and again
+        // in the list at its Wi-Fi one, so the same device was written twice and dialled twice.
+        let mut f = PairFile {
+            paired: Some(stored("phone", "tok-phone")),
+            ..Default::default()
+        };
+        f.peers = vec![stored("phone", "tok-phone"), stored("desktop", "tok-desktop")];
+        let primary_id = f.paired.as_ref().map(|p| p.mac_id.clone()).unwrap_or_default();
+        let peers: Vec<PairedPeer> = unique_peers(f.peers)
+            .into_iter()
+            .filter(|p| !p.mac_id.eq_ignore_ascii_case(&primary_id))
+            .collect();
+        assert_eq!(peers.len(), 1, "only the other device is listed");
+        assert_eq!(peers[0].mac_id, "desktop");
+    }
+
+    #[test]
+    fn a_peer_without_an_id_is_skipped() {
+        let peers = unique_peers(vec![stored("", "tok"), stored("desktop", "tok-desktop")]);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].mac_id, "desktop");
     }
 
     #[test]
