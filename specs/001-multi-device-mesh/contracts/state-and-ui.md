@@ -52,7 +52,7 @@ reconnect, and the existing session is not disturbed.
 | `sessions_list` | – | returns `mesh.sessions` | for the page and tests |
 | `disconnect_device` | `{deviceId}` | closes that session only | other sessions unaffected |
 | `forget_device` | `{deviceId}` | removes pairing and edges pointing at it | wins over roster |
-| `clip_request` | `{deviceId}` | asks a peer for its current clipboard item | used by the page's "paste from" |
+| `clip_request` | `{deviceId}` | asks a peer for its current clipboard item | **not built in this slice**: the request goes out on connect, and there is no per-device "paste from" control yet. Adding the command without the control would be a dead switch |
 
 Removed: `set_multi` and `MultiState.enabled` (`commands.rs:1239`, `state.rs:1140`). The dead flag
 must not survive this work; nothing reads it, and leaving it invites a switch that does nothing.

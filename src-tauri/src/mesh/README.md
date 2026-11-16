@@ -45,6 +45,8 @@ Recorded because a reader comparing the two will find them, and they are choices
 | `MultiState.enabled` switch in `multi.json` | Removed: dormancy by session count | Clarified with the person: no switch, no restart, activates on the second connection. `set_multi` wrote a flag nothing read. |
 | The driven device learns its pointer left an edge from the native helper's edge watch (`_armReturn`) | `chain.rs` tracks the pointer from the motion it injects | `cursor_position()` returns `None` on Linux, so there is no portable way to ask where the pointer is. Arithmetic on the deltas also makes the rule testable without a desktop session. |
 | A chain restarts the driven side's travel from the new entry point by the helper's own bookkeeping | `kvm::begin_remote_handover` sets a restart flag each capture loop consumes on its own thread | The Windows and macOS hooks own statics, the Linux loop its locals; writing another thread's travel counters mid-event is the race this avoids. |
+| A `clip.request` is answered by re-reading the clipboard and publishing it as a fresh copy (`sendIfChanged('request')`) | The answer is the item as it was last published, with its original `ts`/`o`/`s` | A fresh copy would make an old item beat a newer one made elsewhere while the request was in flight. `contracts/wire.md` specifies the original stamp, and the requester's newest-wins rule then does the right thing. |
+| A peer's mesh capability arrives as `mesh: 1` on `hello`/`welcome` | Same field name, `mesh: true`, on the same two messages | Needed for the connection that *makes* the mesh active to say so: gating it on dormancy would leave the second device looking like an older app for ever. Everything else stays additive and unknown fields are ignored. |
 
 ## Where the code goes
 
@@ -55,6 +57,7 @@ Recorded because a reader comparing the two will find them, and they are choices
 | Crossing decision, take/accept/refuse/release/next, injection | `src-tauri/src/kvm.rs` |
 | `assign_edge`, `disconnect_device`, `forget_device` | `src-tauri/src/commands.rs` |
 | `edges` persistence in `layout.json` | `src-tauri/src/pairstore.rs` |
+| The pooled clipboard: fan-out, newest-wins apply, `clip.request` | `src-tauri/src/network.rs` (`MeshedClipboard`), `src-tauri/src/mesh/pool.rs`, `clip.rs` |
 | Device list, edge picker, refusals | `ui/ui-multi.js`, `ui/shared/edges-ui.js` |
 | What the page shows, as tested pure functions | `ui/shared/mesh-view.js` (`ui/shared/test/ui-multi.js`) |
 

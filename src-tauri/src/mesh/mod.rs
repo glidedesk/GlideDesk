@@ -42,6 +42,14 @@ pub const POOL_MAX_HOPS: u32 = 9;
 /// How long a crossing waits for `kvm.accept` before the pointer goes home (`KVM_TAKE_TIMEOUT_MS`).
 pub const TAKE_TIMEOUT_MS: u64 = 1000;
 
+/// How far ahead of this device's clock a copy time from another device may be before it is
+/// clamped (`protocol.js`: `CLIP_SKEW_MS`). A device whose clock is hours fast must not win every
+/// later copy for ever; ten minutes is the most a real clock is allowed to drift.
+pub const CLIP_SKEW_MS: u64 = 10 * 60 * 1000;
+
+/// Longest device id a clipboard stamp may name (`clipsync.js`: `MAX_ID`).
+pub const CLIP_MAX_ID: usize = 128;
+
 /// The four sides of a screen, in the order a duplicate device keeps its first side.
 pub const SIDES: [&str; 4] = ["left", "right", "top", "bottom"];
 

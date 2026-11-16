@@ -5,8 +5,9 @@ exactly as it does today, and a device that does not know a field must ignore it
 
 ## Fields added to `WireMessage`
 
-All are `#[serde(default)]` unless stated, and are only emitted when the mesh is active (two or more
-sessions). Names follow the reference implementation so the two can be compared field by field.
+All are `#[serde(default)]` unless stated, and (except `mesh`, which is app identity) are only
+emitted when the mesh is active (two or more sessions). Names follow the reference implementation so
+the two can be compared field by field.
 
 | Field | Type | Used by | Meaning | Default when absent |
 |---|---|---|---|---|
@@ -18,6 +19,7 @@ sessions). Names follow the reference implementation so the two can be compared 
 | `ts` | u64 | `clip` `clip.image` | hybrid logical clock value at the origin | absent — item counts as copied on arrival |
 | `reckon` | u64 | `welcome`, `mesh.roster` | the peer's roster revision, so stale updates are ignored | 0 |
 | `why` | string | `kvm.refuse` | `not_allowed` \| `busy` \| `not_connected` \| `not_ready` | absent |
+| `mesh` | bool | `hello`, `welcome` | the sender speaks the mesh: it understands pooled stamps and may be asked to relay | absent — treated as an older app: plain messages, never a relay |
 
 `side` and a fractional along-edge position already exist as `side: Option<String>` and
 `edge_at: Option<f64>` (used by `kvm.take` today); they are kept as-is. The reference carries this
@@ -104,7 +106,10 @@ that can reach it. `pairs.json` decides trust: a device the person forgot is nev
 
 1. A packet with none of these fields is valid and means today's behaviour.
 2. With one session connected, this app emits no new field: the serialised JSON for a crossing is
-   identical to the current build's (asserted by a test).
+   identical to the current build's (asserted by a test). The one exception is `mesh` on
+   `hello`/`welcome`, which is app identity like `os` or `fx`, not mesh state: the connection that
+   makes the mesh active is the one that has to announce it, so it cannot be gated on dormancy. An
+   older app ignores it and stays `mesh: false` here.
 3. Unknown fields are ignored, never rejected (`serde` default behaviour, plus a test that feeds a
    packet with extra keys).
 4. A legacy peer is never sent pooled items it did not advertise (`pool = false`) and is never asked

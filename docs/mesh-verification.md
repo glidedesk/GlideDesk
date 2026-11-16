@@ -13,6 +13,7 @@ a later reader needs.
 |---|---|---|---|---|---|
 | 2026-11-16 | macOS aarch64, `npm run build:mac` | 263 pass | 23 suites pass | pass | not run (no `workflow` scope on the team token) |
 | 2026-11-16 | macOS aarch64, US2 (edges, handover, chain) | 295 pass | 24 suites pass | pass | not run (no `workflow` scope on the team token) |
+| 2026-11-16 | macOS aarch64, US3 (pooled clipboard) | 317 pass | 24 suites pass | pass | not run (no `workflow` scope on the team token) |
 | | | | | | |
 
 ## Scenarios
@@ -31,6 +32,7 @@ a later reader needs.
 | S4 | Refusals and takeover | all | | | |
 | S5 | Pair once, meet everyone | macOS + Windows + Android | | | |
 | S6 | Clipboard pool | macOS + Windows + Linux | | | |
+| S6 | Clipboard pool: in-process, three devices, 100 alternating copies converge, no double apply | unit test, no hardware | `a_hundred_copies_from_three_devices_converge` | automated pass | `src-tauri/src/mesh/pool.rs` — the hardware rows stay open |
 | S6 | Clipboard pool | macOS + Windows + Android | | | |
 | S7 | Platform parity | Windows driven | | | |
 | S7 | Platform parity | Linux X11 driven | | | |

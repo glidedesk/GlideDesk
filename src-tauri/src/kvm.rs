@@ -3012,34 +3012,17 @@ impl ClipboardWatcher {
         }
     }
 
+    /// A copy made here goes to every device that takes it.
+    ///
+    /// The stamping (the hybrid clock's `ts`, the pool's `o`/`s`) and the fan-out live in
+    /// `NetworkManager::publish_clip_text`: with one device that is exactly the send this watcher
+    /// has always done, with more it is a pooled copy that can be relayed (`FR-019`).
     async fn send_text(&self, text: String) {
-        let msg = WireMessage {
-            t: "clip".to_string(),
-            v: Some(1),
-            text: Some(text),
-            ts: Some(chrono::Utc::now().timestamp_millis() as u64),
-            ..Default::default()
-        };
-        self.network.send_packet(msg).await;
+        self.network.publish_clip_text(text);
     }
 
     async fn send_image(&self, png: &[u8], w: u32, h: u32, shot: bool) {
-        use base64::Engine;
-        let b64 = base64::prelude::BASE64_STANDARD.encode(png);
-        let msg = WireMessage {
-            t: "clip.image".to_string(),
-            v: Some(1),
-            id: Some(format!("img_{}", chrono::Utc::now().timestamp_millis())),
-            ts: Some(chrono::Utc::now().timestamp_millis() as u64),
-            png: Some(b64),
-            w: Some(w),
-            height: Some(h),
-            bytes: Some(png.len()),
-            parts: Some(1),
-            shot: Some(shot),
-            ..Default::default()
-        };
-        self.network.send_packet(msg).await;
+        self.network.publish_clip_image(png, w, h, shot);
     }
 
     pub fn start(self: Arc<Self>) {

@@ -85,15 +85,15 @@ Rust core in `src-tauri/src/`, webview UI in `ui/`, phone companion in `android/
 
 ## Phase 5: US3 — One clipboard across every device (P1)
 
-- [ ] T038 [P] [US3] Test: hybrid logical clock ordering matches `ui/shared/clipsync.js` scenarios (newer wins, restart past remembered numbers) in `src-tauri/src/mesh/clip.rs`
-- [ ] T039 [P] [US3] Test: pool fan-out, dedupe by `(origin, seq)`, relay with hop limit 4, and legacy peers receive plain messages — ported from `ui/shared/test/mesh-pool.js` — in `src-tauri/src/mesh/pool.rs`
-- [ ] T040 [US3] Implement `src-tauri/src/mesh/pool.rs` (bounded seen set, 512 entries, hop limit, plain message for legacy) — satisfies FR-016, FR-017, FR-018, FR-020
-- [ ] T041 [US3] Implement `src-tauri/src/mesh/clip.rs` (clock, `ts` on publish, newest-wins apply, bounded receipts) and use it from the clipboard watcher in `src-tauri/src/kvm.rs`
-- [ ] T042 [US3] Publish local copies to the pool instead of the current single-target send in `src-tauri/src/kvm.rs` (watcher at `~2983`), keeping `clipboard.enabled/send/images/max_kb` gates — satisfies FR-019
-- [ ] T043 [US3] Apply received items only when newer, mark them applied by value and by `(origin, seq)` so they are not published back in `src-tauri/src/network.rs` `clip`/`clip.image` handlers — satisfies FR-018
-- [ ] T044 [US3] Send `clip.request` on welcome and answer it with the current item in `src-tauri/src/network.rs` — satisfies FR-016
-- [ ] T045 [P] [US3] Integration test: three sessions, 100 alternating copies converge to the same newest item with no double apply (`src-tauri/src/mesh/tests/clip.rs`) — satisfies SC-006
-- [ ] T046 [US3] Show "copies go to N devices" on the clipboard page when the mesh is active in `ui/ui-clipboard.js` — satisfies FR-019
+- [X] T038 [P] [US3] Test: hybrid logical clock ordering matches `ui/shared/clipsync.js` scenarios (newer wins, restart past remembered numbers) in `src-tauri/src/mesh/clip.rs`
+- [X] T039 [P] [US3] Test: pool fan-out, dedupe by `(origin, seq)`, relay up to the hop limit, and legacy peers receive plain messages — ported from `ui/shared/test/mesh-pool.js` — in `src-tauri/src/mesh/pool.rs`
+- [X] T040 [US3] Implement `src-tauri/src/mesh/pool.rs` (a bounded seen window of `POOL_SEEN_LIMIT` per origin, `POOL_MAX_HOPS`, sequence numbers that survive a restart, plain message for a legacy peer) — satisfies FR-016, FR-017, FR-018, FR-020
+- [X] T041 [US3] Implement `src-tauri/src/mesh/clip.rs` (clock, `ts` on publish, newest-wins apply, bounded receipts) and use it from the clipboard watcher in `src-tauri/src/kvm.rs`
+- [X] T042 [US3] Publish local copies to the pool instead of the current single-target send in `src-tauri/src/kvm.rs` (watcher at `~2983`), keeping `clipboard.enabled/send/images/max_kb` gates — satisfies FR-019
+- [X] T043 [US3] Apply received items only when newer, mark them applied by value and by `(origin, seq)` so they are not published back in `src-tauri/src/network.rs` `clip`/`clip.image` handlers — satisfies FR-018
+- [X] T044 [US3] Ask with `clip.request` when a device joins a mesh and answer with the current item under its original `ts`/`o`/`s` in `src-tauri/src/network.rs` — satisfies FR-016
+- [X] T045 [P] [US3] Integration test: three sessions, 100 alternating copies converge to the same newest item with no double apply (`a_hundred_copies_from_three_devices_converge` in `src-tauri/src/mesh/pool.rs`) — satisfies SC-006
+- [X] T046 [US3] Show "copies go to N devices" on the clipboard page when the mesh is active in `ui/ui-clipboard.js` — satisfies FR-019
 
 **Checkpoint**: copy anywhere, paste everywhere, newest wins, no loop, with three devices.
 

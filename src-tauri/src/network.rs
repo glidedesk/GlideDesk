@@ -375,6 +375,14 @@ pub struct WireMessage {
     pub role: Option<String>,
     #[serde(default)]
     pub fx: Option<i32>,           // Fast file transfer capability (fx2)
+    /// The sender speaks the multi-device mesh (`hello`, `welcome`): it understands pooled stamps
+    /// and addressed mesh messages, so it can be sent them and asked to relay.
+    ///
+    /// Announced on every hello, not only once two devices are connected: the connection that
+    /// makes the mesh active is the one that has to carry it. An older app ignores the field and
+    /// stays `mesh: false` here, which is why it is never sent a stamped relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<bool>,
 
     // Mesh Pooling Stamps (Pool)
     #[serde(default)]
@@ -631,6 +639,7 @@ impl Default for WireMessage {
             port: None,
             role: None,
             fx: None,
+            mesh: None,
             o: None,
             s: None,
             d: None,
@@ -1911,6 +1920,7 @@ impl MeshServer {
                 let hello = WireMessage {
                     t: "hello".to_string(),
                     v: Some(1),
+                    mesh: Some(true),
                     id: Some(local_id.to_string()),
                     name: Some(local_name.to_string()),
                     os: Some(current_os().to_string()),
@@ -2288,6 +2298,9 @@ impl MeshServer {
                 let mut desk_full = false;
                 if is_auth {
                     let recorded = state.add_client(info.clone());
+                    // What the device can do comes from the message that introduced it: a device
+                    // that does not say it speaks the mesh is an older app and is treated as one.
+                    state.learn_session_capabilities(&info.id, pkt.mesh == Some(true));
                     state.set_pairing(None);
                     if let Some(ref macs) = pkt.macs {
                         crate::wol::record_peer_wol_info(
@@ -2336,6 +2349,20 @@ impl MeshServer {
                     return;
                 }
 
+                // A device joining a mesh should not have to be told what was copied before it
+                // arrived: ask every device for the current item, and keep the newest answer
+                // (`FR-020`). With two devices there is nothing to ask — both ends send their own
+                // copies as they always have.
+                if state.mesh_active() {
+                    let _ = out_tx
+                        .send(WireMessage {
+                            t: "clip.request".to_string(),
+                            v: Some(1),
+                            ..Default::default()
+                        })
+                        .await;
+                }
+
                 if pkt.t == "hello" {
                     // Prove who we are as well: the peer checks this token against the
                     // pairing it stored, the same way we checked theirs. Without it, a
@@ -2345,6 +2372,7 @@ impl MeshServer {
                     let welcome = WireMessage {
                         t: "welcome".to_string(),
                         v: Some(1),
+                        mesh: Some(true),
                         id: Some(local_id.to_string()),
                         name: Some(local_name.to_string()),
                         os: Some(current_os().to_string()),
@@ -2453,7 +2481,7 @@ impl MeshServer {
             }
             "k.mm" | "remote.mm" | "k.md" | "remote.md" | "k.mu" | "remote.mu"
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
-                | "clip" | "clip.image" | "kvm.take" | "window.handoff.offer"
+                | "clip" | "clip.image" | "clip.request" | "kvm.take" | "window.handoff.offer"
                 | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
                 | "notif" | "notif.policy" | "audio.policy"
                 | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
@@ -2655,6 +2683,26 @@ impl MeshServer {
                     }
                 }
             }
+            "clip.request" => {
+                // A device that has just connected asks what is on the clipboard. The answer is
+                // the item as it was published, with its original `ts`/`o`/`s`
+                // (`contracts/wire.md`): the requester applies it only if it beats what it already
+                // has, so a stale answer changes nothing anywhere.
+                if !*authenticated.read() {
+                    log::warn!("[Auth] Dropping unauthenticated clip.request from {}", peer_addr);
+                } else if let Some(net) = app.try_state::<NetworkManager>() {
+                    let answer = net.inner().clipboard.lock().last.clone();
+                    if let Some(item) = answer {
+                        let from = {
+                            let pid = peer_id_holder.read().clone();
+                            state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                        };
+                        if net.inner().send_stamped_to(&from, &item) {
+                            log::info!("[Clipboard] Sent the current copy to {}", from);
+                        }
+                    }
+                }
+            }
             "clip" => {
                 if !*authenticated.read() {
                     log::warn!("[Auth] Dropping unauthenticated clip packet from {}", peer_addr);
@@ -2674,12 +2722,39 @@ impl MeshServer {
                             max_kb
                         );
                     } else {
-                        crate::kvm::set_shared_clipboard_text(text);
-                        // Let the watcher know this is not a fresh local copy.
-                        crate::kvm::note_remote_clipboard_text(text);
-                        if state.record_clipboard_item(text.clone(), "in", text.len() as u64, None) {
-                            let snap = state.snapshot();
-                            let _ = app.emit("state-change", &snap);
+                        // Which device sent it, for the pool stamps and for naming the copy.
+                        let from = {
+                            let pid = peer_id_holder.read().clone();
+                            state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                        };
+                        let net = app.try_state::<NetworkManager>().map(|n| n.inner().clone());
+                        // Pooled while the mesh is active: deduplicated, relayed one hop further
+                        // and applied only when it is newer than the newest copy here (`FR-018`).
+                        // With one device this is exactly the two-device path.
+                        let item = match net {
+                            Some(net) => net.accept_clip_item(
+                                &from,
+                                &pkt,
+                                crate::mesh::clip::Kind::Text,
+                                None,
+                            ),
+                            // No network handle (never in the app): apply it as before.
+                            None => Some(pkt.clone()),
+                        };
+                        if let Some(item) = item {
+                            let text = item.text.clone().unwrap_or_else(|| text.clone());
+                            crate::kvm::set_shared_clipboard_text(&text);
+                            // Let the watcher know this is not a fresh local copy.
+                            crate::kvm::note_remote_clipboard_text(&text);
+                            if state.record_clipboard_item(
+                                text.clone(),
+                                "in",
+                                text.len() as u64,
+                                None,
+                            ) {
+                                let snap = state.snapshot();
+                                let _ = app.emit("state-change", &snap);
+                            }
                         }
                     }
                 }
@@ -2687,7 +2762,7 @@ impl MeshServer {
             "clip.image" => {
                 if !*authenticated.read() {
                     log::warn!("[Auth] Dropping unauthenticated clip.image packet from {}", peer_addr);
-                } else if let Some(ref b64) = pkt.png {
+                } else if pkt.png.is_some() {
                     let (on, receive, images) = {
                         let s = state.inner.read();
                         (s.clipboard.enabled, s.clipboard.receive, s.clipboard.images)
@@ -2697,26 +2772,49 @@ impl MeshServer {
                             "[Clipboard] Ignoring incoming picture: off, direction off, or pictures off"
                         );
                     } else {
-                        use base64::Engine;
-                        if let Ok(png_bytes) = base64::prelude::BASE64_STANDARD.decode(b64) {
-                            if crate::kvm::set_shared_clipboard_image(&png_bytes) {
-                                crate::kvm::note_remote_clipboard_image(png_bytes.len());
-                                let w = pkt.w.unwrap_or(0);
-                                let h = pkt.height.unwrap_or(0);
-                                let thumb = crate::kvm::clipboard_thumb(
-                                    &png_bytes,
-                                    w,
-                                    h,
-                                    pkt.shot.unwrap_or(false),
-                                );
-                                if state.record_clipboard_item(
-                                    format!("Picture · {} × {}", w, h),
-                                    "in",
-                                    png_bytes.len() as u64,
-                                    thumb,
-                                ) {
-                                    let snap = state.snapshot();
-                                    let _ = app.emit("state-change", &snap);
+                        let from = {
+                            let pid = peer_id_holder.read().clone();
+                            state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                        };
+                        let net = app.try_state::<NetworkManager>().map(|n| n.inner().clone());
+                        // Pooled while the mesh is active: deduplicated, relayed, newest wins
+                        // (`FR-018`). A picture and a text share one newest-copy rule, so a
+                        // picture copied later wins over text and the other way round.
+                        let item = match net {
+                            Some(net) => net.accept_clip_item(
+                                &from,
+                                &pkt,
+                                crate::mesh::clip::Kind::Image,
+                                pkt.id.clone(),
+                            ),
+                            None => Some(pkt.clone()),
+                        };
+                        if let Some(item) = item {
+                            if let Some(ref b64) = item.png {
+                                use base64::Engine;
+                                if let Ok(png_bytes) =
+                                    base64::prelude::BASE64_STANDARD.decode(b64)
+                                {
+                                    if crate::kvm::set_shared_clipboard_image(&png_bytes) {
+                                        crate::kvm::note_remote_clipboard_image(png_bytes.len());
+                                        let w = item.w.unwrap_or(0);
+                                        let h = item.height.unwrap_or(0);
+                                        let thumb = crate::kvm::clipboard_thumb(
+                                            &png_bytes,
+                                            w,
+                                            h,
+                                            item.shot.unwrap_or(false),
+                                        );
+                                        if state.record_clipboard_item(
+                                            format!("Picture · {} × {}", w, h),
+                                            "in",
+                                            png_bytes.len() as u64,
+                                            thumb,
+                                        ) {
+                                            let snap = state.snapshot();
+                                            let _ = app.emit("state-change", &snap);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -3736,6 +3834,30 @@ impl MotionCoalescer {
     }
 }
 
+/// The pooled clipboard: the newest copy across the mesh, and the fan-out that carries it.
+///
+/// Held for the life of the app. While the mesh is dormant (one device) none of it is used: the
+/// clipboard keeps the single-target send it has always had (`publish_pooled`).
+pub struct MeshedClipboard {
+    /// Fan-out, dedupe and relay (`mesh/pool.rs`).
+    pub pool: crate::mesh::pool::Pool,
+    /// Which copy is the newest, and the clock that stamps a new one (`mesh/clip.rs`).
+    pub latest: crate::mesh::clip::Latest,
+    /// The newest item exactly as it went on the wire, so `clip.request` is answered with the same
+    /// stamp. Re-stamping it would turn an old item into a new one and reorder every device.
+    pub last: Option<WireMessage>,
+}
+
+impl MeshedClipboard {
+    fn new(self_id: &str) -> Self {
+        Self {
+            pool: crate::mesh::pool::Pool::new(self_id, crate::mesh::session::now_ms()),
+            latest: crate::mesh::clip::Latest::new(self_id),
+            last: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct NetworkManager {
     app: AppHandle,
@@ -3753,6 +3875,8 @@ pub struct NetworkManager {
     audio_accept: Arc<AtomicBool>,
     pub tls_identity: Arc<crate::transport::tls::LocalTlsIdentity>,
     discovery: Arc<RwLock<Option<Arc<DiscoveryService>>>>,
+    /// The pooled clipboard (`FR-016`–`FR-020`).
+    clipboard: Arc<Mutex<MeshedClipboard>>,
 }
 
 impl NetworkManager {
@@ -3772,6 +3896,7 @@ impl NetworkManager {
                 }),
         );
 
+        let clipboard = Arc::new(Mutex::new(MeshedClipboard::new(&local_id)));
         Self {
             app,
             state,
@@ -3786,6 +3911,157 @@ impl NetworkManager {
             audio_accept: Arc::new(AtomicBool::new(false)),
             tls_identity,
             discovery: Arc::new(RwLock::new(None)),
+            clipboard,
+        }
+    }
+
+    /// Send one already-stamped packet to one device, leaving its stamps exactly as they are.
+    ///
+    /// `send_packet_sync` numbers a packet as if it were ours. A relayed pooled item is not ours:
+    /// its `o`/`s` are what every other device deduplicates against, so they must survive the send.
+    fn send_stamped_to(&self, dest: &str, pkt: &WireMessage) -> bool {
+        self.flush_motion();
+        let guard = self.active_clients.read();
+        let preferred = preferred_session_ids(&self.local_id, &guard);
+        for client in guard.values() {
+            let pid = client.peer_id.read().clone();
+            let by_session = client.id == dest;
+            let by_peer =
+                pid.as_deref() == Some(dest) || dest == client.peer_addr.ip().to_string();
+            if (by_session || (by_peer && preferred.contains(&client.id)))
+                && *client.authenticated.read()
+            {
+                return client.tx.try_send(pkt.clone()).is_ok();
+            }
+        }
+        false
+    }
+
+    /// One copy, on every device: fanned out through the pool, or sent the way the two-device app
+    /// has always sent it while the mesh is dormant.
+    pub fn publish_pooled(&self, pkt: WireMessage) -> usize {
+        if !self.state.mesh_active() {
+            // The two-device app: exactly the send it has always done. The item is remembered all
+            // the same, so a `clip.request` that arrives later can still be answered.
+            let sent = self.send_packet_sync(pkt.clone());
+            self.clipboard.lock().last = Some(pkt);
+            return sent;
+        }
+        let peers = self.state.pool_peers();
+        let mut cb = self.clipboard.lock();
+        let published = cb
+            .pool
+            .publish(pkt, &peers, &mut |id, msg| self.send_stamped_to(id, msg));
+        cb.last = Some(published.msg.clone());
+        published.sent.len()
+    }
+
+    /// A text copy made here: stamped with the hybrid clock (so a copy made right after receiving
+    /// one still orders after it), remembered as the newest, and sent to every device.
+    pub fn publish_clip_text(&self, text: String) -> usize {
+        let now = crate::mesh::session::now_ms();
+        let stamp = {
+            let mut cb = self.clipboard.lock();
+            cb.latest.copied(crate::mesh::clip::Kind::Text, None, now)
+        };
+        let pkt = WireMessage {
+            t: "clip".to_string(),
+            v: Some(1),
+            text: Some(text),
+            ts: Some(stamp.ts),
+            ..Default::default()
+        };
+        self.publish_pooled(pkt)
+    }
+
+    /// A picture copied here, by the same rules as a text copy.
+    pub fn publish_clip_image(&self, png: &[u8], w: u32, h: u32, shot: bool) -> usize {
+        use base64::Engine;
+        let now = crate::mesh::session::now_ms();
+        let id = format!("img_{}", now);
+        let stamp = {
+            let mut cb = self.clipboard.lock();
+            cb.latest
+                .copied(crate::mesh::clip::Kind::Image, Some(id.clone()), now)
+        };
+        let pkt = WireMessage {
+            t: "clip.image".to_string(),
+            v: Some(1),
+            id: Some(id),
+            ts: Some(stamp.ts),
+            png: Some(base64::prelude::BASE64_STANDARD.encode(png)),
+            w: Some(w),
+            height: Some(h),
+            bytes: Some(png.len()),
+            parts: Some(1),
+            shot: Some(shot),
+            ..Default::default()
+        };
+        self.publish_pooled(pkt)
+    }
+
+    /// A pooled item arrived from `from`.
+    ///
+    /// `None` while the mesh is dormant: the caller keeps the two-device path, byte for byte. The
+    /// relay happens here, one hop further, before the caller applies anything.
+    fn receive_pooled(&self, from: &str, pkt: &WireMessage) -> Option<crate::mesh::pool::Received> {
+        if !self.state.mesh_active() {
+            return None;
+        }
+        let peers = self.state.pool_peers();
+        let mut cb = self.clipboard.lock();
+        Some(
+            cb.pool
+                .receive(from, pkt, &peers, &mut |id, msg| self.send_stamped_to(id, msg)),
+        )
+    }
+
+    /// Decide whether a `clip`/`clip.image` that arrived should be applied here, and return the
+    /// packet to apply.
+    ///
+    /// The caller has already applied the person's own switches (clipboard on, this direction on,
+    /// size limit): a copy the person does not accept is never relayed either. What is left is the
+    /// pool's own rule — apply each item once, and only when it is newer than the newest copy this
+    /// device knows (its own last copy counts) — so a late or repeated push of an older copy can no
+    /// longer replace a newer one (`FR-017`, `FR-018`).
+    fn accept_clip_item(
+        &self,
+        from: &str,
+        pkt: &WireMessage,
+        kind: crate::mesh::clip::Kind,
+        id: Option<String>,
+    ) -> Option<WireMessage> {
+        let msg = match self.receive_pooled(from, pkt) {
+            Some(out) if !out.fresh => {
+                log::debug!(
+                    "[Clipboard] Dropped a duplicate or our own echo of an item from {}",
+                    from
+                );
+                return None;
+            }
+            Some(out) => out.msg,
+            None => pkt.clone(),
+        };
+        let now = crate::mesh::session::now_ms();
+        let applied = {
+            let mut cb = self.clipboard.lock();
+            let newer = cb.latest.accept(msg.ts, msg.o.as_deref(), from, kind, id, now);
+            if newer {
+                // The item as it will be applied, kept so a device that has just connected can be
+                // answered with its original stamp rather than a fresh copy.
+                cb.last = Some(msg.clone());
+            } else {
+                log::debug!(
+                    "[Clipboard] Kept the newer copy this device already had; {}'s item is older",
+                    from
+                );
+            }
+            newer
+        };
+        if applied {
+            Some(msg)
+        } else {
+            None
         }
     }
 
@@ -4068,6 +4344,7 @@ impl NetworkManager {
         let hello = WireMessage {
             t: "hello".to_string(),
             v: Some(1),
+            mesh: Some(true),
             id: Some(self.local_id.clone()),
             name: Some(self.local_name.clone()),
             os: Some(current_os().to_string()),

@@ -2185,6 +2185,34 @@ impl AppState {
             .or_else(|| s.clients.first().cloned())
     }
 
+    /// Learn what a device can do from its `hello`/`welcome` (`network.rs`).
+    ///
+    /// `mesh` false means an older app: it is never sent a stamped relay and never asked to pass a
+    /// crossing on. A peer that does not say anything keeps the safe value.
+    pub fn learn_session_capabilities(&self, id: &str, mesh: bool) {
+        let mut s = self.inner.write();
+        if let Some(sess) = s
+            .mesh
+            .sessions
+            .iter_mut()
+            .find(|x| x.id.eq_ignore_ascii_case(id))
+        {
+            sess.mesh = mesh;
+        }
+    }
+
+    /// The connected devices as the pool sees them: id, whether it speaks the mesh, and whether it
+    /// accepts pooled items.
+    pub fn pool_peers(&self) -> Vec<crate::mesh::pool::PoolPeer> {
+        self.inner
+            .read()
+            .mesh
+            .sessions
+            .iter()
+            .map(|s| crate::mesh::pool::PoolPeer::new(&s.id, s.mesh, s.pool))
+            .collect()
+    }
+
     /// Record why a crossing or a copy did not happen, for the page to show (`FR-023`).
     pub fn note_refusal(&self, device: &str, why: &str) {
         self.inner.write().mesh.refusal(device, why);
@@ -2984,6 +3012,36 @@ mod tests {
             app_state.partner().map(|p| p.id),
             Some("laptop".to_string()),
             "with two devices the pointer's device wins over whichever connected last"
+        );
+    }
+
+    /// A device is an older app until its `hello`/`welcome` says otherwise, and the pool must see
+    /// exactly that: an older app is never sent a stamped relay or asked to pass a crossing on
+    /// (`FR-016`, `contracts/wire.md` rule 4).
+    #[test]
+    fn a_device_is_legacy_until_it_says_it_speaks_the_mesh() {
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        app_state.add_client(peer("phone", "192.168.4.12"));
+
+        let peers = app_state.pool_peers();
+        assert_eq!(peers.len(), 2);
+        assert!(peers.iter().all(|p| !p.mesh), "nothing said: treated as an older app");
+        assert!(peers.iter().all(|p| p.pool), "pooled items are on until a peer says otherwise");
+
+        app_state.learn_session_capabilities("desktop", true);
+        let peers = app_state.pool_peers();
+        let desktop = peers.iter().find(|p| p.id == "desktop").expect("desktop");
+        let phone = peers.iter().find(|p| p.id == "phone").expect("phone");
+        assert!(desktop.mesh, "it said it speaks the mesh");
+        assert!(!phone.mesh, "it said nothing, so it is still an older app");
+
+        // A reconnect must not lose what was learned: the same device, the same wire.
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        let peers = app_state.pool_peers();
+        assert!(
+            peers.iter().find(|p| p.id == "desktop").expect("desktop").mesh,
+            "learning survives a reconnect"
         );
     }
 

@@ -17,6 +17,10 @@ UI.tab({
 
     const peerRow = UI.row('', '');
     const skipNote = UI.note('info', '');
+    // Multi-device mesh: with three or more screens connected a copy reaches all of them, so say so
+    // rather than leaving the page talking about "the other computer" (FR-019). The devices are the
+    // connected sessions plus this one; the words come from the state, never from a guess.
+    const meshNote = UI.note('info', '');
     const mode = UI.segmented([
       { value: 'instant', label: 'Instantly' }, // the default
       { value: 'switch', label: 'When you switch' },
@@ -42,6 +46,7 @@ UI.tab({
     const clearBtn = UI.button('Clear', () => api.clearHistory(), 'small');
 
     body.append(
+      meshNote,
       pair.el,
       UI.card('', [modeRow, picturesRow]),
       UI.card('Privacy', [
@@ -71,6 +76,10 @@ UI.tab({
       peerRow.label.textContent = 'Turned off on ' + UI.peer(s).name;
       peerRow.setHint('');
       skipNote.set(c.enabled && c.lastSkip ? 'Last item not sent: ' + c.lastSkip + '.' : '');
+      const devices = s.mesh && s.mesh.active ? (s.mesh.sessions || []).length + 1 : 0;
+      meshNote.set(devices
+        ? `Copies go to all ${devices} connected devices, whichever one you copy on.`
+        : '');
       clearBtn.disabled = !c.history.length;
 
       const key = JSON.stringify(c.history.map((h) => [h.at, h.dir, !!(h.image && h.image.copy)])) + c.historySize + Math.floor(Date.now() / 15000);
