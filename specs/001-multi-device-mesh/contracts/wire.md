@@ -19,6 +19,8 @@ the two can be compared field by field.
 | `ts` | u64 | `clip` `clip.image` | hybrid logical clock value at the origin | absent — item counts as copied on arrival |
 | `reckon` | u64 | `welcome`, `mesh.roster` | the peer's roster revision, so stale updates are ignored | 0 |
 | `why` | string | `kvm.refuse` | `not_allowed` \| `busy` \| `not_connected` \| `not_ready` | absent |
+| `peers` | string[] | `mesh.roster` | the sender's direct links, as device ids | absent — nothing learned |
+| `members` | `{id,name,os}[]` | `mesh.roster` | those devices, named, so a device without a session with them can list them | absent — ids only |
 | `mesh` | bool | `hello`, `welcome` | the sender speaks the mesh: it understands pooled stamps and may be asked to relay | absent — treated as an older app: plain messages, never a relay |
 
 `side` and a fractional along-edge position already exist as `side: Option<String>` and
@@ -102,6 +104,19 @@ direct links, and `members` names them so a device that is not linked to them ca
 Advisory only; a crossing still requires a session with the device, or a `kvm.next` from a partner
 that can reach it. `pairs.json` decides trust: a device the person forgot is never reintroduced.
 
+Rules this app applies on top of the shape:
+
+- A roster is taken only from a device this app has a session with, and only when its `reckon` is
+  newer than the last one from that device (`src-tauri/src/mesh/roster.rs`). The device list a peer
+  reports is used for listing and for deciding who may be dialled, never to grant input.
+- A device named in `peers` but absent from `members` is still listed, without a name: an id is
+  better than a device the person was never told about.
+- The roster is sent when a device joins or leaves, and on `welcome`. With one session nothing is
+  sent, and nothing arrives that is taken: the fields are stripped by `mesh::strip_if_dormant`.
+- A device that is in `pairs.json` (with an address) and not connected is dialled once when a roster
+  arrives, with a growing gap between tries (5 s doubling, capped at 5 min). A device on the
+  forgotten list is never dialled, and `AppState::add_client` refuses it even if it reconnects.
+
 ## Compatibility rules (must hold)
 
 1. A packet with none of these fields is valid and means today's behaviour.
@@ -116,7 +131,11 @@ that can reach it. `pairs.json` decides trust: a device the person forgot is nev
    to relay.
 5. Removing a device from `pairs.json` wins over any roster update: the device is not reconnected by
    another peer's recommendation.
-6. The `d` stamp now carries **device ids** rather than the sender's session addresses
+6. `pairs.json` gains a `peers` array (and a `forgotten` array) beside the existing `paired`
+   object. It stays the single source of pairing trust; the addition is what lets a desk of
+   several screens come back after a restart and what keeps a forgotten device forgotten. An older
+   build ignores both keys and reads `paired` exactly as before.
+7. The `d` stamp now carries **device ids** rather than the sender's session addresses
    (`<ip>:<port>`). The receiver compares them with its own id. The old spelling was already
    documented as a bug for files (`network.rs`, `resolve_file_dest` tests) and is still *accepted* on
    receive, so a device running an older build keeps working (`SC-008`).

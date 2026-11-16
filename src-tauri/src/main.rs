@@ -216,6 +216,7 @@ fn main() {
             commands::confirm_code,
             commands::cancel_pair,
             commands::forget,
+            commands::forget_device,
             wol::wake_peer,
             commands::get_displays,
             commands::send_files,

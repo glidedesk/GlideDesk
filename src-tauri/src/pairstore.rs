@@ -62,6 +62,16 @@ struct PairFile {
     paired: Option<StoredPeer>,
     #[serde(rename = "peerFingerprints", default)]
     peer_fingerprints: HashMap<String, String>,
+    /// Every device this app has paired with, so a desk of several screens comes back after a
+    /// restart without a new code on each one. Additive: an older build reads `paired` as it
+    /// always did and ignores this list (`specs/001-multi-device-mesh`, pairs.json stays the single
+    /// source of pairing trust).
+    #[serde(default)]
+    peers: Vec<StoredPeer>,
+    /// Devices the person removed here. Kept so a roster update from another computer cannot
+    /// quietly bring one back into the list.
+    #[serde(default)]
+    forgotten: Vec<String>,
 }
 
 /// Where the pairing file lives: the same per-user place on every platform.
@@ -365,6 +375,54 @@ pub fn save_layout(side: &str, along: f64, edges: &crate::mesh::Edges) {
     }
 }
 
+/// Every device this app has paired with, from the last run.
+pub fn load_peers() -> Vec<PairedPeer> {
+    read_file().peers.into_iter().map(StoredPeer::into_peer).collect()
+}
+
+/// Remember every paired device. The rest of the file is left exactly as it was.
+pub fn save_peers(peers: &[PairedPeer]) {
+    if cfg!(test) {
+        return; // tests never touch the developer's real files
+    }
+    let mut file = read_file();
+    file.peers = peers.iter().map(StoredPeer::from).collect();
+    write_file(&file);
+}
+
+/// The devices the person removed here, from the last run.
+pub fn load_forgotten() -> Vec<String> {
+    read_file().forgotten
+}
+
+/// Remember the devices the person removed, so a roster update cannot reintroduce one.
+pub fn save_forgotten(ids: &[String]) {
+    if cfg!(test) {
+        return;
+    }
+    let mut file = read_file();
+    file.forgotten = ids.to_vec();
+    write_file(&file);
+}
+
+fn write_file(file: &PairFile) {
+    let path = store_path();
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            log::warn!("[Pairs] Could not create {}: {}", dir.display(), e);
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(file) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(&path, text) {
+                log::warn!("[Pairs] Could not write {}: {}", path.display(), e);
+            }
+        }
+        Err(e) => log::warn!("[Pairs] Could not encode pair store: {}", e),
+    }
+}
+
 fn read_file() -> PairFile {
     let path = store_path();
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -387,25 +445,16 @@ pub fn load() -> (Option<PairedPeer>, HashMap<String, String>) {
 
 /// Write both back. Called whenever either changes (paired, forgotten, fingerprint learned).
 pub fn save(paired: &Option<PairedPeer>, fingerprints: &HashMap<String, String>) {
-    let path = store_path();
+    // The peers and the forgotten list are written by functions of their own: read them back
+    // first so saving the primary pair does not erase them.
+    let previous = read_file();
     let file = PairFile {
         paired: paired.as_ref().map(StoredPeer::from),
         peer_fingerprints: fingerprints.clone(),
+        peers: previous.peers,
+        forgotten: previous.forgotten,
     };
-    if let Some(dir) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            log::warn!("[Pairs] Could not create {}: {}", dir.display(), e);
-            return;
-        }
-    }
-    match serde_json::to_string_pretty(&file) {
-        Ok(text) => {
-            if let Err(e) = std::fs::write(&path, text) {
-                log::warn!("[Pairs] Could not write {}: {}", path.display(), e);
-            }
-        }
-        Err(e) => log::warn!("[Pairs] Could not encode pair store: {}", e),
-    }
+    write_file(&file);
 }
 
 #[cfg(test)]

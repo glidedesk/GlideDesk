@@ -46,6 +46,10 @@ Recorded because a reader comparing the two will find them, and they are choices
 | The driven device learns its pointer left an edge from the native helper's edge watch (`_armReturn`) | `chain.rs` tracks the pointer from the motion it injects | `cursor_position()` returns `None` on Linux, so there is no portable way to ask where the pointer is. Arithmetic on the deltas also makes the rule testable without a desktop session. |
 | A chain restarts the driven side's travel from the new entry point by the helper's own bookkeeping | `kvm::begin_remote_handover` sets a restart flag each capture loop consumes on its own thread | The Windows and macOS hooks own statics, the Linux loop its locals; writing another thread's travel counters mid-event is the race this avoids. |
 | A `clip.request` is answered by re-reading the clipboard and publishing it as a fresh copy (`sendIfChanged('request')`) | The answer is the item as it was last published, with its original `ts`/`o`/`s` | A fresh copy would make an old item beat a newer one made elsewhere while the request was in flight. `contracts/wire.md` specifies the original stamp, and the requester's newest-wins rule then does the right thing. |
+| A roster is how trust travels: the introducer asks a host for a credential and forwards the grant (`shared/intro.js`, `mac/mesh/autojoin.js`), so a guest is paired without a code | The roster is advisory: it lists devices and tells this app which paired screens to dial; trust never arrives in a `mesh.roster` | `pairs.json` must stay the only source of pairing trust (`FR-022`), and a forgotten device must stay forgotten. A credential channel would need its own replay protection, rate limiting and tests, and it is not needed for the acceptance case: the phone is already paired with one computer, and the other computer dials it as a paired device. |
+| `Roster` has no revision; a later message simply replaces an earlier one | The message carries `reckon`, and an older revision from the same device is ignored (`mesh/roster.rs`) | Two devices on a slow Wi-Fi link can deliver a roster out of order; without a revision the newer link list could be overwritten by the older one. |
+| `Mesh.known()` lists registered peers plus the `members` a peer sent | Also lists ids a peer named in `peers` without a `members` entry | A peer that sends only ids still introduces its devices; an id with no name is better than a device the person was never told about. |
+| Re-dialling is the introducer's job (the plan()/ASK cycle) | This app dials the devices it is already paired with, once when a roster arrives, with a backoff (5 s doubling, capped at 5 min) and never one on the forgotten list | Same outcome (the desk comes back together) using only what `pairs.json` trusts, and without a new credential exchange. |
 | A peer's mesh capability arrives as `mesh: 1` on `hello`/`welcome` | Same field name, `mesh: true`, on the same two messages | Needed for the connection that *makes* the mesh active to say so: gating it on dormancy would leave the second device looking like an older app for ever. Everything else stays additive and unknown fields are ignored. |
 
 ## Where the code goes
@@ -56,9 +60,11 @@ Recorded because a reader comparing the two will find them, and they are choices
 | Session registry, `mesh` state payload, partner resolution | `src-tauri/src/state.rs` |
 | Crossing decision, take/accept/refuse/release/next, injection | `src-tauri/src/kvm.rs` |
 | `assign_edge`, `disconnect_device`, `forget_device` | `src-tauri/src/commands.rs` |
+| `pairs.json` `peers` and `forgotten` | `src-tauri/src/pairstore.rs` |
 | `edges` persistence in `layout.json` | `src-tauri/src/pairstore.rs` |
 | The pooled clipboard: fan-out, newest-wins apply, `clip.request` | `src-tauri/src/network.rs` (`MeshedClipboard`), `src-tauri/src/mesh/pool.rs`, `clip.rs` |
-| Device list, edge picker, refusals | `ui/ui-multi.js`, `ui/shared/edges-ui.js` |
+| Device list, edge picker, refusals, "also on this desk" | `ui/ui-multi.js`, `ui/shared/edges-ui.js` |
+| Roster exchange, per-device pairing tokens, dialling | `src-tauri/src/mesh/roster.rs`, `src-tauri/src/state.rs`, `src-tauri/src/network.rs` |
 | What the page shows, as tested pure functions | `ui/shared/mesh-view.js` (`ui/shared/test/ui-multi.js`) |
 
 ## Reading order for a change

@@ -40,6 +40,28 @@
       .filter((s) => s.id);
   }
 
+  // Everyone this device has been told about but has no session with: a device that was paired
+  // with one computer and reported by its roster ("pair once, meet everyone", FR-021). Direct
+  // devices are the sessions above, so they are not repeated here.
+  function known(state) {
+    const mesh = state && state.mesh;
+    const list = mesh && Array.isArray(mesh.known) ? mesh.known : [];
+    const connected = {};
+    for (const s of sessions(state)) connected[s.id] = true;
+    return list
+      .map((d) => {
+        const id = String((d && d.id) || '');
+        return {
+          id,
+          name: String((d && d.name) || id),
+          os: String((d && d.os) || ''),
+          direct: !!(d && d.direct) || !!connected[id],
+          via: ((d && Array.isArray(d.via)) ? d.via : []).map(String).filter(Boolean),
+        };
+      })
+      .filter((d) => d.id && !d.direct);
+  }
+
   // The tab and the mesh only exist with two or more devices connected (FR-003).
   function visible(state) {
     return sessions(state).length >= 2;
@@ -92,7 +114,7 @@
     }
   }
 
-  const api = { sessions, visible, active, roleText, kind, summary, refusalText, OS };
+  const api = { sessions, visible, active, roleText, kind, summary, known, refusalText, OS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MeshView = api;
 })(typeof self !== 'undefined' ? self : this);

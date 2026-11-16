@@ -1658,6 +1658,17 @@ pub struct ChatConversation {
 pub struct FullState {
     pub device: DeviceInfo,
     pub paired: Option<PairedPeer>,
+    /// Every device this app has paired with, beside the primary `paired` one, so a desk of
+    /// several screens can be dialled again after a restart without a new code on each.
+    ///
+    /// Deliberately not in the window's state: it carries the tokens, which never leave the
+    /// process (`PairedPeer::token` is already skipped when serialising).
+    #[serde(skip)]
+    pub known_peers: Vec<PairedPeer>,
+    /// Devices the person removed here. A `mesh.roster` from another computer cannot reintroduce
+    /// one (`FR-022`), and neither can an automatic dial.
+    #[serde(skip)]
+    pub forgotten: Vec<String>,
     #[serde(default)]
     pub pairing: Option<PairingState>,
     pub guests: Vec<PeerInfo>,
@@ -1741,6 +1752,20 @@ pub struct FullState {
     pub startup: bool,
 }
 
+/// Do two pairing tokens name the same secret?
+///
+/// A token is written as `BEAM_AUTH_V1:<secret>:<fingerprint>` by newer builds and as the bare
+/// secret by older ones, so both spellings are compared on the secret alone.
+pub fn tokens_match(expected: &str, received: &str) -> bool {
+    let secret = |t: &str| -> String {
+        t.strip_prefix("BEAM_AUTH_V1:")
+            .and_then(|s| s.split(':').next())
+            .unwrap_or(t)
+            .to_string()
+    };
+    expected == received || secret(expected) == secret(received)
+}
+
 /// Record a device that has just connected in the mesh registry.
 ///
 /// The mesh is dormant until two devices are connected, so this runs for the single peer too:
@@ -1781,6 +1806,8 @@ impl AppState {
                 name: host.clone(),
             },
             paired: None,
+            known_peers: Vec::new(),
+            forgotten: Vec::new(),
             pairing: None,
             guests: Vec::new(),
             found: Vec::new(),
@@ -1855,9 +1882,23 @@ impl AppState {
         let (paired, fingerprints) = crate::pairstore::load();
         #[cfg(test)]
         let (paired, fingerprints) = (None, std::collections::HashMap::new());
+        // The other paired devices and the ones the person removed, so "pair once, meet everyone"
+        // survives a restart and a forgotten device stays forgotten.
+        #[cfg(not(test))]
+        let (known_peers, forgotten) = (
+            crate::pairstore::load_peers(),
+            crate::pairstore::load_forgotten(),
+        );
+        #[cfg(test)]
+        let (known_peers, forgotten) = (Vec::new(), Vec::new());
         let mut initial_state = initial_state;
         initial_state.paired = paired;
+        initial_state.known_peers = known_peers;
+        initial_state.forgotten = forgotten;
         initial_state.peer_fingerprints = fingerprints;
+        // The roster needs to know which entry is this device before the first session arrives.
+        let self_id = initial_state.about.pc.host.to_lowercase();
+        initial_state.mesh.bind_self_id(&self_id);
 
         // The screen arrangement the user last chose, so a restart does not come back
         // on the wrong edge.
@@ -2097,6 +2138,11 @@ impl AppState {
     pub fn add_client(&self, client: PeerInfo) -> bool {
         let mut s = self.inner.write();
         s.pairing = None;
+        // A device the person removed here is not added back by a reconnect or by a peer's
+        // recommendation (`FR-022`).
+        if s.forgotten.iter().any(|f| f.eq_ignore_ascii_case(&client.id)) {
+            return false;
+        }
         if !note_session_connected(&mut s, &client) {
             // Nothing is added to any view either: a device that cannot be given input must not
             // appear as connected, or the person would type into a screen nobody is driving.
@@ -2199,6 +2245,243 @@ impl AppState {
         {
             sess.mesh = mesh;
         }
+    }
+
+    /// Remember a device this app is paired with, so it can be dialled again on a later launch.
+    ///
+    /// `pairs.json` stays the single source of pairing trust: a device only gets here after it
+    /// proved it holds a token, and a device the person forgot never gets here at all.
+    pub fn remember_peer(
+        &self,
+        id: &str,
+        name: &str,
+        os: &str,
+        address: Option<String>,
+        token: Option<String>,
+    ) {
+        if id.is_empty() {
+            return;
+        }
+        let self_id = self.local_id();
+        if id.eq_ignore_ascii_case(&self_id) {
+            return;
+        }
+        let changed = {
+            let mut s = self.inner.write();
+            if s.forgotten.iter().any(|f| f.eq_ignore_ascii_case(id)) {
+                return;
+            }
+            match s
+                .known_peers
+                .iter_mut()
+                .find(|p| p.mac_id.eq_ignore_ascii_case(id))
+            {
+                Some(existing) => {
+                    let mut changed = false;
+                    if !name.is_empty() && existing.mac_name != name {
+                        existing.mac_name = name.to_string();
+                        changed = true;
+                    }
+                    if !os.is_empty() && existing.os != os {
+                        existing.os = os.to_string();
+                        changed = true;
+                    }
+                    if address.is_some() && existing.address != address {
+                        existing.address = address;
+                        changed = true;
+                    }
+                    // A token is only ever added, never cleared by a hello that did not carry one.
+                    if token.is_some() && existing.token != token {
+                        existing.token = token;
+                        changed = true;
+                    }
+                    changed
+                }
+                None => {
+                    let tls_fingerprint = s.peer_fingerprints.get(id).cloned();
+                    s.known_peers.push(PairedPeer {
+                        mac_id: id.to_string(),
+                        mac_name: name.to_string(),
+                        os: os.to_string(),
+                        address,
+                        token,
+                        tls_fingerprint,
+                    });
+                    true
+                }
+            }
+        };
+        if changed {
+            self.persist_peers();
+        }
+    }
+
+    /// Prove who a connecting device is, from the token it presents.
+    ///
+    /// Every paired device has its own copy of the secret, so a desk with several screens does not
+    /// depend on which one paired last. Returns the id of the device that matched, which is the id
+    /// the session is recorded under, even when the peer only named its address.
+    pub fn authenticate_peer(
+        &self,
+        claimed_id: Option<&str>,
+        token: Option<&str>,
+        peer_ip: Option<&str>,
+    ) -> Option<String> {
+        let recv = token?;
+        let id_ok = |id: &str| -> bool {
+            match claimed_id.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(claimed) => {
+                    claimed.eq_ignore_ascii_case(id)
+                        || peer_ip.map(|ip| ip == claimed).unwrap_or(false)
+                }
+                None => true,
+            }
+        };
+        let s = self.inner.read();
+        for p in &s.known_peers {
+            if let Some(exp) = p.token.as_deref() {
+                if tokens_match(exp, recv) && id_ok(&p.mac_id) {
+                    return Some(p.mac_id.clone());
+                }
+            }
+        }
+        if let Some(p) = &s.paired {
+            if let Some(exp) = p.token.as_deref() {
+                if tokens_match(exp, recv) && id_ok(&p.mac_id) {
+                    return Some(p.mac_id.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// The token this app shares with `peer_id`, if it has one.
+    ///
+    /// Both devices hold the same secret, so the same answer is given to a peer that dialled this
+    /// one and to a peer this one dials. With several devices paired, each keeps its own: a
+    /// second computer must not be refused because the first one paired last.
+    pub fn token_for(&self, peer_id: &str) -> Option<String> {
+        let s = self.inner.read();
+        if let Some(p) = s
+            .known_peers
+            .iter()
+            .find(|p| p.mac_id.eq_ignore_ascii_case(peer_id))
+        {
+            if p.token.is_some() {
+                return p.token.clone();
+            }
+        }
+        s.paired
+            .as_ref()
+            .filter(|p| p.mac_id.eq_ignore_ascii_case(peer_id))
+            .and_then(|p| p.token.clone())
+            .or_else(|| s.paired.as_ref().and_then(|p| p.token.clone()))
+    }
+
+    /// The paired device that lives at `address`, if this desk knows one.
+    ///
+    /// A dial is not always to the primary pair: `dial_known_peers` reaches every paired screen,
+    /// and each keeps its own token and fingerprint. Without this, the hello would offer the
+    /// primary pair's token to a device that shares a different secret and be refused.
+    pub fn paired_at(&self, address: &str) -> Option<PairedPeer> {
+        let host = address.trim().split(':').next().unwrap_or(address);
+        let at = |p: &PairedPeer| -> bool {
+            let Some(a) = p.address.as_deref() else {
+                return false;
+            };
+            let a = a.trim();
+            a == address || a.split(':').next().unwrap_or(a) == host
+        };
+        let s = self.inner.read();
+        if let Some(p) = s.known_peers.iter().find(|p| at(p)) {
+            return Some(p.clone());
+        }
+        s.paired.as_ref().filter(|p| at(p)).cloned()
+    }
+
+    /// Devices the person removed here.
+    pub fn forgotten_ids(&self) -> Vec<String> {
+        self.inner.read().forgotten.clone()
+    }
+
+    /// Forget a device: its pairing, its edges, and any claim another computer makes about it.
+    ///
+    /// Forgetting wins over a roster update (`contracts/wire.md` rule 5): the id goes on the
+    /// forgotten list, so a peers' `mesh.roster` and an automatic dial both leave it alone.
+    pub fn forget_peer(&self, id: &str) -> crate::mesh::Edges {
+        let mut s = self.inner.write();
+        if s.paired
+            .as_ref()
+            .map(|p| p.mac_id.eq_ignore_ascii_case(id))
+            .unwrap_or(false)
+        {
+            s.paired = None;
+        }
+        s.known_peers
+            .retain(|p| !p.mac_id.eq_ignore_ascii_case(id));
+        if !s.forgotten.iter().any(|f| f.eq_ignore_ascii_case(id)) {
+            s.forgotten.push(id.to_string());
+        }
+        s.mesh.remove(id);
+        s.mesh.roster.remove(id);
+        s.mesh.refresh_roster();
+        s.clients
+            .retain(|p| !p.id.eq_ignore_ascii_case(id) && p.address.as_deref() != Some(id));
+        s.guests
+            .retain(|p| !p.id.eq_ignore_ascii_case(id) && p.address.as_deref() != Some(id));
+        s.found
+            .retain(|p| !p.id.eq_ignore_ascii_case(id) && p.address.as_deref() != Some(id));
+        let edges = s.layout.edges.clear_peer(id);
+        s.layout.edges = edges.clone();
+        edges
+    }
+
+    /// The paired devices this app can dial: an id and an address, skipping the ones already
+    /// connected and anything the person removed.
+    pub fn dial_targets(&self) -> Vec<(String, String)> {
+        let s = self.inner.read();
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut push = |id: &str, address: Option<&String>| {
+            let Some(addr) = address else { return };
+            if addr.trim().is_empty() {
+                return;
+            }
+            if s.forgotten.iter().any(|f| f.eq_ignore_ascii_case(id)) {
+                return;
+            }
+            if s.mesh.session(id).is_some() {
+                return;
+            }
+            if out.iter().any(|(x, _)| x.eq_ignore_ascii_case(id)) {
+                return;
+            }
+            out.push((id.to_string(), addr.clone()));
+        };
+        for p in &s.known_peers {
+            push(&p.mac_id, p.address.as_ref());
+        }
+        if let Some(p) = &s.paired {
+            push(&p.mac_id, p.address.as_ref());
+        }
+        out
+    }
+
+    /// Write every paired device back, so the next launch can dial them.
+    fn persist_peers(&self) {
+        let peers = self.inner.read().known_peers.clone();
+        #[cfg(not(test))]
+        crate::pairstore::save_peers(&peers);
+        #[cfg(test)]
+        let _ = peers;
+    }
+
+    /// Write the forgotten list back.
+    pub fn persist_forgotten(&self) {
+        let ids = self.inner.read().forgotten.clone();
+        #[cfg(not(test))]
+        crate::pairstore::save_forgotten(&ids);
+        #[cfg(test)]
+        let _ = ids;
     }
 
     /// The connected devices as the pool sees them: id, whether it speaks the mesh, and whether it
@@ -3019,6 +3302,214 @@ mod tests {
     /// exactly that: an older app is never sent a stamped relay or asked to pass a crossing on
     /// (`FR-016`, `contracts/wire.md` rule 4).
     #[test]
+    /// Two devices with a session each, and a phone paired with one of them only: the phone
+    /// appears on the other through the roster, without a second pairing (`FR-021`, US4).
+    #[test]
+    fn a_device_paired_with_one_computer_appears_on_the_other() {
+        let a = AppState::new();
+        let b = AppState::new();
+        let phone = AppState::new();
+        // A and B know each other; the phone is paired with B alone.
+        a.add_client(peer("b", "192.168.4.11"));
+        b.add_client(peer("a", "192.168.4.10"));
+        b.add_client(peer("phone", "192.168.4.12"));
+        phone.add_client(peer("b", "192.168.4.11"));
+
+        let msg = { b.inner.read().mesh.roster_message() };
+        assert_eq!(
+            msg.peers,
+            Some(vec!["a".to_string(), "phone".to_string()]),
+            "B reports its own direct links"
+        );
+        let taken = {
+            let mut s = a.inner.write();
+            s.mesh.handle_roster("b", &msg, &[])
+        };
+        assert!(taken, "a roster from a connected device is taken");
+
+        let snap = a.snapshot();
+        let learned = snap
+            .mesh
+            .known
+            .iter()
+            .find(|d| d.id == "phone")
+            .expect("the phone is known on A without a pairing");
+        assert!(!learned.direct, "A has no session with it");
+        assert_eq!(learned.via, vec!["b".to_string()]);
+        assert!(snap.mesh.known.iter().any(|d| d.id == "b" && d.direct));
+        assert!(
+            snap.mesh.known_links.contains(&"phone".to_string()),
+            "the older field still carries the ids it documents"
+        );
+        // Advisory only: knowing about it does not create a session (routing needs one).
+        assert!(a.inner.read().mesh.session("phone").is_none());
+    }
+
+    /// A stale roster cannot undo a newer one, and one from a device with no session is ignored.
+    #[test]
+    fn only_a_newer_roster_from_a_connected_device_is_taken() {
+        let a = AppState::new();
+        a.add_client(peer("b", "192.168.4.11"));
+        let mut msg = crate::network::WireMessage {
+            t: "mesh.roster".to_string(),
+            v: Some(1),
+            reckon: Some(4),
+            peers: Some(vec!["a".to_string(), "phone".to_string()]),
+            ..Default::default()
+        };
+        {
+            let mut s = a.inner.write();
+            assert!(
+                !s.mesh.handle_roster("stranger", &msg, &[]),
+                "a roster from a device with no session teaches nothing"
+            );
+            assert!(s.mesh.handle_roster("b", &msg, &[]));
+        }
+        msg.reckon = Some(3);
+        msg.peers = Some(vec!["a".to_string()]);
+        {
+            let mut s = a.inner.write();
+            assert!(!s.mesh.handle_roster("b", &msg, &[]), "an older revision is ignored");
+        }
+        assert!(a
+            .inner
+            .read()
+            .mesh
+            .known
+            .iter()
+            .any(|d| d.id == "phone"));
+    }
+
+    /// Forgetting wins: the device is not added back, not dialled, and not learned again from a
+    /// peer's roster (`FR-022`, `contracts/wire.md` rule 5).
+    #[test]
+    fn a_forgotten_device_stays_forgotten() {
+        let a = AppState::new();
+        a.add_client(peer("b", "192.168.4.11"));
+        a.remember_peer("phone", "Phone", "android", Some("192.168.4.12".to_string()), Some("tok".to_string()));
+        assert_eq!(a.dial_targets().len(), 1, "the paired phone can be dialled");
+
+        let edges = a.forget_peer("phone");
+        assert!(edges.is_empty(), "no edge pointed at it");
+        assert!(a.forgotten_ids().contains(&"phone".to_string()));
+        assert!(a.dial_targets().is_empty(), "a forgotten device is never dialled");
+
+        // A reconnect cannot add it back, even holding a token.
+        assert!(!a.add_client(peer("phone", "192.168.4.12")));
+        assert!(a.inner.read().mesh.session("phone").is_none());
+
+        // And a peer's roster cannot reintroduce it.
+        let mut msg = crate::network::WireMessage {
+            t: "mesh.roster".to_string(),
+            v: Some(1),
+            reckon: Some(9),
+            peers: Some(vec!["a".to_string(), "phone".to_string()]),
+            members: Some(vec![crate::network::WireRosterMember {
+                id: "phone".to_string(),
+                name: Some("Phone".to_string()),
+                os: Some("android".to_string()),
+            }]),
+            ..Default::default()
+        };
+        let forgotten = a.forgotten_ids();
+        {
+            let mut s = a.inner.write();
+            assert!(s.mesh.handle_roster("b", &msg, &forgotten));
+        }
+        msg.reckon = None;
+        let snap = a.snapshot();
+        assert!(
+            snap.mesh.known.iter().all(|d| d.id != "phone"),
+            "a forgotten device is not listed again"
+        );
+    }
+
+    /// A dial reaches a named device, so the hello has to carry that device's token, not the
+    /// primary pair's: each pair keeps its own secret.
+    #[test]
+    fn a_dial_finds_the_paired_device_at_that_address() {
+        let a = AppState::new();
+        a.remember_peer(
+            "desktop",
+            "Desktop",
+            "win",
+            Some("192.168.4.11".to_string()),
+            Some("tok-a".to_string()),
+        );
+        a.remember_peer(
+            "laptop",
+            "Laptop",
+            "linux",
+            Some("192.168.4.12:47800".to_string()),
+            Some("tok-b".to_string()),
+        );
+
+        let laptop = a.paired_at("192.168.4.12").expect("the laptop has a pairing");
+        assert_eq!(laptop.mac_id, "laptop");
+        assert_eq!(laptop.token.as_deref(), Some("tok-b"));
+        assert_eq!(
+            a.paired_at("192.168.4.12:47800").map(|p| p.mac_id),
+            Some("laptop".to_string()),
+            "an address with its port still names the same device"
+        );
+        assert!(
+            a.paired_at("192.168.4.99").is_none(),
+            "an unknown address has no pairing of its own"
+        );
+        assert_eq!(a.dial_targets().len(), 2, "both paired screens are dialled");
+        assert!(a
+            .dial_targets()
+            .iter()
+            .any(|(id, addr)| id == "laptop" && addr == "192.168.4.12:47800"));
+    }
+
+    /// Every paired device keeps its own token: a second computer must not be refused because the
+    /// first one paired last (`pairs.json` holds them all).
+    #[test]
+    fn each_paired_device_authenticates_with_its_own_token() {
+        let a = AppState::new();
+        a.remember_peer(
+            "desktop",
+            "Desktop",
+            "win",
+            Some("192.168.4.11".to_string()),
+            Some("BEAM_AUTH_V1:tok-a:AA:BB".to_string()),
+        );
+        a.remember_peer(
+            "laptop",
+            "Laptop",
+            "linux",
+            Some("192.168.4.12".to_string()),
+            Some("BEAM_AUTH_V1:tok-b:CC:DD".to_string()),
+        );
+
+        assert_eq!(
+            a.authenticate_peer(Some("desktop"), Some("tok-a"), None),
+            Some("desktop".to_string()),
+            "the bare secret of the older spelling also proves it"
+        );
+        assert_eq!(
+            a.authenticate_peer(Some("laptop"), Some("BEAM_AUTH_V1:tok-b:CC:DD"), None),
+            Some("laptop".to_string())
+        );
+        assert_eq!(
+            a.authenticate_peer(Some("desktop"), Some("tok-b"), None),
+            None,
+            "a token belongs to one device only"
+        );
+        assert_eq!(
+            a.authenticate_peer(None, Some("tok-a"), Some("192.168.4.11")),
+            Some("desktop".to_string()),
+            "a peer that named only its address is still recognised"
+        );
+        assert_eq!(a.token_for("laptop").as_deref(), Some("BEAM_AUTH_V1:tok-b:CC:DD"));
+        assert_eq!(a.token_for("stranger"), None);
+
+        // A device the person forgot cannot authenticate.
+        a.forget_peer("laptop");
+        assert_eq!(a.authenticate_peer(Some("laptop"), Some("tok-b"), None), None);
+    }
+
     fn a_device_is_legacy_until_it_says_it_speaks_the_mesh() {
         let app_state = AppState::new();
         app_state.add_client(peer("desktop", "192.168.4.11"));

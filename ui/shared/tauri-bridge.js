@@ -263,6 +263,7 @@
     respondPair: (allowed) => invoke('pair_respond', { allowed }),
     connectGuest: (id) => invoke('pair', { host: id }),
     forgetGuest: (id) => invoke('forget', { id }),
+    forgetDevice: (deviceId) => invoke('forget_device', { device_id: deviceId }),
     disconnect: () => invoke('disconnect'),
     // Close one device's session and leave the others: the Multi-device page's per-row action.
     disconnectDevice: (deviceId) => invoke('disconnect_device', { device_id: String(deviceId) }),

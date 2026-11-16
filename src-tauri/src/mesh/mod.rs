@@ -190,6 +190,8 @@ pub fn strip_if_dormant(pkt: &mut crate::network::WireMessage, active: bool) {
     pkt.via = None;
     pkt.reckon = None;
     pkt.why = None;
+    pkt.peers = None;
+    pkt.members = None;
 }
 
 #[cfg(test)]

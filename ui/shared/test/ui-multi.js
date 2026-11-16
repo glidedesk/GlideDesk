@@ -149,4 +149,57 @@ ok('the edge picker uses the tested model, not a second set of rules', () => {
   assert.ok(model > 0 && model < self, 'edges-ui.js must load before the page');
 });
 
+// "Pair once, meet everyone" (FR-021): a device without a session, reported by a peer's roster,
+// is listed but is not one of the connected devices.
+ok('a device learned through a peer is listed, not counted as connected', () => {
+  const state = {
+    mesh: {
+      active: true,
+      sessions: [session('a'), session('b')],
+      known: [
+        { id: 'a', name: 'A', os: 'win', direct: true, via: [] },
+        { id: 'b', name: 'B', os: 'mac', direct: true, via: [] },
+        { id: 'phone', name: 'Phone', os: 'android', direct: false, via: ['a'] },
+      ],
+    },
+  };
+  assert.strictEqual(V.sessions(state).length, 2, 'the phone is not a session');
+  const known = V.known(state);
+  assert.strictEqual(known.length, 1, 'only the indirect device is listed here');
+  assert.strictEqual(known[0].id, 'phone');
+  assert.strictEqual(known[0].name, 'Phone');
+  assert.deepStrictEqual(known[0].via, ['a']);
+});
+
+ok('a state from before the roster existed lists nobody', () => {
+  assert.deepStrictEqual(V.known({}), []);
+  assert.deepStrictEqual(V.known({ mesh: { sessions: [session('a'), session('b')] } }), []);
+});
+
+ok('the same device is not listed twice', () => {
+  const state = {
+    mesh: {
+      active: true,
+      sessions: [session('a'), session('b'), session('phone')],
+      known: [
+        { id: 'phone', name: 'Phone', os: 'android', direct: false, via: ['a', 'b'] },
+      ],
+    },
+  };
+  assert.deepStrictEqual(V.known(state), [], 'a device with a session belongs to Connected now');
+});
+
+ok('the "also on this desk" Forget reaches a command', () => {
+  const page = read('ui/ui-multi.js');
+  assert.ok(page.includes('MeshView.known('), 'the list comes from the tested model');
+  assert.ok(page.includes('forgetDevice'), 'the Forget button must call a command');
+  const bridge = read('ui/shared/tauri-bridge.js');
+  assert.ok(/forgetDevice:\s*\(.*\)\s*=>\s*invoke\('forget_device'/.test(bridge),
+    'the bridge must expose forget_device');
+  const main = read('src-tauri/src/main.rs');
+  assert.ok(main.includes('commands::forget_device'), 'the command must be registered');
+  const commands = read('src-tauri/src/commands.rs');
+  assert.ok(commands.includes('pub fn forget_device'), 'the command must exist');
+});
+
 console.log('ui-multi: ' + checks + ' checks passed');

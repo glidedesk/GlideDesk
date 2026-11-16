@@ -28,6 +28,10 @@ UI.tab({
     );
     const list = el('div', {});
     const empty = UI.note('info', 'Connect another computer or phone with "Connect by address" or "Found nearby" on the Overview page.');
+    // Devices that were paired with one computer and reported here by its roster: listed so the
+    // person can see the whole desk, each with a Forget that really removes it (`FR-021`).
+    const knownList = el('div', {});
+    const knownEmpty = UI.note('info', 'Nobody else on this desk yet.');
     // Why the last crossing or copy did not happen (`FR-023`). Hidden until there is something to say.
     const refusal = UI.note('warn', '');
     refusal.hidden = true;
@@ -37,6 +41,7 @@ UI.tab({
     body.append(
       UI.card('Mesh Networking', [meshRow, refusal]),
       UI.card('Connected now', [list, empty]),
+      UI.card('Also on this desk', [knownList, knownEmpty]),
       UI.card('Screen edges', [edgeNote]),
       MeshIntro.art(),
     );
@@ -56,8 +61,23 @@ UI.tab({
       refusal.set(MeshView.refusalText(s && s.mesh && s.mesh.lastRefusal));
       edgeNote.set(EdgesUI.describe(edges));
 
+      const elsewhere = MeshView.known(s).filter((d) => d.id !== '' && !names[d.id]);
+      knownEmpty.hidden = elsewhere.length > 0;
+      knownList.replaceChildren(...elsewhere.map((d) => UI.row(
+        d.name || d.id,
+        [MeshView.kind(d.os), d.via.length ? 'Through ' + d.via.join(', ') : 'Reported by another computer']
+          .filter(Boolean).join(' · '),
+        [UI.osIcon(d.os), UI.button('Forget', () => {
+          if (!UI.api || !UI.api.forgetDevice) return;
+          UI.api.forgetDevice(d.id).catch((e) => {
+            refusal.set((e && e.message) ? e.message : 'Could not forget ' + (d.name || d.id) + '.');
+          });
+        }, 'small')],
+      )));
+
       const next = JSON.stringify([
         devices.map((d) => [d.id, d.name, d.os, d.address, d.role]),
+        elsewhere.map((d) => [d.id, d.name, d.os, d.via]),
         EdgesUI.normalize(edges),
       ]);
       if (next === key) return;

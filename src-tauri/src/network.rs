@@ -358,6 +358,21 @@ pub struct WireFileItem {
     pub sha256: String,
 }
 
+/// One device in a `mesh.roster` message: enough for a peer that has no session with it to list it.
+///
+/// Advisory metadata only (`contracts/wire.md`): a name and a system, never a token and never an
+/// address. Trust comes from `pairs.json`; this is what makes a device appear on a screen it was
+/// never paired with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireRosterMember {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireMessage {
     pub t: String,
@@ -420,6 +435,13 @@ pub struct WireMessage {
     /// Why a `kvm.refuse` was sent: `not_allowed`, `busy`, `not_connected`, `not_ready`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// A `mesh.roster`: the sender's direct links, as device ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers: Option<Vec<String>>,
+    /// A `mesh.roster`: the devices in `peers`, named, so a device without a session with them can
+    /// still list them ("pair once, meet everyone").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<WireRosterMember>>,
 
     // Input / KVM fields
     #[serde(default)]
@@ -652,6 +674,8 @@ impl Default for WireMessage {
             via: None,
             reckon: None,
             why: None,
+            peers: None,
+            members: None,
             dx: None,
             dy: None,
             b: None,
@@ -1530,6 +1554,9 @@ impl MeshServer {
         state.remove_client(&session_id);
         state.remove_client(&peer_addr.ip().to_string());
         if let Some(net) = app.try_state::<NetworkManager>() {
+            // A device left: the roster the others hold is now wrong, and the screen it was on
+            // should not stay assigned to a link that is gone.
+            net.broadcast_roster();
             net.set_notif_accept(false);
             net.set_audio_accept(false);
         }
@@ -2245,30 +2272,23 @@ impl MeshServer {
                     *peer_id_holder.write() = Some(pid.clone());
                 }
 
-                // Verify authorization strictly via pairing token
-                let is_auth = {
-                    let guard = state.inner.read();
-                    if let Some(ref paired) = guard.paired {
-                        let id_match = pkt.id.as_deref()
-                            .map(|id| same_peer_id(id, &paired.mac_id))
-                            .unwrap_or(false)
-                            || peer_addr.ip().to_string() == paired.mac_id;
-                        let token_match = match (&paired.token, &pkt.token) {
-                            (Some(exp), Some(recv)) => {
-                                exp == recv
-                                    || exp.strip_prefix("BEAM_AUTH_V1:").and_then(|s| s.split(':').next()) == Some(recv.as_str())
-                                    || recv.strip_prefix("BEAM_AUTH_V1:").and_then(|s| s.split(':').next()) == Some(exp.as_str())
-                            }
-                            _ => false,
-                        };
-                        id_match && token_match
-                    } else {
-                        false
-                    }
-                };
+                // Verify authorization strictly via pairing token. Each paired device holds its
+                // own secret, so a desk with several screens does not depend on which one paired
+                // last (the mesh keeps every pair, not only the most recent).
+                let matched_peer = state.authenticate_peer(
+                    pkt.id.as_deref(),
+                    pkt.token.as_deref(),
+                    Some(&peer_addr.ip().to_string()),
+                );
+                let is_auth = matched_peer.is_some();
 
                 if is_auth {
                     *authenticated.write() = true;
+                    // The token proved an identity, and that identity is what the session is
+                    // recorded under: a peer that only named its address still gets its real id.
+                    if let Some(ref id) = matched_peer {
+                        *peer_id_holder.write() = Some(id.clone());
+                    }
                     log::info!("[Auth] Peer {} ({:?}) authenticated successfully via pairing token", peer_addr, pkt.id);
                     // How big the other desktop is, so pointer movement sent there
                     // can be scaled to fill it instead of moving 1:1.
@@ -2286,7 +2306,10 @@ impl MeshServer {
                     Some(peer_addr.ip().to_string())
                 };
                 let info = PeerInfo {
-                    id: pkt.id.clone().unwrap_or_else(|| peer_addr.to_string()),
+                    id: matched_peer
+                        .clone()
+                        .or_else(|| pkt.id.clone())
+                        .unwrap_or_else(|| peer_addr.to_string()),
                     name: pkt.name.clone().unwrap_or_else(|| "Remote Peer".to_string()),
                     os: pkt.os.clone().unwrap_or_else(|| "unknown".to_string()),
                     address: addr_str,
@@ -2301,6 +2324,15 @@ impl MeshServer {
                     // What the device can do comes from the message that introduced it: a device
                     // that does not say it speaks the mesh is an older app and is treated as one.
                     state.learn_session_capabilities(&info.id, pkt.mesh == Some(true));
+                    // Remember the pair, so this screen is found again on the next launch and
+                    // the other devices can be introduced to it (`FR-021`).
+                    state.remember_peer(
+                        &info.id,
+                        &info.name,
+                        &info.os,
+                        info.address.clone(),
+                        pkt.token.clone(),
+                    );
                     state.set_pairing(None);
                     if let Some(ref macs) = pkt.macs {
                         crate::wol::record_peer_wol_info(
@@ -2364,10 +2396,13 @@ impl MeshServer {
                 }
 
                 if pkt.t == "hello" {
-                    // Prove who we are as well: the peer checks this token against the
-                    // pairing it stored, the same way we checked theirs. Without it, a
-                    // reconnecting pair cannot authenticate each other from a bare welcome.
-                    let our_token = state.inner.read().paired.as_ref().and_then(|p| p.token.clone());
+                    // Prove who we are as well: the peer checks this token against the pairing
+                    // it stored, the same way we checked theirs. The token is the one shared with
+                    // *this* device: with several paired, the primary pair's would be refused.
+                    let our_token = matched_peer
+                        .as_deref()
+                        .and_then(|id| state.token_for(id))
+                        .or_else(|| state.inner.read().paired.as_ref().and_then(|p| p.token.clone()));
                     let (welcome_w, welcome_h) = crate::kvm::virtual_desktop_size();
                     let welcome = WireMessage {
                         t: "welcome".to_string(),
@@ -2403,6 +2438,22 @@ impl MeshServer {
                     let _ = out_tx
                         .send(crate::streaming::screen_state_message(state))
                         .await;
+
+                    // Who we are linked to, so a device that was paired with one computer
+                    // appears on the others without a new code (`FR-021`).
+                    if state.mesh_active() {
+                        let roster = { state.inner.read().mesh.roster_message() };
+                        let _ = out_tx.send(roster).await;
+                    }
+                }
+
+                // A device joined: everybody else should hear about it, and any paired device
+                // that is not here yet is worth dialling once.
+                if let Some(net) = app.try_state::<NetworkManager>().map(|n| n.inner().clone()) {
+                    net.broadcast_roster();
+                    if state.mesh_active() {
+                        net.dial_known_peers();
+                    }
                 }
 
                 // Notifications: tell the other computer whether this one shows its.
@@ -2464,6 +2515,7 @@ impl MeshServer {
                 }
                 state.remove_client(&peer_addr.ip().to_string());
                 if let Some(net) = app.try_state::<NetworkManager>() {
+                    net.broadcast_roster();
                     net.set_notif_accept(false);
                     net.set_audio_accept(false);
                 }
@@ -2481,7 +2533,8 @@ impl MeshServer {
             }
             "k.mm" | "remote.mm" | "k.md" | "remote.md" | "k.mu" | "remote.mu"
                 | "k.wh" | "remote.wh" | "k.kd" | "remote.kd" | "k.ku" | "remote.ku"
-                | "clip" | "clip.image" | "clip.request" | "kvm.take" | "window.handoff.offer"
+                | "clip" | "clip.image" | "clip.request" | "mesh.roster"
+                | "kvm.take" | "window.handoff.offer"
                 | "window.handoff.return" | "gamepad.event" | "chat.conv" | "notif.reply"
                 | "notif" | "notif.policy" | "audio.policy"
                 | "chat.want" | "wol.info" | "phone.media" | "phone.media.ctl"
@@ -2700,6 +2753,31 @@ impl MeshServer {
                         if net.inner().send_stamped_to(&from, &item) {
                             log::info!("[Clipboard] Sent the current copy to {}", from);
                         }
+                    }
+                }
+            }
+            "mesh.roster" => {
+                // Who is connected to whom, from a device we have a session with (`mesh/roster.rs`).
+                // Advisory only: it fills the device list, and it is how this device learns of a
+                // paired screen to dial. It never grants trust, so a device the person removed is
+                // dropped from it (`FR-022`).
+                let from = {
+                    let pid = peer_id_holder.read().clone();
+                    state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                };
+                let forgotten = state.forgotten_ids();
+                let taken = {
+                    let mut s = state.inner.write();
+                    s.mesh.handle_roster(&from, &pkt, &forgotten)
+                };
+                if taken {
+                    log::debug!("[Mesh] Roster from {} taken", from);
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
+                    // The desk is up and this device now knows who else belongs to it: reach the
+                    // ones we are paired with but not connected to (`T049`).
+                    if let Some(net) = app.try_state::<NetworkManager>() {
+                        net.dial_known_peers();
                     }
                 }
             }
@@ -3877,6 +3955,15 @@ pub struct NetworkManager {
     discovery: Arc<RwLock<Option<Arc<DiscoveryService>>>>,
     /// The pooled clipboard (`FR-016`–`FR-020`).
     clipboard: Arc<Mutex<MeshedClipboard>>,
+    /// When each paired device was last dialled, so a device that is asleep is not asked every
+    /// time a roster arrives (`T049`).
+    dials: Arc<Mutex<HashMap<String, DialState>>>,
+}
+
+/// How often a paired device has been dialled without success, and when it may be tried again.
+struct DialState {
+    attempts: u32,
+    next_at: std::time::Instant,
 }
 
 impl NetworkManager {
@@ -3897,6 +3984,7 @@ impl NetworkManager {
         );
 
         let clipboard = Arc::new(Mutex::new(MeshedClipboard::new(&local_id)));
+        let dials = Arc::new(Mutex::new(HashMap::new()));
         Self {
             app,
             state,
@@ -3912,6 +4000,7 @@ impl NetworkManager {
             tls_identity,
             discovery: Arc::new(RwLock::new(None)),
             clipboard,
+            dials,
         }
     }
 
@@ -4062,6 +4151,96 @@ impl NetworkManager {
             Some(msg)
         } else {
             None
+        }
+    }
+
+    /// Tell every connected device who this device is linked to, while the mesh is active.
+    ///
+    /// Sent when a device joins or leaves, which is exactly when the answer changes (`FR-021`).
+    /// With one device nothing goes out: nobody needs a roster, and the wire stays as it was.
+    pub fn broadcast_roster(&self) {
+        let msg = {
+            let s = self.state.inner.read();
+            if !s.mesh.active {
+                return;
+            }
+            s.mesh.roster_message()
+        };
+        let sent = self.send_packet_sync(msg);
+        log::debug!("[Mesh] Sent the roster to {} device(s)", sent);
+    }
+
+    /// True when a session with this device is already up (by id or by the id it dialled with).
+    fn is_peer_connected(&self, id: &str) -> bool {
+        self.active_clients.read().values().any(|c| {
+            c.peer_id
+                .read()
+                .as_deref()
+                .map(|pid| pid.eq_ignore_ascii_case(id))
+                .unwrap_or(false)
+                || c.id.eq_ignore_ascii_case(id)
+        })
+    }
+
+    /// Reach the other paired devices of this desk, once each, with a growing gap between tries.
+    ///
+    /// This is what makes "pair once, meet everyone" happen without a new code: a device that is
+    /// in `pairs.json` and is not connected is dialled when a roster shows the desk is up, and a
+    /// device that does not answer is left alone for longer and longer instead of being hammered.
+    /// A device the person forgot is never in the list (`AppState::dial_targets`).
+    pub fn dial_known_peers(&self) {
+        // Dialling must not be part of an incoming packet's own future: a connection attempt
+        // starts a session loop, and that loop receives packets. Spawning keeps the two apart.
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            this.dial_known_peers_now().await;
+        });
+    }
+
+    async fn dial_known_peers_now(&self) {
+        if !self.state.mesh_active() {
+            return;
+        }
+        for (id, address) in self.state.dial_targets() {
+            if self.is_peer_connected(&id) {
+                self.dials.lock().remove(&id);
+                continue;
+            }
+            let due = {
+                let mut dials = self.dials.lock();
+                let now = std::time::Instant::now();
+                match dials.get(&id) {
+                    Some(state) if state.next_at > now => false,
+                    Some(state) => {
+                        let attempts = state.attempts.saturating_add(1);
+                        // 5 s, 10 s, 20 s … capped at five minutes: a screen that comes back
+                        // hours later is still found, and nothing is dialled in a tight loop.
+                        let wait = std::time::Duration::from_secs(5u64.saturating_mul(1 << attempts.min(6)))
+                            .min(std::time::Duration::from_secs(300));
+                        dials.insert(id.clone(), DialState {
+                            attempts,
+                            next_at: now + wait,
+                        });
+                        true
+                    }
+                    None => {
+                        dials.insert(id.clone(), DialState {
+                            attempts: 1,
+                            next_at: now + std::time::Duration::from_secs(10),
+                        });
+                        true
+                    }
+                }
+            };
+            if !due {
+                continue;
+            }
+            log::info!("[Mesh] Dialling the paired device {} at {}", id, address);
+            if let Err(e) = self.connect_to(&address).await {
+                log::info!("[Mesh] {} did not answer ({}); will try again later", address, e);
+            } else {
+                self.dials.lock().remove(&id);
+            }
         }
     }
 
@@ -4286,13 +4465,27 @@ impl NetworkManager {
             }
         }
 
-        let (stored_fp, target_peer_id) = {
+        // Who lives at this address, as far as this desk knows. A dial may be to any paired
+        // screen, not only the primary pair, and each keeps its own token and fingerprint.
+        let dial_peer = self.state.paired_at(target_addr);
+        let fingerprint_here = self
+            .state
+            .get_peer_fingerprint(target_addr)
+            .or_else(|| self.state.get_peer_fingerprint(target_ip));
+        let (stored_fp, target_peer_id, saved_token) = {
             let guard = self.state.inner.read();
-            let pid = guard.paired.as_ref().map(|p| p.mac_id.clone());
-            let fp = self.state.get_peer_fingerprint(target_addr)
-                .or_else(|| self.state.get_peer_fingerprint(target_ip))
+            let pid = dial_peer
+                .as_ref()
+                .map(|p| p.mac_id.clone())
+                .or_else(|| guard.paired.as_ref().map(|p| p.mac_id.clone()));
+            let fp = fingerprint_here
+                .or_else(|| dial_peer.as_ref().and_then(|p| p.tls_fingerprint.clone()))
                 .or_else(|| guard.paired.as_ref().and_then(|p| p.tls_fingerprint.clone()));
-            (fp, pid)
+            let token = dial_peer
+                .as_ref()
+                .and_then(|p| p.token.clone())
+                .or_else(|| guard.paired.as_ref().and_then(|p| p.token.clone()));
+            (fp, pid, token)
         };
 
         let allow_plaintext = self.state.inner.read().net.allow_plaintext;
@@ -4338,8 +4531,8 @@ impl NetworkManager {
             );
         }
 
-        // Send hello with saved pairing token if available
-        let saved_token = self.state.inner.read().paired.as_ref().and_then(|p| p.token.clone());
+        // Send hello with the token of the device being dialled (`saved_token` above), so a desk
+        // of several screens authenticates each pair with its own secret.
         let (sw, sh) = crate::kvm::virtual_desktop_size();
         let hello = WireMessage {
             t: "hello".to_string(),
@@ -4472,6 +4665,9 @@ impl NetworkManager {
             }
             state.remove_client(&cur_id);
             state.remove_client(&resolved_addr.ip().to_string());
+            if let Some(net) = app.try_state::<NetworkManager>() {
+                net.broadcast_roster();
+            }
             let was_driving = state.inner.read().input == "driving";
             state.set_where_input("home");
             crate::kvm::NativeInputInjector::release_all_keys();
@@ -4770,6 +4966,9 @@ impl NetworkManager {
             }
             state.remove_client(&cur_id);
             state.remove_client(&resolved_addr.ip().to_string());
+            if let Some(net) = app.try_state::<NetworkManager>() {
+                net.broadcast_roster();
+            }
             let was_driving = state.inner.read().input == "driving";
             state.set_where_input("home");
             crate::kvm::NativeInputInjector::release_all_keys();

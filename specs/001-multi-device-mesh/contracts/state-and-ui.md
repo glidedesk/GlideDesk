@@ -15,6 +15,9 @@ Added to `FullState`:
   "lastRefusal": null,        // { device, why, at }
   "reckon": 12,               // roster revision; bumped whenever this device's links change
   "knownLinks": [],           // devices learned through peers (mesh.roster `members`)
+  "known": [                  // everyone this device knows of, direct or not
+    { "id":"phone-1", "name":"Phone", "os":"android", "direct":false, "via":["win-1"] }
+  ],
   "sessions": [               // one entry per connected device
     { "id":"win-1", "name":"Desktop", "os":"win", "address":"192.168.4.11:47800",
       "mesh":true, "pool":true, "role":"idle", "route":0,
@@ -51,7 +54,7 @@ reconnect, and the existing session is not disturbed.
 | `assign_edge` | `{side, deviceId}` (`deviceId: null` clears) | writes `layout.json.edges` | refuses an id already on another side with a clear error; pushes state |
 | `sessions_list` | – | returns `mesh.sessions` | for the page and tests |
 | `disconnect_device` | `{deviceId}` | closes that session only | other sessions unaffected |
-| `forget_device` | `{deviceId}` | removes pairing and edges pointing at it | wins over roster |
+| `forget_device` | `{deviceId}` | removes pairing and edges pointing at it, and puts the id on the forgotten list | wins over roster; also refuses a reconnect |
 | `clip_request` | `{deviceId}` | asks a peer for its current clipboard item | **not built in this slice**: the request goes out on connect, and there is no per-device "paste from" control yet. Adding the command without the control would be a dead switch |
 
 Removed: `set_multi` and `MultiState.enabled` (`commands.rs:1239`, `state.rs:1140`). The dead flag
@@ -69,6 +72,10 @@ must not survive this work; nothing reads it, and leaving it invites a switch th
   one side disappears from the others' lists. Changing an assignment takes effect immediately.
 - Shows `mesh.lastRefusal` when a push into an edge was refused, with the reason in words a person
   understands ("Desktop is not connected", "Cursor sharing is off there").
+- "Also on this desk": the devices in `mesh.known` that have no session (a phone paired with one
+  computer and reported by its roster, `FR-021`), each with the computer that reported it and a
+  **Forget** button wired to `forget_device`. A device with a session belongs to "Connected now"
+  and is not repeated.
 - No dead controls: every switch on this page must be wired to a command that changes behaviour
   (this is the rule that `set_multi` broke).
 

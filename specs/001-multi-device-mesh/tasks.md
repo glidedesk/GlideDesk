@@ -101,10 +101,10 @@ Rust core in `src-tauri/src/`, webview UI in `ui/`, phone companion in `android/
 
 ## Phase 6: US4 — Pair once, meet everyone (P2)
 
-- [ ] T047 [P] [US4] Test: roster exchange offers a newly paired device to a peer that already knows the receiver; a forgotten device is not reintroduced (`src-tauri/src/mesh/roster.rs`)
-- [ ] T048 [US4] Implement `src-tauri/src/mesh/roster.rs` (self/peers/known, `reckon` revisions) and send it on welcome — satisfies FR-021
-- [ ] T049 [US4] Dial learned peers once with backoff, skipping devices already connected and devices removed from `pairs.json` in `src-tauri/src/network.rs` — satisfies US4
-- [ ] T050 [US4] Add `forget_device` command that removes pairing and any edges pointing at it, and wins over roster updates in `src-tauri/src/commands.rs` — satisfies FR-022
+- [X] T047 [P] [US4] Test: roster exchange offers a newly paired device to a peer that already knows the receiver; a forgotten device is not reintroduced (`src-tauri/src/mesh/roster.rs`, `a_device_paired_with_one_computer_appears_on_the_other` and `a_forgotten_device_stays_forgotten` in `src-tauri/src/state.rs`)
+- [X] T048 [US4] Implement `src-tauri/src/mesh/roster.rs` (self/peers/known, `reckon` revisions, `mesh.roster` with `peers`/`members`) and send it on welcome and whenever a device joins or leaves — satisfies FR-021
+- [X] T049 [US4] Keep every paired device (with its own token) in `pairs.json`, and dial a paired device that is not connected once with a growing gap when a roster arrives, skipping connected and forgotten devices (`NetworkManager::dial_known_peers`) — satisfies US4
+- [X] T050 [US4] Add `forget_device`, backed by `AppState::forget_peer` (pairing, edges, sessions, `pairs.json`, forgotten list, refused reconnects), and wire it to the page's Forget button in `ui/ui-multi.js` — satisfies FR-022
 
 **Checkpoint**: pair the phone with one computer; it appears on the second without a new code.
 

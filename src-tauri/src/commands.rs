@@ -1301,30 +1301,43 @@ pub async fn cancel_pair(network: State<'_, NetworkManager>) -> Result<(), Strin
     network.cancel_pair().await
 }
 
-/// Forget the paired computer: the pairing, and every screen edge that pointed at it.
+/// Forget a device: its pairing, its edges, and any claim another computer makes about it.
 ///
 /// An edge that leads to a device this app no longer trusts would send the pointer to a screen that
 /// cannot be driven, so it goes with the pairing. Forgetting wins over anything a peer suggests
-/// (`contracts/state-and-ui.md`): the roster can add a route, never a trust.
-#[tauri::command]
-pub fn forget(id: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let edges = {
-        let mut s = state.inner.write();
-        s.paired = None;
-        let edges = s.layout.edges.clear_peer(&id);
-        s.layout.edges = edges.clone();
-        s.mesh.remove(&id);
-        s.clients.retain(|p| p.id != id && p.address.as_deref() != Some(id.as_str()));
-        edges
-    };
+/// (`contracts/state-and-ui.md`): the roster can add a route, never a trust. The id goes on the
+/// forgotten list, so no `mesh.roster` and no automatic dial can bring it back (`FR-022`).
+fn forget_device_inner(id: &str, state: &AppState, app: &AppHandle) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err("Which device should be forgotten?".to_string());
+    }
+    let edges = state.forget_peer(id);
     let (seam, along) = {
         let s = state.inner.read();
         (s.layout.side.clone(), s.layout.along)
     };
     crate::pairstore::save_layout(&seam, along, &edges);
     state.persist_pairs();
-    push_state(&app, &state);
+    state.persist_forgotten();
+    push_state(app, state);
+    log::info!("[Mesh] Forgot {} and every edge that led to it", id);
     Ok(())
+}
+
+/// The window's existing call: the Overview page forgets the paired computer by name.
+#[tauri::command]
+pub fn forget(id: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    forget_device_inner(&id, &state, &app)
+}
+
+/// Forget one device of several (`contracts/state-and-ui.md`, Multi-device page).
+#[tauri::command(rename_all = "snake_case")]
+pub fn forget_device(
+    device_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    forget_device_inner(&device_id, &state, &app)
 }
 
 #[tauri::command]

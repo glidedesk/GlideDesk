@@ -133,6 +133,16 @@ pub struct MeshState {
     /// that is not linked to them directly can still be listed. Advisory: trust is `pairs.json`.
     #[serde(default)]
     pub known_links: Vec<String>,
+    /// Everyone this device knows of, with whether it has its own session and who reported it.
+    /// What the Multi-device page lists under "also on this desk".
+    #[serde(default)]
+    pub known: Vec<crate::mesh::roster::KnownDevice>,
+    /// Who is connected to whom, as far as this device has been told (`mesh/roster.rs`).
+    ///
+    /// Not serialised itself: `known` in the snapshot is what the page reads, and this is the
+    /// bookkeeping behind it. Rebuilt from `sessions` plus the rosters peers have sent.
+    #[serde(skip)]
+    pub roster: crate::mesh::roster::Roster,
     /// The route the device driving this one is using. A take that does not advance it is a
     /// duplicate and is ignored (reference: `peerRoute`).
     #[serde(skip)]
@@ -178,6 +188,8 @@ impl Default for MeshState {
             sessions: Vec::new(),
             reckon: 0,
             known_links: Vec::new(),
+            known: Vec::new(),
+            roster: crate::mesh::roster::Roster::default(),
             peer_route: 0,
             pending: None,
         }
@@ -265,6 +277,7 @@ impl MeshState {
             *existing = fresh;
             existing.role = role;
             existing.route = route;
+            self.refresh_roster();
             self.refresh_active();
             return true;
         }
@@ -273,8 +286,83 @@ impl MeshState {
         }
         self.sessions.push(fresh);
         self.reckon += 1;
+        self.refresh_roster();
         self.refresh_active();
         true
+    }
+
+    /// Rebuild this device's own place in the roster from the sessions, so the next
+    /// `mesh.roster` says who is connected now and what they are called.
+    pub fn refresh_roster(&mut self) {
+        let direct: Vec<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
+        let members: Vec<crate::mesh::roster::KnownMember> = self
+            .sessions
+            .iter()
+            .map(|s| crate::mesh::roster::KnownMember {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                os: s.os.clone(),
+            })
+            .collect();
+        let self_id = self.roster.self_id().to_string();
+        self.roster.set_self(&direct);
+        if !self_id.is_empty() {
+            self.roster.set_members(&self_id, &members);
+        }
+        let known = self.roster.known();
+        self.known_links = known
+            .iter()
+            .filter(|d| !d.direct)
+            .map(|d| d.id.clone())
+            .collect();
+        self.known = known;
+    }
+
+    /// Learn this device's own id (the host name, lowercased) for the roster.
+    pub fn bind_self_id(&mut self, self_id: &str) {
+        self.roster.set_self_id(self_id);
+        self.refresh_roster();
+    }
+
+    /// Take a `mesh.roster` from `from`. Returns true when it was newer than the last one from that
+    /// device; a message from a device with no session, or an older revision, changes nothing.
+    pub fn handle_roster(
+        &mut self,
+        from: &str,
+        pkt: &crate::network::WireMessage,
+        forgotten: &[String],
+    ) -> bool {
+        if self.session(from).is_none() {
+            return false;
+        }
+        let peers: Vec<String> = pkt.peers.clone().unwrap_or_default();
+        let members: Vec<crate::mesh::roster::KnownMember> = pkt
+            .members
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| crate::mesh::roster::KnownMember {
+                id: m.id,
+                name: m.name.unwrap_or_default(),
+                os: m.os.unwrap_or_default(),
+            })
+            .collect();
+        let taken = self.roster.accept(from, pkt.reckon, &peers, &members, forgotten);
+        if taken {
+            self.refresh_roster();
+        }
+        taken
+    }
+
+    /// Everyone this device knows of, for the page: sessions first in connection order, then the
+    /// devices only a peer has told it about.
+    pub fn known_devices(&self) -> Vec<crate::mesh::roster::KnownDevice> {
+        self.roster.known()
+    }
+
+    /// The message a peer needs to learn this device's links (`contracts/wire.md`, Roster).
+    pub fn roster_message(&self) -> crate::network::WireMessage {
+        self.roster.roster_message(self.reckon)
     }
 
     /// Forget a connected device, by id or by address (the disconnect paths know either).
@@ -302,8 +390,9 @@ impl MeshState {
             if self.partner.as_deref() == Some(id.as_str()) {
                 self.clear_partner();
             }
-            self.known_links.retain(|x| x != &id);
+            self.roster.remove(&id);
             self.reckon += 1;
+            self.refresh_roster();
         }
         self.refresh_active();
         true
