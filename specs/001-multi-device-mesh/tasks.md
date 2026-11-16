@@ -112,9 +112,9 @@ Rust core in `src-tauri/src/`, webview UI in `ui/`, phone companion in `android/
 
 ## Phase 7: Android companion — leaf device (part of US1/US2 acceptance)
 
-- [ ] T051 [P] [US2] Test (Kotlin): a take with an older route is ignored; the phone never emits `kvm.next` (`android/app/src/main/java/com/glidedesk/android/Kvm.kt` tests)
-- [ ] T052 [US2] Handle `route`, `mouse`, `keyboard` in the phone's take/accept/refuse paths, and take control back when the user touches the screen — satisfies FR-015, FR-024
-- [ ] T053 [US3] Apply `ts` dedupe to incoming clipboard items on the phone so it never echoes an item back
+- [X] T051 [P] [US2] Test (Kotlin): a take with an older route is ignored, a release only ends the handover in progress, and the phone never emits `kvm.next` (`android/app/src/test/java/com/glidedesk/android/MeshLeafTest.kt`, 7 tests)
+- [X] T052 [US2] Handle `route`, `mouse` and `keyboard` in the phone's take/accept/refuse paths, and give the phone a way to take control back (`MeshLeaf`, `Kvm.takeBack` plus the "Take back control" control on the Cursor page while driven) — satisfies FR-015, FR-024. Rationale for an explicit control rather than a bare touch is in `src-tauri/src/mesh/README.md`
+- [X] T053 [US3] Apply the pool's `ts` to incoming text and pictures on the phone (`MeshLeaf.clipIsNewer`/`clipApplied`), so an older copy that arrives late is dropped and nothing is applied twice — satisfies FR-017, FR-018
 
 ---
 

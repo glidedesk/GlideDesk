@@ -50,6 +50,8 @@ Recorded because a reader comparing the two will find them, and they are choices
 | `Roster` has no revision; a later message simply replaces an earlier one | The message carries `reckon`, and an older revision from the same device is ignored (`mesh/roster.rs`) | Two devices on a slow Wi-Fi link can deliver a roster out of order; without a revision the newer link list could be overwritten by the older one. |
 | `Mesh.known()` lists registered peers plus the `members` a peer sent | Also lists ids a peer named in `peers` without a `members` entry | A peer that sends only ids still introduces its devices; an id with no name is better than a device the person was never told about. |
 | Re-dialling is the introducer's job (the plan()/ASK cycle) | This app dials the devices it is already paired with, once when a roster arrives, with a backoff (5 s doubling, capped at 5 min) and never one on the forgotten list | Same outcome (the desk comes back together) using only what `pairs.json` trusts, and without a new credential exchange. |
+| The phone is driven by the computer's own edge watch, which sends `kvm.home` when the pointer comes back over the edge (`mac/mesh/phone-bridge.js`); the phone itself has no takeover | The phone is a leaf that answers `kvm.take` with `kvm.accept`/`kvm.refuse` and has an explicit "Take back control" while it is driven (`android/.../MeshLeaf.kt`, `Kvm.takeBack`) | A bare touch cannot tell a person's finger from the computer's own injected click: an accessibility service sees both as a touch interaction, and a false take-back would end the handover on the click the computer was making. An explicit control cannot misfire, works with either control method (ADB or Accessibility), and is what the phone's tests cover. |
+| The reference has no phone-side clipboard ordering (the phone is a plain two-device peer) | The phone applies the pool's `ts` and drops an item that is older than, or the same as, the newest copy it applied (`MeshLeaf.clipIsNewer`) | A phone on a desk of three or more can receive the same copy by two paths, and an older copy after a newer one; FR-017 and FR-018 apply to it as much as to a computer. A copy with no stamp is applied as before. |
 | A peer's mesh capability arrives as `mesh: 1` on `hello`/`welcome` | Same field name, `mesh: true`, on the same two messages | Needed for the connection that *makes* the mesh active to say so: gating it on dormancy would leave the second device looking like an older app for ever. Everything else stays additive and unknown fields are ignored. |
 
 ## Where the code goes
@@ -66,6 +68,7 @@ Recorded because a reader comparing the two will find them, and they are choices
 | Device list, edge picker, refusals, "also on this desk" | `ui/ui-multi.js`, `ui/shared/edges-ui.js` |
 | Roster exchange, per-device pairing tokens, dialling | `src-tauri/src/mesh/roster.rs`, `src-tauri/src/state.rs`, `src-tauri/src/network.rs` |
 | What the page shows, as tested pure functions | `ui/shared/mesh-view.js` (`ui/shared/test/ui-multi.js`) |
+| The phone as a leaf: handover state, accept/refuse, take-back, pooled-copy ordering | `android/app/src/main/java/com/glidedesk/android/MeshLeaf.kt` (`Kvm.kt`, `Clip.kt`; tests in `android/app/src/test/.../MeshLeafTest.kt`) |
 
 ## Reading order for a change
 

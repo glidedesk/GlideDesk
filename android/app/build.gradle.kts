@@ -58,4 +58,6 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0") // Scan QR code (pairing): Google's scanner, no camera permission
+    // The leaf rules of a multi-device desk (MeshLeafTest): plain JVM tests, no device needed.
+    testImplementation("junit:junit:4.13.2")
 }

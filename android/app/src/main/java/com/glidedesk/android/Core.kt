@@ -62,6 +62,9 @@ class Core private constructor(val ctx: Context) : Link.Events {
     val screen = Screen(this)
     val macSound = MacSound(this)
     val shortcuts = Shortcuts(this)
+    // This phone as a leaf of a multi-device desk: the handover (Kvm) and the pool's ordering
+    // (Clip) share one instance. Created before them so neither can observe a half-built Core.
+    val mesh = MeshLeaf()
     val kvm = Kvm(this)
     val remote = Remote(this) // this phone as the computer's touchpad, keyboard and gamepad (the Remote page)
     // …and as a Bluetooth gamepad for any computer: made only when it's on or the Remote page asks.

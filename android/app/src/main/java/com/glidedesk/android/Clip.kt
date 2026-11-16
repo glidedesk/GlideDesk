@@ -44,6 +44,7 @@ class Clip(core: Core) : Feature(core) {
     // Pictures are put together and sent one at a time, off the main thread.
     private val pics = Executors.newSingleThreadExecutor { r -> Thread(r, "td-clip-pic").apply { isDaemon = true } }
     private var inPic: PicIn? = null // being put together (pics thread only)
+    private var inPicTs = 0L // its stamp, applied only when the whole picture is on the clipboard
     @Volatile private var outId = "" // the picture going out; a newer copy stops it
 
     private class PicIn(val id: String, val w: Int, val h: Int, val bytes: Int, val parts: Int, val shot: Boolean, val at: Long) {
@@ -147,7 +148,9 @@ class Clip(core: Core) : Feature(core) {
         return true
     }
 
-    // The computer's copy (text) here, as if copied on the phone.
+    // The computer's copy (text) here, as if copied on the phone. Never applied twice: the pool
+    // stamps each item, and an older one that arrives late must not replace a newer copy here
+    // (FR-017, FR-018). A build with no stamp is applied as it always was.
     fun receiveText(text: String) {
         lastIn = text
         remember(Item("in", text))
@@ -177,6 +180,11 @@ class Clip(core: Core) : Feature(core) {
         inPic = null
         val id = m.optString("id")
         if (id.isEmpty() || id.length > 128) return
+        // The same newest-wins rule as text: a picture that arrives after a newer copy is dropped
+        // whole, before any of its parts are collected.
+        val ts = m.optLong("ts", 0L)
+        if (!core.mesh.clipIsNewer(ts)) return
+        val stamp = ts
         val w = m.optInt("w").coerceIn(0, 65535)
         val h = m.optInt("h").coerceIn(0, 65535)
         val shot = m.optBoolean("shot")
@@ -184,13 +192,16 @@ class Clip(core: Core) : Feature(core) {
         if (inline.isNotEmpty()) { // whole, in the message (Multi-device's form)
             if (inline.length > (Proto.CLIP_IMAGE_MAX_BYTES * 4L + 2) / 3 + 8) return
             val png = runCatching { Base64.decode(inline, Base64.DEFAULT) }.getOrNull() ?: return
-            if (png.size <= Proto.CLIP_IMAGE_MAX_BYTES && isPng(png)) receivePicture(png, w, h, shot)
+            if (png.size <= Proto.CLIP_IMAGE_MAX_BYTES && isPng(png) && receivePicture(png, w, h, shot)) {
+                core.mesh.clipApplied(stamp)
+            }
             return
         }
         val bytes = m.optInt("bytes")
         val parts = m.optInt("parts")
         if (bytes < 9 || bytes > Proto.CLIP_IMAGE_MAX_BYTES || parts != (bytes + Proto.CLIP_IMAGE_PART_BYTES - 1) / Proto.CLIP_IMAGE_PART_BYTES) return
         inPic = PicIn(id, w, h, bytes, parts, shot, System.currentTimeMillis())
+        inPicTs = stamp
     }
 
     private fun part(m: JSONObject) {
@@ -211,12 +222,15 @@ class Clip(core: Core) : Feature(core) {
         if (c.got < c.parts) return
         inPic = null
         val png = c.buf.toByteArray()
-        if (png.size == c.bytes && isPng(png)) receivePicture(png, c.w, c.h, c.shot)
+        if (png.size == c.bytes && isPng(png) && receivePicture(png, c.w, c.h, c.shot)) {
+            core.mesh.clipApplied(inPicTs)
+        }
     }
 
     // On this clipboard: a file in our cache, which the clipboard hands to the app that pastes.
-    private fun receivePicture(png: ByteArray, w: Int, h: Int, shot: Boolean) {
-        if (!core.sync.get("clipboard", "in") || !picturesOn) return
+    // True when it went on the clipboard, so its stamp is recorded only for a copy that was applied.
+    private fun receivePicture(png: ByteArray, w: Int, h: Int, shot: Boolean): Boolean {
+        if (!core.sync.get("clipboard", "in") || !picturesOn) return false
         outId = "" // theirs is newer than a picture of ours still going
         try {
             val dir = File(core.ctx.cacheDir, "clip/pictures").apply { mkdirs() }
@@ -230,8 +244,10 @@ class Clip(core: Core) : Feature(core) {
             }
             val size = if (w > 0 && h > 0) "$w × $h" else "${png.size / 1024} KB"
             remember(Item("in", "${if (shot) "Screenshot" else "Picture"} · $size", uri))
+            return true
         } catch (e: Exception) {
             Log.w("GlideDesk", "picture from the computer: ${e.message}")
+            return false
         }
     }
 
@@ -245,7 +261,13 @@ class Clip(core: Core) : Feature(core) {
                 outId = ""
                 pics.execute { inPic = null }
                 val text = m.optString("text")
-                if (core.sync.get("clipboard", "in") && text.isNotEmpty() && text.toByteArray().size <= Proto.CLIP_MAX_BYTES) receiveText(text)
+                val ts = m.optLong("ts", 0L)
+                if (core.sync.get("clipboard", "in") && text.isNotEmpty() && text.toByteArray().size <= Proto.CLIP_MAX_BYTES &&
+                    core.mesh.clipIsNewer(ts)
+                ) {
+                    receiveText(text)
+                    core.mesh.clipApplied(ts)
+                }
             }
             Proto.T.CLIP_IMAGE -> pics.execute { header(m) }
             Proto.T.CLIP_IMAGE_PART -> pics.execute { part(m) }

@@ -1030,6 +1030,17 @@ private fun CursorPage(core: Core, v: Int) {
         },
         if (adbMissing || viaPhone && !core.input.on || !core.pointer.allowed) "warn" else "info",
     )
+    // Being driven right now: the way back. The handover ends on the computer's own edge too, but
+    // the person holding this phone must not have to reach for the other device to get it back
+    // (specs/001-multi-device-mesh, FR-015).
+    if (core.kvm.driven) {
+        MacCard("$name is using this device") {
+            MacRow("Pointer here", "Move the pointer back past the edge on $name, or take control back here.", first = true)
+            Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Primary("Take back control") { core.kvm.takeBack() }
+            }
+        }
+    }
     if (viaPhone && !core.input.supported) Row(Modifier.padding(bottom = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!adbOn) Primary("Turn on wireless debugging") { core.adb.turnOn() }
         if (core.adb.setupNeeded) Secondary("Set up") { Guide.open.value = true }
