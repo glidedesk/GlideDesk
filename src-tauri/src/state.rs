@@ -2182,7 +2182,15 @@ impl AppState {
     pub fn remove_client(&self, client_id: &str) {
         let mut s = self.inner.write();
         s.clients.retain(|p| p.id != client_id && p.address.as_deref() != Some(client_id));
-        s.mesh.remove(client_id);
+        if s.mesh.remove(client_id) {
+            // One line per session leaving, with how many are left: what a later reader needs to
+            // tell a desk of three from a desk that dropped to one and went dormant (`T055`).
+            log::info!(
+                "[Mesh] Session with {} closed; {} device(s) still connected",
+                client_id,
+                s.mesh.sessions.len()
+            );
+        }
         // Nobody drives or is driven once the device holding the role has gone.
         if s.mesh.partner.is_none() && s.input != "home" {
             s.input = "home".to_string();

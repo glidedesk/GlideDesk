@@ -120,8 +120,8 @@ Rust core in `src-tauri/src/`, webview UI in `ui/`, phone companion in `android/
 
 ## Phase 8: Polish and four-platform verification
 
-- [ ] T054 [P] Update `docs/` with a multi-device page describing what the mesh does and what it does not (phones are leaves; monitor map not in this slice)
-- [ ] T055 [P] Add `[Mesh]` log lines for session add/remove, take/refuse/release with route and device, and pool apply/duplicate — needed by quickstart triage
+- [X] T054 [P] Update `docs/` with a multi-device page describing what the mesh does and what it does not (phones are leaves; monitor map not in this slice) — `docs/multi-device.md` rewritten for the shipped app, with "What it does not do" and a pointer to the wire/state contracts
+- [X] T055 [P] Add `[Mesh]` log lines for session add/remove, take/refuse/release with route and device, and pool apply/duplicate — needed by quickstart triage (add/remove in `state.rs`/`network.rs`, take/refuse/accept already logged, release added, pool apply/duplicate/older in `accept_clip_item`)
 - [ ] T056 Run quickstart S0–S7 on macOS and record evidence — satisfies SC-001, SC-003…SC-005, SC-007; time the three-device setup in S1/S5 to check SC-009
 - [ ] T057 Run quickstart S1–S4 and S6 on Windows (driven and driving) — satisfies SC-010
 - [ ] T058 Run quickstart S1–S4 and S6 on Linux X11, then S2/S4 on Wayland — satisfies SC-010
@@ -156,3 +156,14 @@ T001-T003  →  T004-T013  →  T014-T022 (US1)  →  T023-T037 (US2)  →  T038
 - US2: T023, T024, T036, T037 are separate files and can run in parallel once T025 lands.
 - US3: T038 and T039 are pure-module tests and can be written together; T045 needs both modules.
 - Verification: T056–T059 are different machines and can be run in parallel by different people.
+
+## Phase 10: Convergence
+
+Found by `/speckit-converge` after Phase 7: the build is green, but three success criteria that
+the quickstart asks a person to watch have no in-process evidence to watch with, and one design
+document still reads as unbuilt.
+
+- [X] T062 Record the handover's own elapsed time when `kvm.accept` arrives (`since` → accept, in `state.rs`/`network.rs`) and log it with the route, so SC-003's 250 ms can be read from the log during S2/S3 instead of estimated by eye — satisfies SC-003 (partial)
+- [X] T063 Test: ten forward-and-back crossings through a three-device chain leave no lost pointer, no stuck keyboard and no second handover (loop take/accept/release on a `MeshState`, asserting the route advances once per crossing and `partner` returns to none) — satisfies SC-004 (partial)
+- [X] T064 Test: 100 crossings at varying heights land within 2 px of the recorded seam plus travel, using the chain tracker's own placement (deterministic sweep of entry fractions) — satisfies SC-005 (partial)
+- [X] T065 Update `docs/mesh.md`: drop the "design … see the pull request" header and describe the shipped Rust modules, keeping the reference JavaScript named as the executable specification — satisfies T054 follow-up (partial)

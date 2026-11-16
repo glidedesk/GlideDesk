@@ -1,122 +1,92 @@
 # Multi-device
 
-> **GlideDesk status (2026-11).** The mesh is always loaded and stays *dormant* until a second device
-> connects: with one device nothing changes on the wire, in the navigation or in behaviour, and there
-> is no switch and no restart. It activates on the second connection. The "off by default, restart to
-> switch" model described below is the reference's, not this app's; the rest of this page still
-> describes the rules the mesh must keep. Implementation: `src-tauri/src/mesh/`, specification:
-> `specs/001-multi-device-mesh/`.
+Up to ten computers and phones stay connected at once: each screen edge leads to a named device, one
+clipboard holds the newest copy made anywhere, and every device is listed in one place. The mesh is
+**always loaded and dormant** until a second device connects — there is no switch and no restart. With
+one device connected, nothing changes on the wire, in the navigation or in behaviour.
 
-GlideDesk is designed with full multi-device mesh continuity: many computers
-and phones connected at once, one clipboard and one notification pool for all of them, each screen edge
-leading to a different device, a phone and a computer connected at the same time.
+The specification is [specs/001-multi-device-mesh](../specs/001-multi-device-mesh/); the code is
+`src-tauri/src/mesh/` (Rust) plus a small part of the phone app. The design notes are
+[mesh.md](mesh.md) and [screen-mesh.md](screen-mesh.md); the evidence log is
+[mesh-verification.md](mesh-verification.md).
 
-It is off by default, and while it is off GlideDesk runs exactly the code it runs today.
+## What it does
 
-## Rules
+1. **Several devices at once.** Connecting a second computer or phone no longer pushes the first one
+   away. Every connected device is listed, each with its own row, and disconnecting one leaves the
+   others alone. `MAX_DEVICES` is ten; the eleventh is refused with a sentence that says why.
+2. **An edge leads to a device.** The Multi-device page assigns a side (left, right, top, bottom) to a
+   device. Moving the pointer past that edge sends it there, with the keyboard, and moving back past
+   the entry point returns it to where it left by.
+3. **A crossing can chain.** While computer A drives B, pushing further through B's own edge hands the
+   pointer to C. Coming back unwinds C → B → A in that order, one hold per hop. The phone is the
+   exception: it is a leaf (below).
+4. **One clipboard pool.** Copying on any device makes the copy pasteable on all of them. Each item
+   carries a stamp, so the newest copy wins, an older copy that arrives late cannot replace a newer
+   one, and nothing is applied twice. A copy that leaves the desk along one path is not relayed down
+   it again by another.
+5. **Pair once, meet everyone.** A device paired with one computer is listed on the others and is
+   dialled by them as soon as it is paired there. A `mesh.roster` message carries the sender's direct
+   links (`peers`) and their names and systems (`members`). The roster is advisory: it never grants
+   input or trust — see "What it does not do".
+6. **Forgetting wins.** Forgetting a device removes its pairing, its edges and its sessions, and the
+   device is not re-added by a roster, not dialled, and not re-learned. A forgotten device that dials
+   in is refused.
 
-1. **Off means today's app.** With Multi-device off nothing of the mesh is loaded: no module, no
-   listener, no extra field on the wire. The one-to-one connection code (`server.js`, `link.js`,
-   `peer.js`, `hostpair.js`/`pairing.js`, `kvm.js`, `clip.js`/`clipboard.js`, `notifs.js`, `phone*.js`,
-   `wired.js`, …) is not changed for it. The one-to-one app only gains the switch: one line in
-   `main.js`, `multi.js`, and the Multi-device tab.
-2. **One switch, read at start.** Multi-device tab › *Use several devices at once* › Turn on / Turn off.
-   It is `on` in `multi.json`; `main.js` reads it once, right after it sets the user data folder, and with
-   it on hands over to `mesh/main.js`. Changing it restarts GlideDesk (as Quit, then start again), so the
-   two never run side by side; the window comes back on the Multi-device tab.
-3. **Everything for several devices is in the Multi-device tab**: the layout of the screens (which device
-   each edge leads to) and *Join every device automatically*. The device list is the sidebar's. The
-   other tabs stay as they are.
-4. **Storage of its own.** The one-to-one app's files are read by the mesh, never written:
+## What it does not do
 
-   | | one-to-one app | mesh |
-   | --- | --- | --- |
-   | hosts this computer dials | `pairing.json` (Windows), `hosts.json` (Mac) | `pairings.json`, `hosts-mesh.json` |
-   | devices that dial this computer | `paired.json` | `paired-mesh.json` |
-   | settings only the mesh has | – | `multi.json` (`layout`, `mesh`, Windows `kvm.edges`) |
+- **The phone is a leaf.** A computer can drive the phone, and the phone can take control back (the
+  Cursor page shows "Take back control" while it is driven), but the phone is never asked to relay a
+  crossing to a third device, and it never sends `kvm.next`. It also never dials a second device: the
+  session it is on is the only one it has.
+- **The roster is not trust.** `pairs.json` is the only source of pairing trust. A roster names
+  devices so they can be listed and so paired screens can be dialled; it cannot make a device trusted,
+  cannot grant input, and cannot reintroduce a device the person forgot.
+- **No notification pool in this slice.** A notification still shows on the device it was selected
+  for. Pooling notifications is a later slice; the design keeps the pooled path (`pool.rs`) general
+  enough to carry them.
+- **No monitor-level map in this slice.** Edges are assigned per device, not per monitor of a device.
+  User Story 5 is specified and tasked separately; the design keeps `edges` apart from any future
+  per-monitor geometry so it can land without a migration.
+- **No automatic introduction channel.** A paired-but-disconnected device is dialled directly with
+  its own token (5 s doubling to a 5 min cap); there is no third-party introduction. This differs
+  from the reference's autojoin, deliberately: one dialling rule with one token per pair is easier to
+  reason about and to prove.
+- **No takeover by bare touch on the phone.** An accessibility service cannot tell the person's finger
+  from the computer's own injected click, so the way back is an explicit control. See
+  `src-tauri/src/mesh/README.md`.
 
-   A pairing of the one-to-one app joins the mesh's list once (`multi.json` › `imported`): one forgotten
-   in the mesh stays forgotten, one paired again in the one-to-one app joins again. Settings both have
-   (speed, clipboard, …) stay in `settings.json`, the same choices in both; `kvm.pcSide` is kept.
-   Switching off gives back exactly what was there.
-5. **Older devices and devices with it off** are plain one-to-one peers to a multi-device one: no
-   roster, no relayed items. Their `kvm.layout` places them where they say, as the one-to-one app does;
-   between mesh devices the shared layout is the one map.
-6. **Native helpers: two builds of the same sources.** What Multi-device adds (several watched sides,
-   the side in the edge and return events) is inside `#if MULTI`: `windows-helper/src/CaptureMulti.cs`,
-   `Program.cs`, `Json.cs`; `mac-helper`'s `Capture.swift` and `main.swift`, where the `#else` parts are
-   today's code as it was. `macshare-winhelper.exe`, `macshare-helper` and `macshare-linuxhelper` are
-   built without it and are today's helpers; the `-multi` builds have it, and only `mesh/helper.js`
-   starts them. `linux-helper` reads the sides as `sideList` ("left,top"), as its JSON reader skips
-   arrays. Without a `-multi` build the mesh starts the one-to-one helper,
-   which watches the first side (the mesh sends it as `side` too).
-7. **Android, first release: unchanged.** A multi-device computer sees today's phone app as a plain
-   one-to-one device. A phone with several computers at once comes later, behind its own switch.
-8. **Linux** has Multi-device too (`linux/mesh/`), with less in it, to stay clear of what Bluetooth,
-   the desktops and the GPU drivers make fragile there:
-   - with it on, other computers connect to the Linux one over the same network only, never Bluetooth
-     (no `BleGuest`; `BleHost` and the Bluetooth policy take phones only; General's *Bluetooth with
-     computers* is left as the one-to-one app has it). Phones connect as before, Bluetooth included.
-   - screen sharing goes to the selected device, as today (no screen per device, no virtual display
-     per device);
-   - several watched edges on X11 (`macshare-linuxhelper-multi`); the Wayland backend watches one;
-   - Windows and Mac keep Bluetooth with each other in Multi-device.
-   A Linux computer with Multi-device off is a plain one-to-one peer to the others, with its Bluetooth
-   as today.
-9. **Join every device automatically** is on by default, so every computer the mouse goes through ends up
-   connected to the others (a chain needs the computer whose mouse is used to be connected to each device
-   of it). With it on, a paired device can add another device to this one without a pairing code; off,
-   each pair of devices is paired by hand, and the layout shows in red a device the pointer stops before
-   (in the mesh, not connected here) and greys the ones past it. Switched off, multi.json keeps
-   `mesh: { autoJoin: false, chosen: true }`; a `false` without `chosen` was written by a build before
-   2.2.0, where off was the default and every save wrote it, so it reads as on.
+## Where things live
 
-## Where things are
+| | |
+|---|---|
+| Mesh core (Rust) | `src-tauri/src/mesh/` — `session.rs` (sessions, handover, take timeout), `layout.rs` (edges), `pool.rs` (clipboard pool), `roster.rs` (who is on the desk), `chain.rs` (position through a chain), `mod.rs` (constants, dormancy, refusal text) |
+| Wire and sessions | `src-tauri/src/network.rs` (`WireMessage`, authentication per peer, `mesh.roster`, dialling) |
+| State and commands | `src-tauri/src/state.rs` (`pairs.json` peers and forgotten, `crossing_target`, takes), `src-tauri/src/commands.rs` (`forget_device`) |
+| Page | `ui/ui-multi.js` with the tested view logic in `ui/shared/mesh-view.js`; bridge in `ui/shared/tauri-bridge.js` |
+| Phone | `android/app/src/main/java/com/glidedesk/android/MeshLeaf.kt` (leaf rules), `Kvm.kt` (handover), `Clip.kt` (pool ordering) |
+| Reference (executable specification) | `ui/shared/mesh.js`, `clipsync.js`, `kvm-edges.js`, `layout.js` and their suites in `ui/shared/test/` |
 
-- `shared/mesh.js`, `intro.js`, `layout.js`, `kvm-edges.js`, `screen-mesh.js`, `sidebar-model.js`,
-  `notif-guard.js`: the mesh core, plain JS for every platform. Tests in `shared/test/`.
-- `windows/multi.js`, `mac/multi.js`: the switch. `ui-multi.js`: the tab with it off.
-- `windows/mesh/`: the Windows app with Multi-device on. `main.js`, `ipc.js`, `preload-app.js`; the link
-  layer (`server`, `link`, `hostpair`, `links`, `session`, `hub`); the features (`clip`, `notifs`, `kvm`,
-  `layout-sync`, `autojoin`, `phones`, `phone`, `phone-link`, `phone-bridge`, `wired`, `pcscreen`,
-  `pcscreenset`, `sender`); `settings` and `store` (its files, rule 4); the window (`app.html` with
-  `<base href="../">`, so everything it doesn't have loads from `windows/`, its `app.js`, pages and css,
-  `ui-multi.js`).
-- `mac/mesh/`: the same for the Mac (`services`, `pairing`, `clipboard`, `stream`/`streams`, `displays`,
-  `control.html`, …).
-- `linux/mesh/`: the same for Linux, made from `windows/mesh/` with `linux/`'s own parts (notifications
-  read with dbus-monitor, sleep that ends every session and invites each device back: `sleepwake.js`).
-- A file in `mesh/` named like one a folder up is its mesh version: when a fix there applies to both,
-  make it in both.
-- The design: [mesh.md](mesh.md) and [screen-mesh.md](screen-mesh.md).
+`pairs.json` keeps the existing `paired` object and adds `peers` (every paired device, each with its
+own token) and `forgotten` (ids the person removed). An older build ignores both keys and reads
+`paired` exactly as before.
 
-Tests: `node <file>` for each of `shared/test/*.js`, `windows/mesh/test/*.js`, `mac/mesh/test/*.js` and
-`linux/mesh/test/*.js`,
-with `NODE_PATH` set to `windows/node_modules`. `switch.test.js` checks rule 1 (off: nothing of the
-mesh is loaded) and the hand-over; `storage.test.js` checks rule 4. The installers leave `test` folders
-out.
+## Wire compatibility
 
-## Steps
+A packet with none of the mesh fields is valid and means today's behaviour. With one session
+connected this app emits no new field: `strip_if_dormant` removes `route`, `to`, `mouse`, `keyboard`,
+`via`, `reckon`, `why`, `peers` and `members`, and a test asserts the serialised crossing is
+byte-identical to the previous release. The one documented exception is `mesh: true` on `hello` and
+`welcome`, which is app identity like `os`: the connection that makes the mesh active is the one that
+has to announce it.
 
-1. Import the mesh as new files, its tests passing. *(done)*
-2. Windows and Mac: the switch and the Multi-device tab, the mesh app in `mesh/`, its own storage,
-   `kvm.layout` from older peers. *(done)*
-3. Helpers: several watched sides in `-multi` builds of the same sources (rule 6); the fork's extra
-   edge logging left out. *(done; the Windows helper built without `MULTI` has the same types,
-   methods and IL as before, compared method by method; the Mac `-multi` build is still to be compiled
-   on a Mac; the Linux helper built without `MULTI` compiles to the same object files as before)*
-4. Real devices: two computers and a phone with the switch off (must match today), then on.
-5. Android: several computers at once, behind its own switch.
-6. Linux. *(done: computers over the network only, the screen to the selected device, several edges on X11)*
+The rules are in [contracts/wire.md](../specs/001-multi-device-mesh/contracts/wire.md); the page and
+commands in [contracts/state-and-ui.md](../specs/001-multi-device-mesh/contracts/state-and-ui.md).
 
-## Not part of this
+## Checking it
 
-- The clipboard rework in the mesh fork (images, files, the latest copy wins, a Recent list) changes
-  today's clipboard: a pull request of its own.
-- Pull request #28 (a phone and a computer at once, several edges) is what Multi-device does; here it
-  lives behind the switch.
-- The mesh fork's log file (`shared/logfile.js`).
-
-## Architecture
-
-The multi-device mesh runs natively in GlideDesk with zero-copy async networking and low-latency input streaming.
+`npm test` runs the Rust engine tests, the JavaScript protocol and mesh suites, and the phone's JVM
+tests. The scenarios to run on real machines — three devices connected, a crossing, a chain,
+refusals, pair-once, the clipboard pool, each platform as driven and driving — are in
+[quickstart.md](../specs/001-multi-device-mesh/quickstart.md), and where each one stands is the table
+in [mesh-verification.md](mesh-verification.md).

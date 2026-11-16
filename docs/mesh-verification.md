@@ -15,7 +15,7 @@ a later reader needs.
 | 2026-11-16 | macOS aarch64, US2 (edges, handover, chain) | 295 pass | 24 suites pass | pass | not run (no `workflow` scope on the team token) |
 | 2026-11-16 | macOS aarch64, US3 (pooled clipboard) | 317 pass | 24 suites pass | pass | not run (no `workflow` scope on the team token) |
 | 2026-11-16 | macOS aarch64, US4 (roster, pair once, forget) | 330 pass | 24 suites pass | pass | not run (no `workflow` scope on the team token) |
-| 2026-11-16 | macOS aarch64, US1/US2 phone leaf (route takes, take-back, `ts` dedupe) | 330 pass | 24 suites pass | 7 JUnit pass (`MeshLeafTest`) | not run (no `workflow` scope on the team token) |
+| 2026-11-16 | macOS aarch64, US1/US2 phone leaf (route takes, take-back, `ts` dedupe) | 333 pass | 24 suites pass | 7 JUnit pass (`MeshLeafTest`) | not run (no `workflow` scope on the team token) |
 | | | | | | |
 
 ## Scenarios
@@ -23,16 +23,21 @@ a later reader needs.
 | # | Scenario | Machine | Build | Result | Evidence |
 |---|---|---|---|---|---|
 | S0 | Dormant with one device | macOS | | | |
-| S0 | Dormant with one device | Windows | | | |
+| S0 | Dormant with one device | Windows | | open | Windows machine unavailable; in-process rows below |
+| S0 | With one device, the crossing is byte-for-byte the previous release's packet | unit test, no hardware | `a_crossing_with_one_device_is_the_packet_it_always_was` (golden `GOLDEN_TAKE`) | automated pass | `src-tauri/src/mesh/mod.rs`, `src-tauri/src/network.rs` |
+| S0 | Adding a second device activates the mesh without touching the first session | unit test, no hardware | `active_follows_the_registry` | automated pass | `src-tauri/src/mesh/session.rs` |
 | S1 | Three devices connected at once | macOS + Windows + Linux | | | |
 | S1 | Three devices connected at once | macOS + Windows + Android | | | |
-| S2 | Pointer and keyboard cross | macOS → Windows | | | |
+| S2 | Pointer and keyboard cross | macOS → Windows | | open | hardware unavailable; latency is logged as `[Mesh] … accepted the pointer (route N) after M ms`, to compare with SC-003 |
+| S2 | The confirming answer reports how long the take waited (SC-003's number) | unit test, no hardware | `the_take_reports_how_long_it_waited` | automated pass | `src-tauri/src/mesh/session.rs` (`take_waited_ms`), logged on `kvm.accept` |
 | S2 | Pointer and keyboard cross | Windows → macOS | | | |
 | S2 | Pointer and keyboard cross | macOS → Linux | | | |
 | S2 | Pointer and keyboard cross | macOS → Android | | open | real phone not attached; leaf rules covered by the automated rows below |
 | S2 | Phone takes a routed `kvm.take`, honours `mouse: false`, refuses when cursor sharing is off | unit test, no hardware | `a_newer_take_is_accepted_and_an_older_one_is_ignored` | automated pass | `android/.../MeshLeaf.kt` (`take`), `Kvm.kt` (`take`) |
-| S2 | A release or `kvm.home` only ends the handover in progress | unit test, no hardware | `a_release_only_ends_the_handover_in_progress` | automated pass | `android/.../MeshLeaf.kt` (`release`) | |
-| S3 | Chain through a driven device | macOS → Windows → Linux | | | |
+| S2 | A release or `kvm.home` only ends the handover in progress | unit test, no hardware | `a_release_only_ends_the_handover_in_progress` | automated pass | `android/.../MeshLeaf.kt` (`release`) |
+| S3 | Chain through a driven device | macOS → Windows → Linux | | open | hardware unavailable; looped evidence below |
+| S3 | Ten crossings forward and back through a chain of three leave nothing holding the pointer (SC-004) | unit test, no hardware | `ten_crossings_through_a_chain_never_strand_the_pointer` | automated pass | `src-tauri/src/mesh/session.rs` |
+| S3 | Coming home lands within 2 px of the seam plus travel at 400 entry heights (SC-005) | unit test, no hardware | `a_hundred_returns_land_within_two_pixels_of_the_seam_plus_travel` | automated pass | `src-tauri/src/mesh/chain.rs` — 100 heights on each of the four sides |
 | S4 | Refusals and takeover | all | | | |
 | S4 | The driven phone takes control back, naming the route it was driven on | unit test, no hardware | `taking_control_back_names_the_route_once` | automated pass | `android/.../MeshLeaf.kt` (`takeBack`), `Kvm.kt` (`takeBack`) |
 | S4 | No handover survives the session ending | unit test, no hardware | `a_handover_does_not_survive_the_session` | automated pass | `android/.../MeshLeaf.kt` (`reset`), `Kvm.kt` (`onClosed`) |
@@ -52,7 +57,10 @@ a later reader needs.
 | S7 | Platform parity | Linux Wayland driven | | | |
 | S7 | Platform parity | Android leaf | | open | real phone not attached; leaf rules below |
 | S7 | The phone never hands a crossing to a third device (no `kvm.next`, no dial) | unit test, no hardware | `the_phone_never_relays_a_crossing` | automated pass | `android/.../MeshLeafTest.kt` — scans `Kvm.kt` and `MeshLeaf.kt` and the protocol constants | |
-| L | Legacy check (previous release) | any | | | |
+| L | Legacy check (previous release) | any | | open | manual session needs the previous build on a second machine; automated rows below |
+| L | With one session, a crossing serialises exactly as the previous release did | unit test, no hardware | `test_one_session_wire_is_unchanged_by_the_mesh` (golden `GOLDEN_TAKE`), `a_crossing_with_one_device_is_the_packet_it_always_was` | automated pass | `src-tauri/src/network.rs` (`GOLDEN_TAKE`), `src-tauri/src/mesh/mod.rs` (`strip_if_dormant`) |
+| L | A packet with unknown fields is accepted, not rejected | unit test, no hardware | `test_unknown_keys_are_ignored` | automated pass | `src-tauri/src/network.rs` |
+| L | A peer that does not speak the mesh is a plain single peer in the pool | unit test, no hardware | `a_legacy_peer_is_part_of_the_pool_without_the_stamps`, `two_items_from_an_old_app_are_not_taken_for_one` | automated pass | `src-tauri/src/mesh/pool.rs` |
 
 ## Outstanding hardware
 

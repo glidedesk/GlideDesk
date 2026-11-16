@@ -455,6 +455,15 @@ impl MeshState {
         self.pending.as_ref()
     }
 
+    /// How long the take still waiting has been waiting, in milliseconds.
+    ///
+    /// `None` when nothing is waiting. This is what `SC-003` is read from: the answer that
+    /// confirms a handover logs this number, so a person watching a crossing can see whether the
+    /// 250 ms budget was met instead of estimating it by eye.
+    pub fn take_waited_ms(&self, now: u64) -> Option<u64> {
+        self.pending.as_ref().map(|p| now.saturating_sub(p.since))
+    }
+
     /// `kvm.accept` from the device we took. Only the current take can be confirmed, so a late
     /// answer to an older route cannot keep a handover alive that has already come home.
     pub fn confirm_take(&mut self, from: &str, route: u64) -> bool {
@@ -871,6 +880,56 @@ mod tests {
         assert!(m.local_takeover());
         assert!(m.pending_take().is_none());
         assert_eq!(m.role, "home");
+    }
+
+    /// `SC-004`: ten crossings forward and back through a chain of three devices, one after the
+    /// other, must leave nothing believing it still holds the pointer.
+    #[test]
+    fn ten_crossings_through_a_chain_never_strand_the_pointer() {
+        let mut m = mesh_with(&["b", "c"]);
+        let mut last = 0;
+
+        for i in 1..=10u64 {
+            // Forward: this device takes b, and b hands the pointer on to c on the same route.
+            assert!(m.begin_take("b", i, i * 1_000));
+            assert!(m.confirm_take("b", i), "b answered the take");
+            assert_eq!(m.partner.as_deref(), Some("b"));
+            assert_eq!(m.role, "driving");
+
+            assert!(m.begin_take("c", i, i * 1_000), "b chained on to c");
+            assert!(m.confirm_take("c", i), "c answered the chained take");
+            assert_eq!(m.partner.as_deref(), Some("c"));
+
+            // Back: c gives the pointer up, and the route has moved forward exactly once.
+            assert!(m.home_from_driven("c", i));
+            assert_eq!(m.role, "home");
+            assert!(m.partner.is_none());
+            assert!(m.route >= i, "the route never goes backwards");
+            assert!(m.route > last);
+            last = m.route;
+
+            // The handover that just ended cannot be answered a second time, and no take is left
+            // waiting to pull the pointer away a second later.
+            assert!(!m.confirm_take("c", i));
+            assert!(m.pending_take().is_none());
+            assert!(m.sessions.iter().all(|s| s.role == Role::Idle), "no device is left holding a role");
+        }
+    }
+
+    /// `SC-003` is read from this number: the answer that confirms a handover says how long the
+    /// take waited, so the 250 ms budget can be checked in a log rather than guessed.
+    #[test]
+    fn the_take_reports_how_long_it_waited() {
+        let mut m = mesh_with(&["a"]);
+        assert!(m.take_waited_ms(5_000).is_none(), "nothing waiting");
+
+        assert!(m.begin_take("a", 1, 1_000));
+        assert_eq!(m.take_waited_ms(1_000), Some(0));
+        assert_eq!(m.take_waited_ms(1_120), Some(120));
+        assert_eq!(m.take_waited_ms(900), Some(0), "a clock that stepped back does not panic");
+
+        assert!(m.confirm_take("a", 1));
+        assert!(m.take_waited_ms(2_000).is_none(), "answered, so nothing is waiting");
     }
 
     #[test]

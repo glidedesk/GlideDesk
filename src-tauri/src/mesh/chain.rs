@@ -242,6 +242,41 @@ mod tests {
         assert_eq!(b.apply(0.0, 10.0), Some(("bottom", 0.5)));
     }
 
+    /// `SC-005`: coming home must land within 2 px of the seam plus the travel since, at any
+    /// height of the edge. The tracker is arithmetic on the seam it was given, so this sweeps 100
+    /// entry heights on each side and checks the landing point against the hand's own travel.
+    #[test]
+    fn a_hundred_returns_land_within_two_pixels_of_the_seam_plus_travel() {
+        let (w, h) = (1920.0_f64, 1080.0_f64);
+        let mut checked = 0;
+        for side in ["left", "right", "top", "bottom"] {
+            for step in 0..100 {
+                let frac = 0.02 + 0.96 * (step as f64) / 99.0;
+                let mut t = Tracker::default();
+                t.place(w, h, side, frac);
+
+                // The seam point the hand came home to, before any travel.
+                let (sx, sy, _, _) = t.position();
+                // The hand keeps moving inside the screen: 7 px along the edge and 31 px in from
+                // it, both small enough to stay inside on a screen this size.
+                let (dx, dy) = match side {
+                    "left" => (31.0, 7.0),
+                    "right" => (-31.0, 7.0),
+                    "top" => (7.0, 31.0),
+                    _ => (7.0, -31.0),
+                };
+                assert_eq!(t.apply(dx, dy), None, "travel inside the screen never leaves it");
+                let (x, y, _, _) = t.position();
+                assert!(
+                    (x - (sx + dx)).abs() <= 2.0 && (y - (sy + dy)).abs() <= 2.0,
+                    "{side} at {frac:.3}: landed at ({x:.1}, {y:.1}), seam was ({sx:.1}, {sy:.1}) + ({dx:.1}, {dy:.1})"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 400, "100 entry heights on each of the four sides");
+    }
+
     #[test]
     fn a_screen_that_changed_size_keeps_the_pointer_inside_it() {
         // A monitor was unplugged while the other device drove this one: the pointer must not be

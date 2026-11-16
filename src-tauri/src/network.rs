@@ -2321,6 +2321,17 @@ impl MeshServer {
                 let mut desk_full = false;
                 if is_auth {
                     let recorded = state.add_client(info.clone());
+                    if recorded {
+                        // One line per session joining, with how many are connected: the desk's
+                        // shape is what most reports are about (`T055`).
+                        let here = state.inner.read().mesh.sessions.len();
+                        log::info!(
+                            "[Mesh] Session with {} ({}) added; {} device(s) connected",
+                            info.id,
+                            info.os,
+                            here
+                        );
+                    }
                     // What the device can do comes from the message that introduced it: a device
                     // that does not say it speaks the mesh is an older app and is treated as one.
                     state.learn_session_capabilities(&info.id, pkt.mesh == Some(true));
@@ -3258,8 +3269,17 @@ impl MeshServer {
                     state.device_id_for(pid.as_deref(), &peer_addr.to_string())
                 };
                 let route = pkt.route.unwrap_or(0);
+                // How long the handover waited for this answer. Read into a local and the lock
+                // dropped before confirming: `confirm_mesh_take` takes the write lock itself.
+                let waited = state.inner.read().mesh.take_waited_ms(crate::mesh::session::now_ms());
                 if state.confirm_mesh_take(&from, route) {
-                    log::debug!("[Mesh] {} accepted the pointer (route {})", from, route);
+                    // `SC-003`: the number to read in S2/S3 is this one, not an estimate.
+                    log::info!(
+                        "[Mesh] {} accepted the pointer (route {}) after {} ms",
+                        from,
+                        route,
+                        waited.unwrap_or(0)
+                    );
                     let snap = state.snapshot();
                     let _ = app.emit("state-change", &snap);
                 }
@@ -3298,12 +3318,12 @@ impl MeshServer {
                 // A mesh peer names the handover it is ending. Only that answer takes the input
                 // away: a late message from a device that drove this one a while ago must not.
                 // A build without the mesh names nothing and keeps the unconditional reset.
+                let from = {
+                    let pid = peer_id_holder.read().clone();
+                    state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                };
                 let ours = match pkt.route {
                     Some(route) => {
-                        let from = {
-                            let pid = peer_id_holder.read().clone();
-                            state.device_id_for(pid.as_deref(), &peer_addr.to_string())
-                        };
                         if state.release_mesh_take(&from, route) {
                             true
                         } else {
@@ -3320,6 +3340,14 @@ impl MeshServer {
                     );
                     return;
                 }
+                // Which handover ended, and on whose word: the two lines a triage reader pairs
+                // with the take above (`T055`).
+                log::info!(
+                    "[Mesh] Handover with {} ended ({} route {})",
+                    from,
+                    pkt.t,
+                    pkt.route.unwrap_or(0)
+                );
                 state.set_where_input("home");
                 crate::kvm::reset_pending_motion();
                 crate::mesh::chain::reset();
@@ -4122,8 +4150,11 @@ impl NetworkManager {
     ) -> Option<WireMessage> {
         let msg = match self.receive_pooled(from, pkt) {
             Some(out) if !out.fresh => {
-                log::debug!(
-                    "[Clipboard] Dropped a duplicate or our own echo of an item from {}",
+                // Seen before, or our own copy coming back: applying it again would move the
+                // clipboard for nothing (`T055` has the line a triage reader greps for).
+                log::info!(
+                    "[Mesh] Clip {} from {} already seen; not applied",
+                    kind.as_str(),
                     from
                 );
                 return None;
@@ -4139,10 +4170,19 @@ impl NetworkManager {
                 // The item as it will be applied, kept so a device that has just connected can be
                 // answered with its original stamp rather than a fresh copy.
                 cb.last = Some(msg.clone());
+                log::info!(
+                    "[Mesh] Clip {} from {} applied (ts {}, origin {})",
+                    kind.as_str(),
+                    from,
+                    msg.ts.unwrap_or(0),
+                    msg.o.as_deref().unwrap_or(from)
+                );
             } else {
-                log::debug!(
-                    "[Clipboard] Kept the newer copy this device already had; {}'s item is older",
-                    from
+                log::info!(
+                    "[Mesh] Clip {} from {} is older than the copy here (ts {}); not applied",
+                    kind.as_str(),
+                    from,
+                    msg.ts.unwrap_or(0)
                 );
             }
             newer

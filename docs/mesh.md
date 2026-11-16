@@ -1,7 +1,9 @@
 # Mesh: many devices connected at once
 
-Status: design for the mesh work (see the pull request that adds it). Written to be implemented in
-slices, each with tests, without changing what a two-device setup does today.
+Status: shipped, in slices, each with tests, without changing what a two-device setup does today.
+Slice 1 (several devices, edges and handovers, chains, a pooled clipboard, a pair-once roster, the phone
+as a leaf) is implemented in Rust; the remaining goals below are later slices and are marked as such.
+Specification and task ledger: [specs/001-multi-device-mesh](../specs/001-multi-device-mesh/).
 
 In GlideDesk the mesh is always loaded and stays **dormant** until a second device connects: with one
 device nothing changes on the wire, in the navigation or in behaviour, and there is no switch and no
@@ -15,10 +17,13 @@ description.
 - A device is connected to several others at the same time (up to `MAX_DEVICES` = 10).
 - One keyboard and mouse drive all of them: each screen edge can lead to a different device (top: a
   Mac, bottom: a phone). Crossing an edge sends the input to the device behind it.
-- One clipboard pool: copying on any device makes it pasteable on all of them.
-- One notification pool: a notification on any device shows on all the others.
+- One clipboard pool: copying on any device makes it pasteable on all of them. *(shipped)*
+- One notification pool: a notification on any device shows on all the others. *(later slice — not in
+  slice 1: notifications still follow the selected device)*
 - Files, terminal, apps, screen sharing and the other one-to-one features follow the device the user
   picks ("selected device"): click the phone, see the phone's files; click the Mac, see the Mac's.
+  *(shipped as the existing selected-device behaviour; per-device screens are a later slice, see
+  [screen-mesh.md](screen-mesh.md))*
 - Direct links, no server in between, no extra load: every pair of devices that can reach each other
   has one direct link.
 - Nothing that works today with two devices may stop working: protocol v1 stays, a device that knows
@@ -45,8 +50,12 @@ description.
 1. **Link layer** (per platform): a server that accepts many clients, a manager of the guest links
    (one `Link` per paired host), and one *session* object per remote device that hides whether the
    device dialled us or we dialled it. Messages carry the session (device id) they came from.
-2. **Mesh core** (`shared/mesh.js`, plain JS, same code on every platform that runs JS): the peer
-   registry, the `Pool` (fan-out, dedupe, relay) and the `Roster` (who is connected to whom).
+2. **Mesh core** (`src-tauri/src/mesh/`, Rust: `session.rs` registry and handovers, `pool.rs`
+   fan-out/dedupe/relay, `roster.rs` who is connected to whom, `layout.rs` edges, `chain.rs` position
+   through a chain). The JavaScript originals (`ui/shared/mesh.js`, `clipsync.js`, `kvm-edges.js`,
+   `layout.js`) are still vendored and still tested: they are the executable specification, and a
+   difference between the two is a bug in the Rust unless `src-tauri/src/mesh/README.md` records it as
+   a deliberate divergence.
 3. **Features**
    - *Pooled* (clipboard, notifications) talk to the mesh directly: they receive from any device and
      publish to all.
