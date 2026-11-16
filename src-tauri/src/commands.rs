@@ -1088,6 +1088,35 @@ pub async fn disconnect(
     Ok(())
 }
 
+/// Close the session with one device, leaving every other device connected.
+///
+/// The Multi-device page lists every connected device; "Disconnect" on a row must end that one
+/// link. The whole-desk `disconnect` command stays as it was for the single-peer pages.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn disconnect_device(
+    device_id: String,
+    network: State<'_, NetworkManager>,
+    state: State<'_, AppState>,
+    registry: State<'_, crate::window_manager::ParkedWindowRegistry>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if !network.disconnect_device(&device_id) {
+        return Err(format!("{} is not connected", device_id));
+    }
+    // A window that was parked while that device drove this one must come back: losing the link
+    // must never leave a window hidden.
+    let restored = registry.restore_all();
+    if !restored.is_empty() {
+        log::info!(
+            "[WindowHandoff] Disconnecting {}: restored {} parked window(s)",
+            device_id,
+            restored.len()
+        );
+    }
+    push_state(&app, &state);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn pair_respond(allowed: bool, network: State<'_, NetworkManager>) -> Result<(), String> {
     log::info!("Pair response: allowed = {}", allowed);

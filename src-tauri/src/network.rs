@@ -1069,6 +1069,35 @@ fn file_packet_targets_local(pkt: &WireMessage, local_id: &str) -> bool {
     is_addressed_to_local(&pkt.d, local_id)
 }
 
+/// True when this session is the one a device id or address names.
+///
+/// The device list is built from the mesh registry, which knows device ids; the connection
+/// registry knows session ids (an address) and the id the peer gave in its `hello`. A click on a row
+/// has to find the session whichever of those it was given, and never reach a different device: an
+/// address that is a prefix of another (`.1` and `.10`) must not match by accident.
+fn session_matches(
+    target: &str,
+    session_id: &str,
+    peer_id: Option<&str>,
+    peer_addr: &SocketAddr,
+    known_address: Option<&str>,
+) -> bool {
+    if target.is_empty() {
+        return false;
+    }
+    if session_id == target || peer_id == Some(target) {
+        return true;
+    }
+    let ip = peer_addr.ip().to_string();
+    if peer_addr.to_string() == target || ip == target {
+        return true;
+    }
+    match known_address {
+        Some(known) => known == ip || known == peer_addr.to_string(),
+        None => false,
+    }
+}
+
 /// Resolves a transfer target string to a routing destination list.
 pub fn resolve_file_dest(target: Option<&str>, active: &[ClientInfo]) -> Result<Vec<String>, String> {
     if let Some(t) = target {
@@ -2219,8 +2248,9 @@ impl MeshServer {
                     invited: None,
                 };
 
+                let mut desk_full = false;
                 if is_auth {
-                    state.add_client(info.clone());
+                    let recorded = state.add_client(info.clone());
                     state.set_pairing(None);
                     if let Some(ref macs) = pkt.macs {
                         crate::wol::record_peer_wol_info(
@@ -2232,8 +2262,41 @@ impl MeshServer {
                             info.address.as_deref(),
                         );
                     }
+                    if !recorded {
+                        // The desk holds its ten devices: say so where the person can act on it,
+                        // and do not pretend the link works (`FR-005`).
+                        desk_full = true;
+                        let text = crate::mesh::refusal_text("limit", &info.name);
+                        log::warn!("[Mesh] {} ({} from {})", text, info.id, peer_addr);
+                        state.inner.write().link.message = Some(text.clone());
+                        let _ = out_tx
+                            .send(WireMessage {
+                                t: "mesh.refused".to_string(),
+                                v: Some(1),
+                                why: Some("limit".to_string()),
+                                name: Some(info.name.clone()),
+                                message: Some(text),
+                                ..Default::default()
+                            })
+                            .await;
+                        let snap = state.snapshot();
+                        let _ = app.emit("state-change", &snap);
+                    }
                 } else {
                     log::warn!("[Auth] Unauthenticated hello/welcome from {} ({:?}) - not adding client", peer_addr, pkt.id);
+                }
+
+                if desk_full {
+                    // Say goodbye rather than leave a link that would silently do nothing.
+                    let _ = out_tx
+                        .send(WireMessage {
+                            t: "bye".to_string(),
+                            v: Some(1),
+                            id: Some(local_id.to_string()),
+                            ..Default::default()
+                        })
+                        .await;
+                    return;
                 }
 
                 if pkt.t == "hello" {
@@ -2305,6 +2368,28 @@ impl MeshServer {
                     })
                     .await;
 
+                let snap = state.snapshot();
+                let _ = app.emit("state-change", &snap);
+            }
+            // The computer we dialled has no room for another device (`FR-005`). Say why where
+            // the person can see it, instead of leaving a link that looks connected and does nothing.
+            "mesh.refused" => {
+                let name = pkt
+                    .name
+                    .clone()
+                    .or_else(|| pkt.id.clone())
+                    .unwrap_or_else(|| "The other computer".to_string());
+                let why = pkt.why.clone().unwrap_or_else(|| "limit".to_string());
+                let text = pkt
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| crate::mesh::refusal_text(&why, &name));
+                log::warn!("[Mesh] {}", text);
+                {
+                    let mut st = state.inner.write();
+                    st.mesh.refusal(pkt.id.as_deref().unwrap_or(&name), &why);
+                    st.link.message = Some(text);
+                }
                 let snap = state.snapshot();
                 let _ = app.emit("state-change", &snap);
             }
@@ -4490,6 +4575,107 @@ impl NetworkManager {
         }
     }
 
+    /// Close one session and leave the others alone.
+    ///
+    /// With several devices connected, "disconnect" has to mean the device the person picked, not
+    /// the whole desk. The device is matched by device id (what the page shows), by the id its
+    /// `hello` gave, or by its address, so a row built from any of those closes the right link.
+    ///
+    /// The peer is told `bye` first, which is what makes it drop the session on its side too, and
+    /// only then is the session forgotten here: a link that stayed half-open would keep pinging a
+    /// device that believes it is gone. Returns false when nothing matched, so the caller can say so
+    /// instead of pretending the click did something.
+    pub fn disconnect_device(&self, device_id: &str) -> bool {
+        self.flush_motion();
+        let target = device_id.trim();
+        if target.is_empty() {
+            return false;
+        }
+
+        // Resolve what the mesh knows about it before touching either registry, so no lock is held
+        // while another is taken.
+        let known = {
+            let s = self.state.inner.read();
+            s.mesh
+                .session(target)
+                .map(|m| (m.address.clone(), m.id.clone()))
+        };
+        let known_address = known.as_ref().and_then(|(a, _)| a.clone());
+
+        let sessions: Vec<(String, String, mpsc::Sender<WireMessage>)> = {
+            let guard = self.active_clients.read();
+            guard
+                .iter()
+                .filter(|(sid, c)| {
+                    session_matches(
+                        target,
+                        sid,
+                        c.peer_id.read().as_deref(),
+                        &c.peer_addr,
+                        known_address.as_deref(),
+                    )
+                })
+                .map(|(sid, c)| {
+                    (
+                        sid.clone(),
+                        c.peer_id.read().clone().unwrap_or_else(|| c.id.clone()),
+                        c.tx.clone(),
+                    )
+                })
+                .collect()
+        };
+        if sessions.is_empty() {
+            log::info!("[Mesh] Nothing to disconnect for '{}'", target);
+            return false;
+        }
+
+        let bye = WireMessage {
+            t: "bye".to_string(),
+            v: Some(1),
+            id: Some(self.local_id.clone()),
+            ..Default::default()
+        };
+        for (sid, _, tx) in &sessions {
+            log::info!("[Mesh] Closing the session with {} ({})", target, sid);
+            // The session's writer loop is still running: the message goes out before the session is
+            // dropped from the registry, so the peer hears why its link ended. A full channel means
+            // the writer is already failing, and removing the session closes it anyway.
+            if tx.try_send(bye.clone()).is_err() {
+                log::debug!("[Mesh] {} could not be told 'bye' (writer busy)", target);
+            }
+        }
+
+        {
+            let mut guard = self.active_clients.write();
+            for (sid, _, _) in &sessions {
+                guard.remove(sid);
+            }
+        }
+        for (sid, peer, _) in &sessions {
+            self.state.remove_client(peer);
+            self.state.remove_client(sid);
+        }
+        self.state.remove_client(target);
+
+        // The device that was driving (or being driven) has gone: nobody holds the pointer.
+        {
+            let mut s = self.state.inner.write();
+            let was_partner = s.mesh.partner.as_deref() == Some(target)
+                || sessions
+                    .iter()
+                    .any(|(_, peer, _)| s.mesh.partner.as_deref() == Some(peer.as_str()));
+            if was_partner {
+                s.mesh.clear_partner();
+                s.input = "home".to_string();
+                s.kvm_state.mode = "home".to_string();
+            }
+            s.mesh.refresh_active();
+        }
+        let snap = self.state.snapshot();
+        let _ = self.app.emit("state-change", &snap);
+        true
+    }
+
     pub async fn disconnect(&self) {
         self.flush_motion();
         let bye = WireMessage {
@@ -4806,6 +4992,41 @@ mod tests {
         for t in ["clip", "clip.image", "mesh.roster", "hello", "welcome"] {
             assert!(!is_single_target(t), "{} must not be address-filtered", t);
         }
+    }
+
+    #[test]
+    fn disconnecting_one_device_finds_exactly_that_session() {
+        // The page lists device ids; the connection registry keys sessions by address. A click has
+        // to find the session from either, and must never close a different device's link.
+        let addr: SocketAddr = "192.168.4.11:47800".parse().expect("parse address");
+
+        // The device id the peer gave in its hello — what the Multi-device page shows.
+        assert!(session_matches("desktop", "192.168.4.11:47800", Some("desktop"), &addr, None));
+        // The session id, which is the address:port.
+        assert!(session_matches("192.168.4.11:47800", "192.168.4.11:47800", Some("desktop"), &addr, None));
+        // The bare address, which older state carries.
+        assert!(session_matches("192.168.4.11", "192.168.4.11:47800", Some("desktop"), &addr, None));
+        // A peer that has not said who it is yet, matched through the mesh's stored address.
+        assert!(session_matches("desktop", "192.168.4.11:47800", None, &addr, Some("192.168.4.11")));
+
+        // Another device, an address that is only a prefix of this one, and an empty click.
+        assert!(!session_matches("laptop", "192.168.4.11:47800", Some("desktop"), &addr, None));
+        assert!(!session_matches("192.168.4.1", "192.168.4.11:47800", Some("desktop"), &addr, None));
+        assert!(!session_matches("", "192.168.4.11:47800", Some("desktop"), &addr, None));
+    }
+
+    #[test]
+    fn the_per_device_disconnect_reaches_the_app() {
+        // A button on the page is only real if the command is registered: an unregistered command
+        // fails at the moment a person presses it, which is the worst time to find out.
+        assert!(
+            include_str!("main.rs").contains("commands::disconnect_device"),
+            "disconnect_device must be registered in the invoke handler"
+        );
+        assert!(
+            include_str!("../../ui/shared/tauri-bridge.js").contains("disconnect_device"),
+            "the UI must be able to call it"
+        );
     }
 
     #[test]

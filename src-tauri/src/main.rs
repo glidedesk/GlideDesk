@@ -205,6 +205,7 @@ fn main() {
             commands::connect_again,
             commands::refresh_found,
             commands::disconnect,
+            commands::disconnect_device,
             commands::pair_respond,
             commands::set_app,
             commands::set_monitor,

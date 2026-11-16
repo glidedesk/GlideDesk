@@ -67,6 +67,40 @@ pub fn opposite(side: &str) -> Option<&'static str> {
     }
 }
 
+/// Why a device was not added or a handover was not accepted, in words the person can act on
+/// (`FR-005`, `FR-023`).
+///
+/// The code stays on the wire (`why`, `lastRefusal.why`) so the UI can translate it; this is the
+/// sentence the app writes in its own log and in `link.message`.
+pub fn refusal_text(why: &str, name: &str) -> String {
+    match why {
+        "limit" => format!(
+            "{} was not added: this desk already has {} devices connected. Disconnect one to make room.",
+            name,
+            number_word(MAX_DEVICES)
+        ),
+        "not_allowed" => format!("{} is not accepting the pointer right now.", name),
+        "not_connected" => format!("{} is not connected.", name),
+        "busy" => format!("{} is already driving or being driven.", name),
+        "not_ready" => format!("{} is not ready for the pointer yet.", name),
+        "too_large" => "That copy is larger than the clipboard limit.".to_string(),
+        "concealed" => "That copy is concealed, so it was not shared.".to_string(),
+        _ => format!("{} did not answer.", name),
+    }
+}
+
+/// Small counts as words, because they read better in a sentence shown to a person.
+fn number_word(n: usize) -> String {
+    const WORDS: [&str; 13] = [
+        "no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve",
+    ];
+    WORDS
+        .get(n)
+        .map(|w| w.to_string())
+        .unwrap_or_else(|| n.to_string())
+}
+
 /// Remove the fields this feature added, so a packet bound for a dormant (single-device) link is
 /// exactly the packet the previous release sent.
 ///

@@ -1736,7 +1736,7 @@ pub struct FullState {
 ///
 /// The mesh is dormant until two devices are connected, so this runs for the single peer too:
 /// the registry is what decides dormancy. Nothing on the wire changes while it holds one entry.
-fn note_session_connected(s: &mut FullState, c: &PeerInfo) {
+fn note_session_connected(s: &mut FullState, c: &PeerInfo) -> bool {
     let now = crate::mesh::session::now_ms();
     let mut sess = MeshSession::connected(&c.id, &c.name, &c.os, c.address.clone(), now);
     // A reconnect keeps what the previous session learned about the peer's capabilities: it is
@@ -1746,7 +1746,7 @@ fn note_session_connected(s: &mut FullState, c: &PeerInfo) {
         sess.pool = pool;
     }
     let self_id = s.about.pc.host.to_lowercase();
-    s.mesh.upsert(sess, &self_id);
+    s.mesh.upsert(sess, &self_id)
 }
 
 #[derive(Clone)]
@@ -2066,9 +2066,17 @@ impl AppState {
         s.pairing = pairing;
     }
 
-    pub fn add_client(&self, client: PeerInfo) {
+    /// Record a device that has connected. Returns false when the device could not be added because
+    /// the desk is full (`MAX_DEVICES`); the caller tells the person and closes that link.
+    pub fn add_client(&self, client: PeerInfo) -> bool {
         let mut s = self.inner.write();
         s.pairing = None;
+        if !note_session_connected(&mut s, &client) {
+            // Nothing is added to any view either: a device that cannot be given input must not
+            // appear as connected, or the person would type into a screen nobody is driving.
+            s.mesh.refusal(&client.id, "limit");
+            return false;
+        }
         if let Some(ref mut p) = s.paired {
             if p.mac_id.eq_ignore_ascii_case(&client.id) {
                 p.address = client.address.clone();
@@ -2079,7 +2087,6 @@ impl AppState {
         } else {
             s.clients.push(client.clone());
         }
-        note_session_connected(&mut s, &client);
         // The device this one is driving (or driven by) stays in front, so every existing page
         // that reads `client`/`peer` keeps pointing at the device the person is actually using.
         if let Some(pid) = s.mesh.partner.clone() {
@@ -2097,6 +2104,7 @@ impl AppState {
             s.link.mac_name = Some(name.clone());
             s.link.peer_name = Some(name);
         }
+        true
     }
 
     pub fn remove_client(&self, client_id: &str) {
@@ -2695,6 +2703,88 @@ mod tests {
             Some("laptop".to_string()),
             "with two devices the pointer's device wins over whichever connected last"
         );
+    }
+
+    #[test]
+    fn three_devices_stay_connected_and_none_is_pushed_away() {
+        // FR-001: connecting a device must not disconnect one that is already there.
+        let app_state = AppState::new();
+        for (i, id) in ["alpha", "beta", "gamma"].iter().enumerate() {
+            assert!(app_state.add_client(peer(id, &format!("192.168.4.{}", 20 + i))));
+            let snap = app_state.snapshot();
+            assert_eq!(
+                snap.mesh.sessions.len(),
+                i + 1,
+                "connecting {} must not drop an earlier device",
+                id
+            );
+            for earlier in &["alpha", "beta", "gamma"][..=i] {
+                assert!(
+                    snap.mesh.sessions.iter().any(|s| s.id == *earlier),
+                    "{} was disconnected by a later device",
+                    earlier
+                );
+            }
+        }
+        let snap = app_state.snapshot();
+        assert_eq!(snap.clients.len(), 3);
+        assert!(snap.mesh.active);
+        assert!(snap.mesh.last_refusal.is_none());
+    }
+
+    #[test]
+    fn a_second_session_through_a_different_address_does_not_duplicate() {
+        // The same device can arrive twice (a reconnect, or both ends dialling at once). It must
+        // stay one session, not two, or the count would reach the limit with half the devices.
+        let app_state = AppState::new();
+        assert!(app_state.add_client(peer("desktop", "192.168.4.11")));
+        assert!(app_state.add_client(peer("desktop", "192.168.4.11")));
+        assert_eq!(app_state.snapshot().mesh.sessions.len(), 1);
+        assert!(!app_state.mesh_active());
+    }
+
+    #[test]
+    fn the_eleventh_device_is_refused_with_a_reason() {
+        // FR-005: ten stay working, the eleventh is told why, and it is not half-added.
+        let app_state = AppState::new();
+        for i in 0..crate::mesh::MAX_DEVICES {
+            assert!(app_state.add_client(peer(&format!("dev{}", i), &format!("192.168.4.{}", 10 + i))));
+        }
+        assert!(app_state.mesh_active());
+        assert!(!app_state.add_client(peer("eleventh", "192.168.4.99")), "the desk is full");
+
+        let snap = app_state.snapshot();
+        assert_eq!(snap.mesh.sessions.len(), crate::mesh::MAX_DEVICES);
+        assert_eq!(snap.clients.len(), crate::mesh::MAX_DEVICES, "the refused device is not listed");
+        assert!(!snap.clients.iter().any(|p| p.id == "eleventh"));
+        let refusal = snap.mesh.last_refusal.expect("the refusal is recorded");
+        assert_eq!(refusal.device, "eleventh");
+        assert_eq!(refusal.why, "limit");
+        let text = crate::mesh::refusal_text(&refusal.why, "Eleventh");
+        assert!(text.contains("ten devices connected"), "the reason is actionable: {}", text);
+        assert!(text.contains("Disconnect one"), "the reason says what to do: {}", text);
+    }
+
+    #[test]
+    fn losing_one_device_leaves_the_others_connected() {
+        // SC-002: a device going to sleep must not disturb the rest, and coming back finds them.
+        let app_state = AppState::new();
+        app_state.add_client(peer("alpha", "192.168.4.20"));
+        app_state.add_client(peer("beta", "192.168.4.21"));
+        app_state.add_client(peer("gamma", "192.168.4.22"));
+
+        app_state.remove_client("beta");
+        let mid = app_state.snapshot();
+        assert_eq!(mid.mesh.sessions.len(), 2);
+        assert!(mid.mesh.sessions.iter().any(|s| s.id == "alpha"));
+        assert!(mid.mesh.sessions.iter().any(|s| s.id == "gamma"));
+        assert_eq!(mid.link.state, "connected");
+
+        // Back from sleep: it rejoins without disturbing the other two.
+        assert!(app_state.add_client(peer("beta", "192.168.4.21")));
+        let back = app_state.snapshot();
+        assert_eq!(back.mesh.sessions.len(), 3);
+        assert!(back.mesh.active);
     }
 
     #[test]

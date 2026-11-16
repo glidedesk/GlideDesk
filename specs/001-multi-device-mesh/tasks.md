@@ -44,16 +44,16 @@ Rust core in `src-tauri/src/`, webview UI in `ui/`, phone companion in `android/
 
 ## Phase 3: US1 — Several devices connected at the same time (P1)
 
-- [ ] T014 [P] [US1] Test: three sessions connect and none is disconnected by a later one (`src-tauri/src/state.rs` tests)
-- [ ] T015 [P] [US1] Test: the eleventh connection is refused with a reason while ten keep working (`src-tauri/src/network.rs` tests)
-- [ ] T016 [US1] Replace the single-session assumption in the accept path (`src-tauri/src/network.rs`, `handle_session`) so a new client is inserted rather than replacing the current peer — satisfies FR-001
-- [ ] T017 [US1] Enforce `MAX_DEVICES = 10` with a refusal message the UI can show — satisfies FR-005
-- [ ] T018 [US1] Derive `clients`, `client`, `peer` from the registry in `src-tauri/src/state.rs` so every existing page keeps working — satisfies FR-002
-- [ ] T019 [US1] Add connection lifecycle tests: sleep/wake of one device leaves the others connected (`src-tauri/src/network.rs` tests) — satisfies SC-002
+- [X] T014 [P] [US1] Test: three sessions connect and none is disconnected by a later one (`src-tauri/src/state.rs` tests)
+- [X] T015 [P] [US1] Test: the eleventh connection is refused with a reason while ten keep working (`src-tauri/src/network.rs` tests)
+- [X] T016 [US1] Replace the single-session assumption in the accept path (`src-tauri/src/network.rs`, `handle_session`) so a new client is inserted rather than replacing the current peer — satisfies FR-001
+- [X] T017 [US1] Enforce `MAX_DEVICES = 10` with a refusal message the UI can show — satisfies FR-005
+- [X] T018 [US1] Derive `clients`, `client`, `peer` from the registry in `src-tauri/src/state.rs` so every existing page keeps working — satisfies FR-002
+- [X] T019 [US1] Add connection lifecycle tests: sleep/wake of one device leaves the others connected (`src-tauri/src/network.rs` tests) — satisfies SC-002
 - [X] T019a [US1] Test: activating on the second connection and returning to one device changes no setting, pairing or preference (`src-tauri/src/state.rs` tests) — satisfies FR-004
-- [ ] T020 [US1] Multi-device page appears only with two or more sessions and lists them with live role in `ui/ui-multi.js` — satisfies FR-002, contracts/state-and-ui.md
-- [ ] T021 [US1] Add `disconnect_device` command in `src-tauri/src/commands.rs` and wire the page's per-row action — other sessions must be unaffected
-- [ ] T022 [P] [US1] JS test: the page renders zero, one, two and ten sessions without a dead control (`ui/shared/test/ui-multi.js`)
+- [X] T020 [US1] Multi-device page appears only with two or more sessions and lists them with live role in `ui/ui-multi.js` — satisfies FR-002, contracts/state-and-ui.md
+- [X] T021 [US1] Add `disconnect_device` command in `src-tauri/src/commands.rs` and wire the page's per-row action — other sessions must be unaffected
+- [X] T022 [P] [US1] JS test: the page renders zero, one, two and ten sessions without a dead control (`ui/shared/test/ui-multi.js`)
 
 **Checkpoint**: three devices stay connected, the page exists only when it should, and one-device behaviour is untouched.
 

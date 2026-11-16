@@ -264,6 +264,8 @@
     connectGuest: (id) => invoke('pair', { host: id }),
     forgetGuest: (id) => invoke('forget', { id }),
     disconnect: () => invoke('disconnect'),
+    // Close one device's session and leave the others: the Multi-device page's per-row action.
+    disconnectDevice: (deviceId) => invoke('disconnect_device', { device_id: String(deviceId) }),
     connectAgain: () => invoke('connect_again'),
     connectAddress: (addr) => invoke('connect_address', { addr }),
     refreshFound: () => invoke('refresh_found'),

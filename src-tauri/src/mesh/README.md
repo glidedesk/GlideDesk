@@ -53,6 +53,7 @@ Recorded because a reader comparing the two will find them, and they are choices
 | `assign_edge`, `disconnect_device`, `forget_device` | `src-tauri/src/commands.rs` |
 | `edges` persistence in `layout.json` | `src-tauri/src/pairstore.rs` |
 | Device list, edge picker, refusals | `ui/ui-multi.js`, `ui/shared/edges-ui.js` |
+| What the page shows, as tested pure functions | `ui/shared/mesh-view.js` (`ui/shared/test/ui-multi.js`) |
 
 ## Reading order for a change
 
