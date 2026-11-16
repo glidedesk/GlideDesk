@@ -169,7 +169,6 @@ pub fn pointer_report_inside(vx: i32, vy: i32, vw: i32, vh: i32, x: i32, y: i32)
 }
 
 /// Check if cursor coordinates cross the outer edge of the virtual desktop layout.
-#[cfg(any(test, not(windows)))]
 pub fn check_edge_crossed(side: &str, pt_x: f64, pt_y: f64, vx: i32, vy: i32, vw: i32, vh: i32) -> bool {
     let max_x = (vx + vw) as f64;
     let max_y = (vy + vh) as f64;
@@ -206,6 +205,19 @@ pub fn wheel_notches_from_windows(vertical: bool, mouse_data: u32) -> (f64, f64)
     } else {
         (notches, 0.0)
     }
+}
+
+/// Line notches from a trackpad's pixel scroll deltas.
+///
+/// Trackpads and smooth-scrolling mice report pixels, while the far side scrolls in
+/// notches of about ten pixels. The magnitude has to be taken before rounding: with
+/// `(px / 10.0).round().max(1.0)`, every negative delta collapsed to -1, so scrolling
+/// up was a fixed crawl while scrolling down kept its speed.
+pub fn scroll_lines_from_pixels(px: f64) -> f64 {
+    if px == 0.0 || !px.is_finite() {
+        return 0.0;
+    }
+    (px.abs() / 10.0).round().max(1.0) * px.signum()
 }
 
 /// Which key means "run this shortcut" on the computer being driven.
@@ -331,7 +343,6 @@ pub fn drive_park_point(vx: i32, vy: i32, vw: i32, vh: i32) -> (i32, i32) {
 }
 
 /// Check if cumulative remote virtual deltas indicate cursor has moved back across the seam to home.
-#[cfg(any(test, not(windows)))]
 pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: f64) -> bool {
     match side {
         "right" => virtual_remote_x < -EDGE_RETURN_DISTANCE,
@@ -340,6 +351,171 @@ pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: 
         "bottom" => virtual_remote_y < -EDGE_RETURN_DISTANCE,
         _ => false,
     }
+}
+
+/// Where along the seam the pointer left when control was handed over.
+///
+/// Kept here, not in the capture loops, because every platform needs the same answer
+/// when the pointer comes home: the edge it left by and how far along it. Stored as
+/// bits in an atomic so the hook thread can write it while the tap thread reads it;
+/// NaN means "no handover yet", which the getter turns into the middle of the edge.
+static EDGE_ENTRY_FRACTION_BITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(f64::NAN.to_bits());
+
+pub fn note_edge_entry_fraction(frac: f64) {
+    let frac = if frac.is_finite() {
+        frac.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    EDGE_ENTRY_FRACTION_BITS.store(frac.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn edge_entry_fraction() -> f64 {
+    let frac = f64::from_bits(EDGE_ENTRY_FRACTION_BITS.load(std::sync::atomic::Ordering::Relaxed));
+    if frac.is_finite() {
+        frac.clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
+
+/// Where to put this computer's pointer when control comes back.
+///
+/// The pointer waits in the middle of the screen while it drives the other one, so
+/// reading its position on return always produced the middle of the edge: a crossing
+/// at the top of the screen came home halfway down. The seam position is the one that
+/// was handed over (`entry_fraction`, the spot that was left), carried along by the
+/// hand's net travel since then, and always kept inside the screen and off the seam.
+pub fn seam_return_point(
+    side: &str,
+    entry_fraction: f64,
+    travel_x: f64,
+    travel_y: f64,
+    vx: i32,
+    vy: i32,
+    vw: i32,
+    vh: i32,
+    inset: i32,
+) -> (i32, i32) {
+    let frac = if entry_fraction.is_finite() {
+        entry_fraction.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let travel_x = if travel_x.is_finite() { travel_x } else { 0.0 };
+    let travel_y = if travel_y.is_finite() { travel_y } else { 0.0 };
+    let along_y = vy as f64 + frac * (vh - 1).max(1) as f64 + travel_y;
+    let along_x = vx as f64 + frac * (vw - 1).max(1) as f64 + travel_x;
+    let ix = inset.max(0);
+    let (x, y) = match side {
+        "left" => (vx as f64 + ix as f64, along_y),
+        "right" => ((vx + vw - 1 - ix) as f64, along_y),
+        "top" => (along_x, vy as f64 + ix as f64),
+        "bottom" => (along_x, (vy + vh - 1 - ix) as f64),
+        _ => (along_x, along_y),
+    };
+    clamp_inside_desktop(x, y, vx, vy, vw.max(1), vh.max(1), ix)
+}
+
+/// How far the pointer has to be from the spot this app last put it before the
+/// movement counts as a hand rather than an echo.
+pub const HAND_MOVED_TOLERANCE_PX: f64 = 2.0;
+
+/// Where this app last put the pointer on a Linux desktop.
+///
+/// X11 events carry no per-event marker, so the position is the only way to tell the
+/// other computer's injected movement from a hand on this desk. NaN means "nowhere
+/// yet", which never matches a real position.
+#[cfg(any(test, target_os = "linux"))]
+static LINUX_INJECTED_PT_X: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(f64::NAN.to_bits());
+#[cfg(any(test, target_os = "linux"))]
+static LINUX_INJECTED_PT_Y: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(f64::NAN.to_bits());
+
+#[cfg(any(test, target_os = "linux"))]
+pub fn note_linux_injected_pointer(x: f64, y: f64) {
+    LINUX_INJECTED_PT_X.store(x.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    LINUX_INJECTED_PT_Y.store(y.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub fn linux_injected_pointer() -> (f64, f64) {
+    (
+        f64::from_bits(LINUX_INJECTED_PT_X.load(std::sync::atomic::Ordering::Relaxed)),
+        f64::from_bits(LINUX_INJECTED_PT_Y.load(std::sync::atomic::Ordering::Relaxed)),
+    )
+}
+
+/// Did an unmarked pointer report come from the person at this desk?
+///
+/// A computer the other one is driving cannot judge that by time alone: the other
+/// computer's motion arrives every 8-16 ms, which is inside the 25 ms echo window, so
+/// the local mouse was ignored for as long as the far side kept moving. Position is
+/// the honest test — this app knows exactly where it last put the pointer, and a move
+/// that lands anywhere else is a hand.
+pub fn hand_moved_from_injection(
+    here_x: f64,
+    here_y: f64,
+    injected_x: f64,
+    injected_y: f64,
+    tolerance_px: f64,
+) -> bool {
+    if !injected_x.is_finite() || !injected_y.is_finite() {
+        return true;
+    }
+    (here_x - injected_x).hypot(here_y - injected_y) >= tolerance_px.max(0.0)
+}
+
+/// Which position a relative move should start from.
+///
+/// The other computer's motion arrives in bursts; the app applies each delta as an
+/// absolute move, but Windows may not have processed the previous one when the next
+/// is worked out. `GetCursorPos` then still reports the position before the last move,
+/// so consecutive deltas added to the same origin and the travel was lost, which is
+/// what made the pointer stutter on Windows. The target we last asked for is the right
+/// origin while a burst is still in flight; once it has gone quiet, the real pointer
+/// wins, because the hand may have moved it.
+#[cfg(any(test, windows))]
+pub fn relative_move_base(
+    os_pos: (f64, f64),
+    last_target: Option<(f64, f64)>,
+    last_target_age_ms: u64,
+    trust_window_ms: u64,
+) -> (f64, f64) {
+    match last_target {
+        Some(target) if last_target_age_ms <= trust_window_ms => target,
+        _ => os_pos,
+    }
+}
+
+/// Whether a pointer held on the edge has been held long enough to mean it.
+///
+/// A polling capture loop sees the pointer even when the hand has stopped, so unlike
+/// the event-driven platforms it cannot use "another event arrived" as the sign of a
+/// push: a pointer merely parked against the edge would hand the session over after
+/// the hold. A hold only starts while the pointer is still moving into the edge
+/// (`push_recent`), and once started it survives the hand stopping, which is what a
+/// push into an edge looks like.
+#[cfg(any(test, target_os = "linux"))]
+pub fn edge_hold_ready(
+    touching: bool,
+    push_recent: bool,
+    now_ms: u64,
+    held_since: &mut Option<u64>,
+    dwell_ms: u64,
+) -> bool {
+    if !touching || !push_recent {
+        *held_since = None;
+        return false;
+    }
+    let started = *held_since.get_or_insert(now_ms);
+    if now_ms.saturating_sub(started) < dwell_ms.max(1) {
+        return false;
+    }
+    *held_since = None;
+    true
 }
 
 /// This computer's whole desktop, across every monitor, in the units its own
@@ -1052,11 +1228,16 @@ pub fn injected_event_debug(event: macos_ffi::CGEventRef) -> String {
 pub static LAST_INJECTION_TIMESTAMP_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-pub fn record_injection_timestamp() {
-    let now_ms = std::time::SystemTime::now()
+/// Milliseconds since the Unix epoch, for the dwell and injection clocks.
+pub fn now_millis() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64;
+        .as_millis() as u64
+}
+
+pub fn record_injection_timestamp() {
+    let now_ms = now_millis();
     LAST_INJECTION_TIMESTAMP_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -1486,6 +1667,7 @@ impl InputBackend for X11RbBackend {
             .map_err(|e| format!("x11 query_pointer reply failed: {}", e))?;
         let new_x = reply.root_x as i32 + dx;
         let new_y = reply.root_y as i32 + dy;
+        note_linux_injected_pointer(new_x as f64, new_y as f64);
         self.warp(new_x, new_y)
     }
 
@@ -1493,6 +1675,7 @@ impl InputBackend for X11RbBackend {
         use x11rb::connection::Connection;
         use x11rb::protocol::xproto;
 
+        note_linux_injected_pointer(x as f64, y as f64);
         xproto::warp_pointer(
             &self.conn,
             x11rb::NONE,
@@ -1850,6 +2033,7 @@ impl NativeInputInjector {
             record_injection_timestamp();
             if let Some(backend) = get_custom_backend() {
                 let _ = backend.warp(x, y);
+                hook_engine::note_injected_target(x, y);
                 return;
             }
             use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -1889,6 +2073,7 @@ impl NativeInputInjector {
                     );
                 }
             }
+            hook_engine::note_injected_target(x, y);
         });
     }
 
@@ -2069,15 +2254,29 @@ impl NativeInputInjector {
         // ("Enhance pointer precision"), so the distance here did not match the distance
         // the hand moved on the other computer and the two pointers drifted apart. Warp
         // to the exact pixel instead: same distance, no acceleration.
-        let Some((x, y)) = Self::cursor_position() else {
-            return;
+        let os_pos = Self::cursor_position();
+        // While a burst of motion from the other computer is still in flight, the
+        // system may not have caught up with the previous move. Start from the target
+        // we asked for then, or every delta in the burst is added to the same origin
+        // and the travel between them disappears.
+        let last = hook_engine::last_injected_target();
+        let (base_x, base_y) = match (os_pos, last) {
+            (Some(os), Some((target, at))) => relative_move_base(
+                os,
+                Some(target),
+                now_millis().saturating_sub(at),
+                hook_engine::INJECTED_TARGET_TRUST_MS,
+            ),
+            (Some(os), None) => os,
+            (None, Some((target, _))) => target,
+            (None, None) => return,
         };
         let (vx, vy, vw, vh) = hook_engine::get_virtual_desktop_bounds();
         if vw <= 1 || vh <= 1 {
             return;
         }
-        let nx = (x + dx as f64).clamp(vx as f64, (vx + vw - 1) as f64);
-        let ny = (y + dy as f64).clamp(vy as f64, (vy + vh - 1) as f64);
+        let nx = (base_x + dx as f64).clamp(vx as f64, (vx + vw - 1) as f64);
+        let ny = (base_y + dy as f64).clamp(vy as f64, (vy + vh - 1) as f64);
         Self::inject_cursor_absolute(nx.round() as i32, ny.round() as i32);
     }
 
@@ -3067,6 +3266,203 @@ pub mod hook_engine {
     static mut VIRTUAL_REMOTE_X: f64 = 0.0;
     static mut VIRTUAL_REMOTE_Y: f64 = 0.0;
 
+    /// Where the last move we asked for put the pointer, and when we asked.
+    ///
+    /// Bursts of motion from the other computer are applied as absolute moves, but
+    /// Windows need not have processed the previous `SendInput` when the next delta is
+    /// worked out. `GetCursorPos` then still shows the position before it, so each
+    /// delta was added to the same origin and the travel between them was lost — the
+    /// pointer crawled and jumped. While a burst is in flight the target we asked for
+    /// is the true origin; once it goes quiet the real pointer wins again, because the
+    /// hand may have moved it.
+    static INJECTED_TARGET_X: std::sync::atomic::AtomicI32 =
+        std::sync::atomic::AtomicI32::new(0);
+    static INJECTED_TARGET_Y: std::sync::atomic::AtomicI32 =
+        std::sync::atomic::AtomicI32::new(0);
+    static INJECTED_TARGET_MS: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    /// How long after a move the target we asked for is trusted over `GetCursorPos`.
+    pub const INJECTED_TARGET_TRUST_MS: u64 = 90;
+
+    pub fn note_injected_target(x: i32, y: i32) {
+        INJECTED_TARGET_X.store(x, std::sync::atomic::Ordering::Relaxed);
+        INJECTED_TARGET_Y.store(y, std::sync::atomic::Ordering::Relaxed);
+        INJECTED_TARGET_MS.store(
+            super::now_millis(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn last_injected_target() -> Option<((f64, f64), u64)> {
+        let at = INJECTED_TARGET_MS.load(std::sync::atomic::Ordering::Relaxed);
+        if at == 0 {
+            return None;
+        }
+        Some((
+            (
+                INJECTED_TARGET_X.load(std::sync::atomic::Ordering::Relaxed) as f64,
+                INJECTED_TARGET_Y.load(std::sync::atomic::Ordering::Relaxed) as f64,
+            ),
+            at,
+        ))
+    }
+
+    /// Set while a wake-up is already on its way, so a burst of events at the edge
+    /// schedules one crossing, not a thread per event.
+    static EDGE_WAKE_PENDING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// The live handlers, for work that starts after the hook has returned.
+    fn live_handlers() -> Option<(AppState, NetworkManager, AppHandle)> {
+        unsafe {
+            Some((
+                APP_STATE.clone()?,
+                NETWORK_MGR.clone()?,
+                APP_HANDLE.clone()?,
+            ))
+        }
+    }
+
+    /// Hand the pointer to the other computer.
+    ///
+    /// Shared by the hook and the wake-up, so a crossing finished by the timer takes
+    /// exactly the same steps as one finished by a move: the entry point is recorded
+    /// (that is where the pointer comes home later), the other computer is told where
+    /// to put its pointer, and this one's pointer goes to the middle of its screen.
+    fn cross_to_peer(
+        state: &AppState,
+        net: &NetworkManager,
+        app: &AppHandle,
+        side: &str,
+        pt: POINT,
+        vx: i32,
+        vy: i32,
+        vw: i32,
+        vh: i32,
+    ) {
+        unsafe {
+            LAST_PT = pt;
+            VIRTUAL_REMOTE_X = 0.0;
+            VIRTUAL_REMOTE_Y = 0.0;
+        }
+        log::info!(
+            "[KVM] Cursor crossed to peer: side={}, pt=({}, {})",
+            side,
+            pt.x,
+            pt.y
+        );
+        let (is_left_down, is_ctrl_down) = unsafe {
+            (
+                (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0,
+                (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0,
+            )
+        };
+
+        if is_left_down && is_ctrl_down {
+            // Window Edge-Handoff Trigger: Ctrl held while dragging window to edge
+            let _ = app.emit(
+                "window-handoff-trigger",
+                serde_json::json!({ "x": pt.x, "y": pt.y, "side": side }),
+            );
+        }
+
+        let entry = entry_fraction(side, pt.x as f64, pt.y as f64, vx, vy, vw, vh);
+        note_edge_entry_fraction(entry);
+        state.set_where_input("driving");
+        refresh_view_now();
+        let new_snap = state.snapshot();
+        let _ = app.emit("state-change", &new_snap);
+
+        let take = WireMessage {
+            t: "kvm.take".to_string(),
+            v: Some(1),
+            edge_at: Some(entry),
+            ..Default::default()
+        };
+        net.send_packet_sync(take);
+
+        // The crossing event is swallowed, so the pointer never actually reached the
+        // edge; move it to the middle of the desktop and count the next movement from
+        // there. Without this the first delta after taking was the whole distance from
+        // the real pointer, which read as a huge movement the other way and handed
+        // control straight back.
+        let (park_x, park_y) = super::drive_park_point(vx, vy, vw, vh);
+        park_cursor_now(park_x, park_y);
+        unsafe {
+            LAST_PT = POINT { x: park_x, y: park_y };
+        }
+    }
+
+    /// Give the edge dwell the event it needs when the hand has stopped moving.
+    ///
+    /// `edge_push_ready` measures how long the pointer has stayed on the edge, but it
+    /// can only notice that on another pointer event. A mouse pushed into the edge
+    /// sends none once the pointer cannot go any further, so the dwell never finished
+    /// and the other computer was never asked for the pointer — Windows crossed
+    /// instantly for that reason, without any hold at all. Look again once the dwell
+    /// has passed and finish the crossing from here.
+    fn schedule_edge_wake(dwell_ms: u64) {
+        if EDGE_WAKE_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(dwell_ms + 25));
+            EDGE_WAKE_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            // The pointer left the edge in the meantime; nothing to finish.
+            if EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                return;
+            }
+            let Some((state, net, app)) = live_handlers() else {
+                return;
+            };
+            let Some(view) = current_view() else {
+                return;
+            };
+            let sharing_enabled =
+                view.mouse && view.linked && view.drive_other && !view.paused;
+            if !view.has_peer || !sharing_enabled {
+                return;
+            }
+            if !can_start_crossing(&state.inner.read().input, view.has_peer, sharing_enabled) {
+                return;
+            }
+            let Some((px, py)) = super::NativeInputInjector::cursor_position() else {
+                return;
+            };
+            let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
+            let dwell = EDGE_DWELL_MS + state.inner.read().kvm.resistance_ms.min(2_000) as u64;
+            let ready = edge_push_ready(
+                &view.side,
+                px,
+                py,
+                vx,
+                vy,
+                vw,
+                vh,
+                super::now_millis(),
+                dwell,
+            );
+            if !ready || !check_edge_crossed(&view.side, px, py, vx, vy, vw, vh) {
+                return;
+            }
+            cross_to_peer(
+                &state,
+                &net,
+                &app,
+                &view.side,
+                POINT {
+                    x: px.round() as i32,
+                    y: py.round() as i32,
+                },
+                vx,
+                vy,
+                vw,
+                vh,
+            );
+        });
+    }
+
     /// What the two callbacks below are allowed to know, kept up to date by its own thread.
     ///
     /// Reading the live state inside a low-level hook meant cloning the whole state and
@@ -3179,6 +3575,7 @@ pub mod hook_engine {
     /// posted warp rather than leave the pointer at the edge.
     fn park_cursor_now(x: i32, y: i32) {
         super::record_injection_timestamp();
+        note_injected_target(x, y);
         if let Some(backend) = super::get_custom_backend() {
             let _ = backend.warp(x, y);
             return;
@@ -3394,9 +3791,6 @@ pub mod hook_engine {
                 let has_peer = view.has_peer;
                 let is_driving = view.driving;
 
-                let max_x = vx + vw;
-                let max_y = vy + vh;
-
                 let sharing_enabled =
                     view.mouse && view.linked && view.drive_other && !view.paused;
 
@@ -3440,14 +3834,39 @@ pub mod hook_engine {
 
                 let cached_home = !view.driving && !view.driven;
                 if cached_home && has_peer && sharing_enabled {
-                    // Edge check across the entire virtual multi-monitor desktop
-                    let crossed = match view.side.as_str() {
-                        "right" => m.pt.x >= max_x - 2,
-                        "left" => m.pt.x <= vx + 1,
-                        "top" => m.pt.y <= vy + 1,
-                        "bottom" => m.pt.y >= max_y - 2,
-                        _ => false,
-                    };
+                    // The pointer has to rest on the edge before it hands over: a brush
+                    // against it must not switch screens, and the person can make the
+                    // hold longer with the Edge resistance slider. Windows used to cross
+                    // on the first pixel that touched the edge, which made reaching for a
+                    // scrollbar or a menu hand the session away.
+                    let dwell_ms = EDGE_DWELL_MS
+                        + state.inner.read().kvm.resistance_ms.min(2_000) as u64;
+                    let ready = edge_push_ready(
+                        &view.side,
+                        m.pt.x as f64,
+                        m.pt.y as f64,
+                        vx,
+                        vy,
+                        vw,
+                        vh,
+                        super::now_millis(),
+                        dwell_ms,
+                    );
+                    if !ready && EDGE_TOUCHED_AT_MS.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+                        // The hand has stopped, so no further event will finish the
+                        // hold; look again when it has passed.
+                        schedule_edge_wake(dwell_ms);
+                    }
+                    let crossed = ready
+                        && check_edge_crossed(
+                            &view.side,
+                            m.pt.x as f64,
+                            m.pt.y as f64,
+                            vx,
+                            vy,
+                            vw,
+                            vh,
+                        );
 
                     // Only a computer whose pointer is being used here hands it over.
                     // The cached view can be a beat behind the pointer changing hands,
@@ -3458,51 +3877,7 @@ pub mod hook_engine {
                             can_start_crossing(&s.input, has_peer, sharing_enabled)
                         }
                     {
-                        LAST_PT = m.pt;
-                        VIRTUAL_REMOTE_X = 0.0;
-                        VIRTUAL_REMOTE_Y = 0.0;
-                        log::info!("[KVM] Cursor crossed to peer: side={}, pt=({}, {})", view.side, m.pt.x, m.pt.y);
-                        let is_left_down = (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0;
-                        let is_ctrl_down = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
-
-                        if is_left_down && is_ctrl_down {
-                            // Window Edge-Handoff Trigger: Ctrl held while dragging window to edge
-                            let _ = app.emit("window-handoff-trigger", serde_json::json!({
-                                "x": m.pt.x,
-                                "y": m.pt.y,
-                                "side": view.side,
-                            }));
-                        }
-
-                        state.set_where_input("driving");
-                        refresh_view_now();
-                        let new_snap = state.snapshot();
-                        let _ = app.emit("state-change", &new_snap);
-
-                        let take = WireMessage {
-                            t: "kvm.take".to_string(),
-                            v: Some(1),
-                            edge_at: Some(entry_fraction(
-                                &view.side,
-                                m.pt.x as f64,
-                                m.pt.y as f64,
-                                vx,
-                                vy,
-                                vw,
-                                vh,
-                            )),
-                            ..Default::default()
-                        };
-                        net.send_packet_sync(take);
-
-                        // The crossing event is swallowed, so the pointer never actually
-                        // reached the edge; move it to the middle of the desktop and count
-                        // the next movement from there. Without this the first delta after
-                        // taking was the whole distance from the real pointer, which read as
-                        // a huge movement the other way and handed control straight back.
-                        let (park_x, park_y) = super::drive_park_point(vx, vy, vw, vh);
-                        park_cursor_now(park_x, park_y);
-                        LAST_PT = POINT { x: park_x, y: park_y };
+                        cross_to_peer(state, net, app, &view.side, m.pt, vx, vy, vw, vh);
                         return LRESULT(1);
                     }
                 } else if is_driving {
@@ -3515,13 +3890,11 @@ pub mod hook_engine {
                             VIRTUAL_REMOTE_X += dx;
                             VIRTUAL_REMOTE_Y += dy;
 
-                            let returned = match view.side.as_str() {
-                                "right" => VIRTUAL_REMOTE_X < -EDGE_RETURN_DISTANCE,
-                                "left" => VIRTUAL_REMOTE_X > EDGE_RETURN_DISTANCE,
-                                "top" => VIRTUAL_REMOTE_Y > EDGE_RETURN_DISTANCE,
-                                "bottom" => VIRTUAL_REMOTE_Y < -EDGE_RETURN_DISTANCE,
-                                _ => false,
-                            };
+                            let returned = check_edge_returned(
+                                &view.side,
+                                VIRTUAL_REMOTE_X,
+                                VIRTUAL_REMOTE_Y,
+                            );
 
                             if returned {
                                 log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", view.side, VIRTUAL_REMOTE_X);
@@ -3538,16 +3911,22 @@ pub mod hook_engine {
                                 };
                                 net.send_packet_sync(home_msg);
 
-                                let return_x = match view.side.as_str() {
-                                    "right" => max_x - SEAM_INSET,
-                                    "left" => vx + SEAM_INSET,
-                                    _ => m.pt.x,
-                                };
-                                let return_y = match view.side.as_str() {
-                                    "top" => vy + SEAM_INSET,
-                                    "bottom" => max_y - SEAM_INSET,
-                                    _ => m.pt.y,
-                                };
+                                // Back to the spot of the seam it left by, carried along
+                                // by how far the hand has travelled, not to the middle of
+                                // the edge: the pointer waits in the middle of the screen
+                                // while it drives the other one, so its position here
+                                // says nothing about where it was left.
+                                let (return_x, return_y) = seam_return_point(
+                                    &view.side,
+                                    edge_entry_fraction(),
+                                    VIRTUAL_REMOTE_X,
+                                    VIRTUAL_REMOTE_Y,
+                                    vx,
+                                    vy,
+                                    vw,
+                                    vh,
+                                    SEAM_INSET,
+                                );
                                 // Put the pointer just inside the seam so the next push
                                 // produces a movement event the edge can be judged from
                                 // again. This has to happen before the next mouse event is
@@ -3555,6 +3934,9 @@ pub mod hook_engine {
                                 // posted to the main thread.
                                 park_cursor_now(return_x, return_y);
                                 LAST_PT = POINT { x: return_x, y: return_y };
+                                // Standing on the seam it was left on is not a push back
+                                // across it: the hold has to be built up again.
+                                reset_edge_dwell();
                                 return LRESULT(1);
                             }
 
@@ -4160,23 +4542,50 @@ pub mod hook_engine {
         // Input this app injected (input forwarded from the other computer) is not the
         // local user. Without this the pointer, parked on the edge by the other computer,
         // counts as a fresh edge crossing and both computers start driving each other.
+        // The marker above catches almost all of it; this window is the fallback for
+        // reports the system makes on our behalf (a warp, for instance), which carry no
+        // marker. It must not decide whether the hand is allowed to take control back:
+        // the other computer's motion arrives every 8-16 ms, well inside the window, so
+        // a rule based on time alone hid the hand for as long as the far side moved.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
         let last_injection_ms = LAST_INJECTION_TIMESTAMP_MS.load(std::sync::atomic::Ordering::Relaxed);
-        if !should_forward_captured_event(now_ms, last_injection_ms) {
-            return event;
-        }
+        let suppressed_by_time = !should_forward_captured_event(now_ms, last_injection_ms);
 
         if let (Some(state), Some(net), Some(app)) = (&APP_STATE, &NETWORK_MGR, &APP_HANDLE) {
+            let here = CGEventGetLocation(event);
+            let (inj_x, inj_y) = injected_pointer();
+            let hand_moved = hand_moved_from_injection(
+                here.x,
+                here.y,
+                inj_x,
+                inj_y,
+                HAND_MOVED_TOLERANCE_PX,
+            );
+            let at_injected_point = !hand_moved;
+            let is_move = r#type == kCGEventMouseMoved
+                || r#type == kCGEventLeftMouseDragged
+                || r#type == kCGEventRightMouseDragged
+                || r#type == kCGEventOtherMouseDragged;
+            let is_button_down =
+                r#type == kCGEventLeftMouseDown || r#type == kCGEventRightMouseDown;
+            let local_pointer_input = is_button_down || (is_move && hand_moved);
+
+            // An echo that the marker did not catch is never a hand: it sits on the
+            // spot this app just put the pointer on. Everything else this app injected
+            // is caught by the marker. Reading the state is only worth it when the
+            // event could mean something, which is what keeps a busy pointer cheap.
+            if suppressed_by_time && !local_pointer_input {
+                return event;
+            }
+
             let snap = state.snapshot();
             let has_peer = snap.client.is_some() || snap.peer.is_some() || snap.link.state == "connected";
             let is_driving = snap.input == "driving";
 
             let (vx, vy, vw, vh) = get_virtual_desktop_bounds();
-            let max_x = vx + vw;
-            let max_y = vy + vh;
 
             let sharing_enabled = snap.kvm.mouse && snap.kvm.linked && snap.kvm.drive_other && !snap.kvm_state.paused;
 
@@ -4184,18 +4593,6 @@ pub mod hook_engine {
             // the seam and means nothing, so it is hidden: otherwise a second arrow
             // sits blinking on the edge while the real one moves on the other screen.
             set_cursor_hidden(is_driving);
-
-            // Putting the pointer down is reported by the system as an ordinary
-            // mouse-moved event. It is not the person at this desk, and at a seam it
-            // also looks like a fresh crossing, which is what made the pointer blink
-            // at the edge and left both computers driving each other.
-            let here = CGEventGetLocation(event);
-            let (inj_x, inj_y) = injected_pointer();
-            let at_injected_point = (here.x - inj_x).abs() < 4.0 && (here.y - inj_y).abs() < 4.0;
-            let is_move = r#type == kCGEventMouseMoved
-                || r#type == kCGEventLeftMouseDragged
-                || r#type == kCGEventRightMouseDragged
-                || r#type == kCGEventOtherMouseDragged;
 
             // While this computer is at home, a click or a keystroke in GlideDesk's
             // own window must reach that window untouched, and must not travel to the
@@ -4210,16 +4607,7 @@ pub mod hook_engine {
             // mouse is touched: events this app injected were filtered out above, so
             // anything left is the person at this desk. Without this both computers can
             // end up each believing the other is driving, and neither takes input.
-            if snap.input == "driven"
-                && (r#type == kCGEventMouseMoved
-                    || r#type == kCGEventLeftMouseDown
-                    || r#type == kCGEventRightMouseDown)
-            {
-                if r#type == kCGEventMouseMoved && at_injected_point {
-                    // The cursor being put where it already is, not a hand moving it.
-                    LAST_PT = here;
-                    return event;
-                }
+            if snap.input == "driven" && local_pointer_input {
                 log::info!(
                     "[KVM] Local mouse took control back from the other computer at ({:.1}, {:.1}); {}",
                     here.x,
@@ -4244,6 +4632,10 @@ pub mod hook_engine {
                 set_cursor_hidden(false);
                 LAST_PT = here;
                 // This event brought control back; it is not also a crossing.
+                return event;
+            }
+
+            if suppressed_by_time {
                 return event;
             }
 
@@ -4307,18 +4699,20 @@ pub mod hook_engine {
                         let new_snap = state.snapshot();
                         let _ = app.emit("state-change", &new_snap);
 
+                        let entry = entry_fraction(
+                            &snap.layout.side,
+                            pt.x,
+                            pt.y,
+                            vx,
+                            vy,
+                            vw,
+                            vh,
+                        );
+                        note_edge_entry_fraction(entry);
                         let take = WireMessage {
                             t: "kvm.take".to_string(),
                             v: Some(1),
-                            edge_at: Some(entry_fraction(
-                                &snap.layout.side,
-                                pt.x,
-                                pt.y,
-                                vx,
-                                vy,
-                                vw,
-                                vh,
-                            )),
+                            edge_at: Some(entry),
                             ..Default::default()
                         };
                         net.send_packet_sync(take);
@@ -4361,15 +4755,28 @@ pub mod hook_engine {
                             };
                             net.send_packet_sync(home_msg);
 
-                            let return_pt = match snap.layout.side.as_str() {
-                                "right" => CGPoint { x: (max_x - SEAM_INSET) as f64, y: pt.y },
-                                "left" => CGPoint { x: (vx + SEAM_INSET) as f64, y: pt.y },
-                                "top" => CGPoint { x: pt.x, y: (vy + SEAM_INSET) as f64 },
-                                "bottom" => CGPoint { x: pt.x, y: (max_y - SEAM_INSET) as f64 },
-                                _ => pt,
-                            };
+                            // Not the middle of the edge. The pointer waits in the
+                            // middle of the screen while it drives the other one, so
+                            // its position here says nothing about where it was left.
+                            // Come home on the spot of the seam the handover used,
+                            // carried along by how far the hand has travelled since.
+                            let (rx, ry) = seam_return_point(
+                                &snap.layout.side,
+                                edge_entry_fraction(),
+                                VIRTUAL_REMOTE_X,
+                                VIRTUAL_REMOTE_Y,
+                                vx,
+                                vy,
+                                vw,
+                                vh,
+                                SEAM_INSET,
+                            );
+                            let return_pt = CGPoint { x: rx as f64, y: ry as f64 };
                             let _ = CGWarpMouseCursorPosition(return_pt);
                             LAST_PT = return_pt;
+                            // Standing on the seam it was left on is not a push back
+                            // across it: the dwell has to be built up again.
+                            super::reset_edge_dwell();
                             return std::ptr::null_mut();
                         }
 
@@ -4426,18 +4833,11 @@ pub mod hook_engine {
                         if dy == 0.0 && dx == 0.0 {
                             // Trackpads and smooth-scrolling mice only report pixel
                             // deltas; the far side works in line notches.
-                            let lines = |px: f64| {
-                                if px == 0.0 {
-                                    0.0
-                                } else {
-                                    (px / 10.0).round().max(1.0) * px.signum()
-                                }
-                            };
-                            dy = lines(CGEventGetIntegerValueField(
+                            dy = scroll_lines_from_pixels(CGEventGetIntegerValueField(
                                 event,
                                 kCGScrollWheelEventPointDeltaAxis1,
                             ) as f64);
-                            dx = lines(CGEventGetIntegerValueField(
+                            dx = scroll_lines_from_pixels(CGEventGetIntegerValueField(
                                 event,
                                 kCGScrollWheelEventPointDeltaAxis2,
                             ) as f64);
@@ -4682,6 +5082,9 @@ fn run_linux_x11_capture_loop(
     let mut virtual_remote_y: f64 = 0.0;
     let mut prev_mask: u16 = 0;
     let mut prev_keys: [u8; 32] = [0; 32];
+    // When the pointer last moved, and since when it has been held on the edge.
+    let mut last_move_ms: u64 = 0;
+    let mut edge_held_since: Option<u64> = None;
 
     const BUTTON1_MASK: u16 = 1 << 8;
     const BUTTON2_MASK: u16 = 1 << 9;
@@ -4772,13 +5175,28 @@ fn run_linux_x11_capture_loop(
         // Reset failure counter on successful queries
         consecutive_failures = 0;
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms = now_millis();
         let last_inj_ms = LAST_INJECTION_TIMESTAMP_MS.load(std::sync::atomic::Ordering::Relaxed);
+        let suppressed = !should_forward_captured_event(now_ms, last_inj_ms);
 
-        if !should_forward_captured_event(now_ms, last_inj_ms) {
+        // X11 reports no marker on the events it is given, so an injected move is
+        // recognised by where it lands: this app knows the spot it asked for. A
+        // pointer anywhere else is a hand. That is what lets the person take control
+        // back while the other computer is still moving — its motion arrives inside
+        // the 25 ms echo window and used to hide every local movement.
+        let (inj_x, inj_y) = linux_injected_pointer();
+        let hand_moved = hand_moved_from_injection(
+            root_x as f64,
+            root_y as f64,
+            inj_x,
+            inj_y,
+            HAND_MOVED_TOLERANCE_PX,
+        );
+        let pressed_buttons =
+            (mask & !prev_mask) & (BUTTON1_MASK | BUTTON2_MASK | BUTTON3_MASK);
+        let local_pointer_input = hand_moved || pressed_buttons != 0;
+
+        if suppressed && !local_pointer_input {
             // Self-echo suppression: drop inputs injected by GlideDesk itself
             last_x = root_x;
             last_y = root_y;
@@ -4790,11 +5208,36 @@ fn run_linux_x11_capture_loop(
         let snap = state.snapshot();
         let has_peer = snap.client.is_some() || snap.peer.is_some() || snap.link.state == "connected";
         let is_driving = snap.input == "driving";
+        let is_driven = snap.input == "driven";
 
         let sharing_enabled = snap.kvm.mouse && snap.kvm.linked && snap.kvm.drive_other && !snap.kvm_state.paused;
 
         if can_start_crossing(&snap.input, has_peer, sharing_enabled) {
-            let crossed = check_edge_crossed(&snap.layout.side, root_x as f64, root_y as f64, vx, vy, vw, vh);
+            // The pointer has to rest on the edge before it hands over, and the
+            // person can make that hold longer with the Edge resistance slider.
+            // A polling loop sees the pointer even when the hand has stopped, so
+            // the hold only starts while it is still being pushed into the edge.
+            let dwell_ms = EDGE_DWELL_MS + state.inner.read().kvm.resistance_ms.min(2_000) as u64;
+            if root_x != last_x || root_y != last_y {
+                last_move_ms = now_ms;
+            }
+            let push_recent = now_ms.saturating_sub(last_move_ms) <= dwell_ms + 250;
+            let touching = check_edge_crossed(
+                &snap.layout.side,
+                root_x as f64,
+                root_y as f64,
+                vx,
+                vy,
+                vw,
+                vh,
+            );
+            let crossed = edge_hold_ready(
+                touching,
+                push_recent,
+                now_ms,
+                &mut edge_held_since,
+                dwell_ms,
+            );
             if crossed {
                 virtual_remote_x = 0.0;
                 virtual_remote_y = 0.0;
@@ -4811,6 +5254,16 @@ fn run_linux_x11_capture_loop(
                     }));
                 }
 
+                let entry = entry_fraction(
+                    &snap.layout.side,
+                    root_x as f64,
+                    root_y as f64,
+                    vx,
+                    vy,
+                    vw,
+                    vh,
+                );
+                note_edge_entry_fraction(entry);
                 state.set_where_input("driving");
                 let new_snap = state.snapshot();
                 let _ = app.emit("state-change", &new_snap);
@@ -4818,15 +5271,7 @@ fn run_linux_x11_capture_loop(
                 let take = WireMessage {
                     t: "kvm.take".to_string(),
                     v: Some(1),
-                    edge_at: Some(entry_fraction(
-                        &snap.layout.side,
-                        root_x as f64,
-                        root_y as f64,
-                        vx,
-                        vy,
-                        vw,
-                        vh,
-                    )),
+                    edge_at: Some(entry),
                     ..Default::default()
                 };
                 network.send_packet_sync(take);
@@ -4836,6 +5281,36 @@ fn run_linux_x11_capture_loop(
                 let _ = conn.flush();
                 last_x = park_x;
                 last_y = park_y;
+                prev_mask = mask;
+                prev_keys = keys;
+                continue;
+            }
+        } else if is_driven {
+            // A computer the other one is using gives control back as soon as its own
+            // mouse is touched. Without this the pointer stayed frozen for the whole
+            // time the other computer drove, with no way to take it back by hand.
+            if local_pointer_input {
+                log::info!("[KVM] Local mouse took control back from the other computer");
+                state.set_where_input("home");
+                crate::kvm::reset_pending_motion();
+                crate::fileclip::reset();
+                NativeInputInjector::release_all_keys();
+                // The pointer is standing on the seam the other computer left it
+                // on. Touching the mouse there is not a push back across it.
+                reset_edge_dwell();
+                edge_held_since = None;
+                let new_snap = state.snapshot();
+                let _ = app.emit("state-change", &new_snap);
+
+                let home_msg = WireMessage {
+                    t: "kvm.home".to_string(),
+                    v: Some(1),
+                    ..Default::default()
+                };
+                network.send_packet_sync(home_msg);
+
+                last_x = root_x;
+                last_y = root_y;
                 prev_mask = mask;
                 prev_keys = keys;
                 continue;
@@ -4870,20 +5345,27 @@ fn run_linux_x11_capture_loop(
                 };
                 network.send_packet_sync(home_msg);
 
-                let return_x = match snap.layout.side.as_str() {
-                    "right" => max_x - SEAM_INSET,
-                    "left" => vx + SEAM_INSET,
-                    _ => root_x,
-                };
-                let return_y = match snap.layout.side.as_str() {
-                    "top" => vy + SEAM_INSET,
-                    "bottom" => max_y - SEAM_INSET,
-                    _ => root_y,
-                };
+                // Back to the spot of the seam it left by, carried along by how far
+                // the hand has travelled — not the middle of the edge, which is where
+                // the parked pointer happens to sit while driving the other computer.
+                let (return_x, return_y) = seam_return_point(
+                    &snap.layout.side,
+                    edge_entry_fraction(),
+                    virtual_remote_x,
+                    virtual_remote_y,
+                    vx,
+                    vy,
+                    vw,
+                    vh,
+                    SEAM_INSET,
+                );
                 let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, return_x as i16, return_y as i16);
                 let _ = conn.flush();
                 last_x = return_x;
                 last_y = return_y;
+                // Standing on the seam it was left on is not a push back across it.
+                reset_edge_dwell();
+                edge_held_since = None;
                 prev_mask = mask;
                 prev_keys = keys;
                 continue;
@@ -5759,6 +6241,138 @@ mod tests {
 
         // Clock anomaly (now < last_injection) -> safe forward
         assert!(should_forward_captured_event(500, 1000));
+    }
+
+    #[test]
+    fn scroll_pixels_keep_their_speed_in_both_directions() {
+        // A notch is about ten pixels, and the sign has to survive the rounding:
+        // every negative delta used to collapse to a single line.
+        assert_eq!(scroll_lines_from_pixels(0.0), 0.0);
+        assert_eq!(scroll_lines_from_pixels(50.0), 5.0);
+        assert_eq!(scroll_lines_from_pixels(-50.0), -5.0);
+        assert_eq!(scroll_lines_from_pixels(-32.0), -3.0);
+        assert_eq!(scroll_lines_from_pixels(32.0), 3.0);
+        assert_eq!(scroll_lines_from_pixels(-160.0), -16.0);
+        // Never zero for a real movement, however small.
+        assert_eq!(scroll_lines_from_pixels(9.0), 1.0);
+        assert_eq!(scroll_lines_from_pixels(-9.0), -1.0);
+        assert_eq!(scroll_lines_from_pixels(-1.0), -1.0);
+        assert_eq!(scroll_lines_from_pixels(1.0), 1.0);
+    }
+
+    #[test]
+    fn coming_home_lands_where_the_handover_happened() {
+        // 1920x1080 at the origin, twelve pixels in from the seam.
+        let (x, y) = seam_return_point("left", 0.25, 0.0, 0.0, 0, 0, 1920, 1080, SEAM_INSET);
+        assert_eq!(x, SEAM_INSET);
+        assert_eq!(y, (0.25f64 * 1079.0).round() as i32);
+
+        // Entering at the very top must not come home in the middle of the edge,
+        // which is what reading the parked pointer's position used to do.
+        let (_, top) = seam_return_point("left", 0.0, 0.0, 0.0, 0, 0, 1920, 1080, SEAM_INSET);
+        assert_eq!(top, SEAM_INSET);
+
+        // Travel since the handover carries the pointer along the seam with it.
+        let (_, carried) =
+            seam_return_point("left", 0.4, 0.0, -120.0, 0, 0, 1920, 1080, SEAM_INSET);
+        assert_eq!(carried, 0.4f64.mul_add(1079.0, -120.0).round() as i32);
+
+        // ... but never off the screen.
+        let (_, clamped) =
+            seam_return_point("left", 0.5, 0.0, -5_000.0, 0, 0, 1920, 1080, SEAM_INSET);
+        assert_eq!(clamped, SEAM_INSET);
+
+        // The right seam is entered from the other side of the screen.
+        let (rx, ry) = seam_return_point("right", 0.0, 0.0, 0.0, 0, 0, 1920, 1080, SEAM_INSET);
+        assert_eq!(rx, 1920 - 1 - SEAM_INSET);
+        assert_eq!(ry, SEAM_INSET);
+
+        // A horizontal seam uses the horizontal position for the handover.
+        let (tx, ty) = seam_return_point("top", 0.5, 0.0, 0.0, 0, 0, 1920, 1080, SEAM_INSET);
+        assert_eq!(ty, SEAM_INSET);
+        assert_eq!(tx, (0.5f64 * 1919.0).round() as i32);
+    }
+
+    #[test]
+    fn a_hand_is_recognised_by_where_the_pointer_landed() {
+        // Nothing has been injected yet, so anything is a hand.
+        assert!(hand_moved_from_injection(
+            10.0,
+            10.0,
+            f64::NAN,
+            0.0,
+            HAND_MOVED_TOLERANCE_PX
+        ));
+        // The echo of a warp sits exactly where the pointer was put.
+        assert!(!hand_moved_from_injection(
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            HAND_MOVED_TOLERANCE_PX
+        ));
+        assert!(!hand_moved_from_injection(
+            11.0,
+            10.5,
+            10.0,
+            10.0,
+            HAND_MOVED_TOLERANCE_PX
+        ));
+        // A couple of pixels of real travel is a hand, even mid-stream.
+        assert!(hand_moved_from_injection(
+            12.5,
+            10.0,
+            10.0,
+            10.0,
+            HAND_MOVED_TOLERANCE_PX
+        ));
+        assert!(hand_moved_from_injection(
+            10.0,
+            300.0,
+            10.0,
+            10.0,
+            HAND_MOVED_TOLERANCE_PX
+        ));
+    }
+
+    #[test]
+    fn a_burst_starts_from_the_target_it_asked_for() {
+        // Windows has not processed the last move yet: the system still reports
+        // (100, 100) while the move asked for (104, 100). The next delta in the burst
+        // has to start at (104, 100), or four pixels of travel vanish each time.
+        assert_eq!(
+            relative_move_base((100.0, 100.0), Some((104.0, 100.0)), 3, 90),
+            (104.0, 100.0)
+        );
+        // Quiet for longer than the window: the hand may have moved the pointer, so
+        // the system's answer is the truth again.
+        assert_eq!(
+            relative_move_base((300.0, 300.0), Some((104.0, 100.0)), 400, 90),
+            (300.0, 300.0)
+        );
+        // Nothing injected yet.
+        assert_eq!(relative_move_base((5.0, 6.0), None, 0, 90), (5.0, 6.0));
+    }
+
+    #[test]
+    fn a_polled_edge_hold_needs_a_push_then_waits() {
+        let mut held: Option<u64> = None;
+        // Resting against the edge is not a push, however long it lasts.
+        assert!(!edge_hold_ready(true, false, 1_000, &mut held, 160));
+        assert!(!edge_hold_ready(true, false, 5_000, &mut held, 160));
+        assert!(held.is_none());
+        // A push starts the clock; nothing happens before the hold has passed.
+        assert!(!edge_hold_ready(true, true, 10_000, &mut held, 160));
+        assert!(!edge_hold_ready(true, true, 10_150, &mut held, 160));
+        assert!(held.is_some());
+        // Once the hold is over the crossing happens, even though the hand has
+        // stopped moving and the pointer is pinned to the edge.
+        assert!(edge_hold_ready(true, true, 10_175, &mut held, 160));
+        assert!(held.is_none());
+        // Leaving the edge clears a started hold.
+        assert!(!edge_hold_ready(true, true, 20_000, &mut held, 160));
+        assert!(!edge_hold_ready(false, true, 20_010, &mut held, 160));
+        assert!(held.is_none());
     }
 
     #[test]
