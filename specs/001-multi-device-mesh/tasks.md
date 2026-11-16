@@ -61,23 +61,23 @@ Rust core in `src-tauri/src/`, webview UI in `ui/`, phone companion in `android/
 
 ## Phase 4: US2 — Pointer and keyboard go where the screens are (P1)
 
-- [ ] T023 [P] [US2] Test: edge map normalisation matches `ui/shared/kvm-edges.js` (duplicate device on two sides keeps the first, in `left, right, top, bottom` order) in `src-tauri/src/mesh/edges.rs`
-- [ ] T024 [P] [US2] Test: a take with a route at or below the session's is ignored; a take with no answer within 1000 ms returns home (`src-tauri/src/mesh/session.rs`)
-- [ ] T025 [US2] Implement `src-tauri/src/mesh/edges.rs` (parse, normalise, persist helpers) and add `edges` to `layout.json` in `src-tauri/src/pairstore.rs`, preserving `side`/`along` — satisfies FR-006
-- [ ] T026 [US2] Add `assign_edge` command (`{side, deviceId}`) with duplicate rejection and state push in `src-tauri/src/commands.rs` — satisfies FR-006
-- [ ] T026a [US2] Test: pushing into an edge mapped to a disconnected or refusing device crosses nothing, shows the reason once, and does not retry (`src-tauri/src/kvm.rs` tests) — satisfies FR-014, FR-023
-- [ ] T027 [US2] Send `kvm.take {route, side, edge_at, mouse, keyboard}` and record `entryFraction` when a crossing is decided, in `src-tauri/src/kvm.rs` — satisfies FR-007, FR-008
-- [ ] T028 [US2] Handle `kvm.accept`, `kvm.refuse`, `kvm.release` inbound in `src-tauri/src/network.rs`: accept drives, refuse returns home and surfaces `lastRefusal`, release goes home — satisfies FR-013, FR-014
-- [ ] T029 [US2] Add the take timeout (1000 ms) and the "two devices take at once" resolution in `src-tauri/src/mesh/session.rs` + `src-tauri/src/kvm.rs` — satisfies edge case "two devices take"
-- [ ] T030 [US2] Route keyboard input to the partner session only, with the existing key mapping, in `src-tauri/src/kvm.rs` — satisfies FR-009
-- [ ] T031 [US2] Keep the dwell and resistance rules identical on all platforms for a mapped edge (reuse `edge_push_ready` / `edge_hold_ready`, no new boundary check) in `src-tauri/src/kvm.rs` — satisfies FR-007, FR-024
-- [ ] T032 [US2] Detect a driven device's pointer leaving a further mapped edge and send `kvm.next {route, to, side, edge_at}` in `src-tauri/src/kvm.rs` — satisfies FR-012
-- [ ] T033 [US2] Handle `kvm.next` as the driver: validate sender, `to`, and an existing session; `release` the current partner and `take` the next with the opposite side and mapped offset — satisfies FR-012
-- [ ] T034 [US2] Never send `kvm.next` to, or accept it from, a phone (OS check) in `src-tauri/src/mesh/session.rs` — satisfies FR-015
-- [ ] T035 [US2] Return home to `entryFraction` + travel (reuse `seam_return_point`) after a chain in `src-tauri/src/kvm.rs` — satisfies FR-010
-- [ ] T035a [US2] Local takeover while driven: clear `partner`/`route`, send `kvm.release` to the driver, and keep the per-session detail the single-peer path already has (`src-tauri/src/kvm.rs`) — satisfies FR-011
-- [ ] T036 [P] [US2] Integration test with three in-process fake sessions: take → next → release → unwind, asserting roles and routes at each step (`src-tauri/src/mesh/tests/chain.rs`) — satisfies SC-004
-- [ ] T037 [P] [US2] JS test: the edge picker shows each device on at most one side and persists (`ui/shared/test/edges-ui.js`)
+- [X] T023 [P] [US2] Test: edge map normalisation matches `ui/shared/kvm-edges.js` (duplicate device on two sides keeps the first, in `left, right, top, bottom` order) in `src-tauri/src/mesh/edges.rs`
+- [X] T024 [P] [US2] Test: a take with a route at or below the session's is ignored; a take with no answer within 1000 ms returns home (`src-tauri/src/mesh/session.rs`)
+- [X] T025 [US2] Implement `src-tauri/src/mesh/edges.rs` (parse, normalise, persist helpers) and add `edges` to `layout.json` in `src-tauri/src/pairstore.rs`, preserving `side`/`along` — satisfies FR-006
+- [X] T026 [US2] Add `assign_edge` command (`{side, deviceId}`) with duplicate rejection and state push in `src-tauri/src/commands.rs` — satisfies FR-006
+- [X] T026a [US2] Test: pushing into an edge mapped to a disconnected or refusing device crosses nothing, shows the reason once, and does not retry (`src-tauri/src/kvm.rs` tests) — satisfies FR-014, FR-023
+- [X] T027 [US2] Send `kvm.take {route, side, edge_at, mouse, keyboard}` and record `entryFraction` when a crossing is decided, in `src-tauri/src/kvm.rs` — satisfies FR-007, FR-008
+- [X] T028 [US2] Handle `kvm.accept`, `kvm.refuse`, `kvm.release` inbound in `src-tauri/src/network.rs`: accept drives, refuse returns home and surfaces `lastRefusal`, release goes home — satisfies FR-013, FR-014
+- [X] T029 [US2] Add the take timeout (1000 ms) and the "two devices take at once" resolution in `src-tauri/src/mesh/session.rs` + `src-tauri/src/kvm.rs` — satisfies edge case "two devices take"
+- [X] T030 [US2] Route keyboard input to the partner session only, with the existing key mapping, in `src-tauri/src/kvm.rs` — satisfies FR-009
+- [X] T031 [US2] Keep the dwell and resistance rules identical on all platforms for a mapped edge (reuse `edge_push_ready` / `edge_hold_ready`, no new boundary check) in `src-tauri/src/kvm.rs` — satisfies FR-007, FR-024
+- [X] T032 [US2] Detect a driven device's pointer leaving a further mapped edge and send `kvm.next {route, to, side, edge_at}` in `src-tauri/src/kvm.rs` — satisfies FR-012
+- [X] T033 [US2] Handle `kvm.next` as the driver: validate sender, `to`, and an existing session; `release` the current partner and `take` the next with the opposite side and mapped offset — satisfies FR-012
+- [X] T034 [US2] Never send `kvm.next` to, or accept it from, a phone (OS check) in `src-tauri/src/mesh/session.rs` — satisfies FR-015
+- [X] T035 [US2] Return home to `entryFraction` + travel (reuse `seam_return_point`) after a chain in `src-tauri/src/kvm.rs` — satisfies FR-010
+- [X] T035a [US2] Local takeover while driven: clear `partner`/`role` locally (`MeshState::local_takeover`), send `kvm.home` naming the route the driver used, and keep the per-session detail the single-peer path already has (all three capture loops in `src-tauri/src/kvm.rs`) — satisfies FR-011
+- [X] T036 [P] [US2] Integration test with three in-process fake sessions: take → next → release → unwind, asserting roles and routes at each step (`three_devices_hand_the_pointer_along_a_chain` in `src-tauri/src/state.rs`) — satisfies SC-004
+- [X] T037 [P] [US2] JS test: the edge picker shows each device on at most one side and persists (`ui/shared/test/edges-ui.js`)
 
 **Checkpoint**: a three-device chain can be crossed forward and back with no lost pointer and no double handover.
 

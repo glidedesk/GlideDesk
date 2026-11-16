@@ -12,6 +12,7 @@ a later reader needs.
 | Date | Build | `cargo test` | `npm test` | Android | CI run |
 |---|---|---|---|---|---|
 | 2026-11-16 | macOS aarch64, `npm run build:mac` | 263 pass | 23 suites pass | pass | not run (no `workflow` scope on the team token) |
+| 2026-11-16 | macOS aarch64, US2 (edges, handover, chain) | 295 pass | 24 suites pass | pass | not run (no `workflow` scope on the team token) |
 | | | | | | |
 
 ## Scenarios

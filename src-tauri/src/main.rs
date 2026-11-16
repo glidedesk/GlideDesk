@@ -206,6 +206,7 @@ fn main() {
             commands::refresh_found,
             commands::disconnect,
             commands::disconnect_device,
+            commands::assign_edge,
             commands::pair_respond,
             commands::set_app,
             commands::set_monitor,

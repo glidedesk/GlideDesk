@@ -353,6 +353,31 @@ pub fn check_edge_returned(side: &str, virtual_remote_x: f64, virtual_remote_y: 
     }
 }
 
+/// Set when a handover began without a local crossing (a chain), so the capture loops start
+/// counting the travel home from zero again for the device now being driven.
+static HANDOVER_RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Begin counting the travel home from a new handover's entry point.
+///
+/// A chain changes the device being driven without the pointer crossing this screen, so the travel
+/// counted for the previous handover would otherwise be read as a return the moment the new device's
+/// pointer comes back — the pointer would go home from somewhere it never left.
+pub fn begin_remote_handover(frac: f64) {
+    note_edge_entry_fraction(frac);
+    reset_edge_dwell();
+    HANDOVER_RESTART.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// True once after a chain began: a capture loop that keeps its own travel calls this and starts
+/// from zero.
+///
+/// Every platform keeps the travel home differently — the Windows and macOS hooks own statics, the
+/// Linux loop its locals — so all three ask this on their own thread rather than having the network
+/// thread write into another thread's state.
+pub fn take_handover_restart() -> bool {
+    HANDOVER_RESTART.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Where along the seam the pointer left when control was handed over.
 ///
 /// Kept here, not in the capture loops, because every platform needs the same answer
@@ -640,6 +665,54 @@ pub fn accumulate_motion(dx: f64, dy: f64) -> (i32, i32) {
 /// an old remainder does not nudge it after a jump.
 pub fn reset_pending_motion() {
     PENDING_MOTION.lock().reset();
+}
+
+/// Ask `target` for the pointer, and come home again if it does not answer.
+///
+/// One place sends a crossing, so all three platforms ask for the same thing in the same words.
+/// Returns the handover's route when the request went out, and `None` when the device is not
+/// connected: the caller crosses nowhere and says why once rather than leaving the pointer on a
+/// screen nobody is driving.
+///
+/// The take names its target (`d`), so a desk with ten devices wakes exactly one of them.
+fn request_pointer(
+    state: &AppState,
+    net: &NetworkManager,
+    app: &AppHandle,
+    target: &str,
+    side: &str,
+    edge_at: f64,
+    mouse: bool,
+) -> Option<u64> {
+    let route = state.begin_mesh_take(target)?;
+    let keyboard = state.inner.read().kvm.keyboard;
+    net.send_packet_to(
+        target,
+        crate::mesh::take_packet(route, side, edge_at, mouse, keyboard),
+    );
+    // A device that accepts nothing — asleep, gone, or busy on its own desk — must not leave this
+    // pointer on a screen that does not move. The answer normally arrives long before this fires.
+    arm_take_timeout(state, app);
+    Some(route)
+}
+
+/// Take the pointer back home if `kvm.accept` never arrives (`TAKE_TIMEOUT_MS`).
+fn arm_take_timeout(state: &AppState, app: &AppHandle) {
+    let state = state.clone();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(crate::mesh::TAKE_TIMEOUT_MS + 60));
+        if state.mesh_take_timeout() {
+            log::warn!(
+                "[Mesh] The other device did not answer; the pointer is home again"
+            );
+            reset_pending_motion();
+            reset_edge_dwell();
+            NativeInputInjector::keep_cursor_visible();
+            let snap = state.snapshot();
+            let _ = app.emit("state-change", &snap);
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -3369,18 +3442,36 @@ pub mod hook_engine {
 
         let entry = entry_fraction(side, pt.x as f64, pt.y as f64, vx, vy, vw, vh);
         note_edge_entry_fraction(entry);
-        state.set_where_input("driving");
+
+        // Which device this edge belongs to. With one device that is the pair's only other
+        // screen; with several it is the one the person placed on this side. A side that leads
+        // to a device which is gone crosses nothing and says so once (`FR-014`).
+        let target = match state.crossing_target(side) {
+            crate::mesh::CrossingTarget::Device(id) => id,
+            crate::mesh::CrossingTarget::Nobody => {
+                super::reset_edge_dwell();
+                return;
+            }
+            crate::mesh::CrossingTarget::Missing(id) => {
+                if state.note_crossing_refusal(&id, "not_connected") {
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
+                }
+                super::reset_edge_dwell();
+                return;
+            }
+        };
+        if request_pointer(state, net, app, &target, side, entry, true).is_none() {
+            if state.note_crossing_refusal(&target, "not_connected") {
+                let snap = state.snapshot();
+                let _ = app.emit("state-change", &snap);
+            }
+            super::reset_edge_dwell();
+            return;
+        }
         refresh_view_now();
         let new_snap = state.snapshot();
         let _ = app.emit("state-change", &new_snap);
-
-        let take = WireMessage {
-            t: "kvm.take".to_string(),
-            v: Some(1),
-            edge_at: Some(entry),
-            ..Default::default()
-        };
-        net.send_packet_sync(take);
 
         // The crossing event is swallowed, so the pointer never actually reached the
         // edge; move it to the middle of the desktop and count the next movement from
@@ -3814,7 +3905,13 @@ pub mod hook_engine {
                     && state.inner.read().input == "driven"
                 {
                     log::info!("[KVM] Local mouse took control back from the other computer");
+                    // Read the handover route before giving it up: it is the answer the device
+                    // that was driving compares against, and clearing the role would lose it.
+                    let route = state.mesh_end_route();
                     state.set_where_input("home");
+                    // Give up the mesh handover as well: the page stops saying "driven", and a
+                    // late packet from the device that was driving is no longer the person's input.
+                    state.mesh_local_takeover();
                     refresh_view_now();
                     crate::kvm::reset_pending_motion();
                     crate::fileclip::reset();
@@ -3826,6 +3923,7 @@ pub mod hook_engine {
                     let _ = app.emit("state-change", &new_snap);
                     let home = WireMessage {
                         t: "kvm.home".to_string(),
+                        route: Some(route),
                         v: Some(1),
                         ..Default::default()
                     };
@@ -3884,6 +3982,12 @@ pub mod hook_engine {
                     // Swallow and stream to peer
                     match msg {
                         WM_MOUSEMOVE => {
+                            if super::take_handover_restart() {
+                                // A chain began: count the travel home from the new handover's
+                                // entry point rather than the previous device's.
+                                VIRTUAL_REMOTE_X = 0.0;
+                                VIRTUAL_REMOTE_Y = 0.0;
+                            }
                             let dx = (m.pt.x - LAST_PT.x) as f64;
                             let dy = (m.pt.y - LAST_PT.y) as f64;
 
@@ -3899,6 +4003,10 @@ pub mod hook_engine {
                             if returned {
                                 log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", view.side, VIRTUAL_REMOTE_X);
                                 state.set_where_input("home");
+                                // The pointer came home by hand: give up the mesh handover here
+                                // too, so this device stops being "driving" and the other side is
+                                // told by the `kvm.home` below.
+                                state.mesh_local_takeover();
                                 refresh_view_now();
                                 NativeInputInjector::release_all_keys();
                                 let new_snap = state.snapshot();
@@ -3906,6 +4014,7 @@ pub mod hook_engine {
 
                                 let home_msg = WireMessage {
                                     t: "kvm.home".to_string(),
+                                    route: Some(state.mesh_end_route()),
                                     v: Some(1),
                                     ..Default::default()
                                 };
@@ -4055,6 +4164,7 @@ pub mod hook_engine {
 
                             let home_msg = WireMessage {
                                 t: "kvm.home".to_string(),
+                                route: Some(state.mesh_end_route()),
                                 v: Some(1),
                                 ..Default::default()
                             };
@@ -4614,7 +4724,13 @@ pub mod hook_engine {
                     here.y,
                     crate::kvm::injected_event_debug(event)
                 );
+                // Read the handover route before giving it up: it is the answer the device that
+                // was driving compares against, and clearing the role would lose it.
+                let route = state.mesh_end_route();
                 state.set_where_input("home");
+                // Give up the mesh handover as well: the page stops saying "driven", and a
+                // late packet from the device that was driving is no longer the person's input.
+                state.mesh_local_takeover();
                 crate::kvm::reset_pending_motion();
                 crate::fileclip::reset();
                 NativeInputInjector::release_all_keys();
@@ -4625,6 +4741,7 @@ pub mod hook_engine {
                 let _ = app.emit("state-change", &new_snap);
                 let home_msg = WireMessage {
                     t: "kvm.home".to_string(),
+                    route: Some(route),
                     v: Some(1),
                     ..Default::default()
                 };
@@ -4695,10 +4812,6 @@ pub mod hook_engine {
                             }));
                         }
 
-                        state.set_where_input("driving");
-                        let new_snap = state.snapshot();
-                        let _ = app.emit("state-change", &new_snap);
-
                         let entry = entry_fraction(
                             &snap.layout.side,
                             pt.x,
@@ -4709,13 +4822,37 @@ pub mod hook_engine {
                             vh,
                         );
                         note_edge_entry_fraction(entry);
-                        let take = WireMessage {
-                            t: "kvm.take".to_string(),
-                            v: Some(1),
-                            edge_at: Some(entry),
-                            ..Default::default()
+
+                        // The device on this side, or nothing to cross to. A side leading to a
+                        // device that is gone shows the reason once and leaves the pointer here.
+                        let side = snap.layout.side.clone();
+                        let target = match state.crossing_target(&side) {
+                            crate::mesh::CrossingTarget::Device(id) => id,
+                            crate::mesh::CrossingTarget::Nobody => {
+                                super::reset_edge_dwell();
+                                return event;
+                            }
+                            crate::mesh::CrossingTarget::Missing(id) => {
+                                if state.note_crossing_refusal(&id, "not_connected") {
+                                    let s = state.snapshot();
+                                    let _ = app.emit("state-change", &s);
+                                }
+                                super::reset_edge_dwell();
+                                return event;
+                            }
                         };
-                        net.send_packet_sync(take);
+                        if super::request_pointer(state, net, app, &target, &side, entry, true)
+                            .is_none()
+                        {
+                            if state.note_crossing_refusal(&target, "not_connected") {
+                                let s = state.snapshot();
+                                let _ = app.emit("state-change", &s);
+                            }
+                            super::reset_edge_dwell();
+                            return event;
+                        }
+                        let new_snap = state.snapshot();
+                        let _ = app.emit("state-change", &new_snap);
 
                         let park_pt = {
                             let (park_x, park_y) = super::drive_park_point(vx, vy, vw, vh);
@@ -4732,6 +4869,12 @@ pub mod hook_engine {
                     | kCGEventLeftMouseDragged
                     | kCGEventRightMouseDragged
                     | kCGEventOtherMouseDragged => {
+                        if super::take_handover_restart() {
+                            // A chain began: count the travel home from the new handover's entry
+                            // point rather than the previous device's.
+                            VIRTUAL_REMOTE_X = 0.0;
+                            VIRTUAL_REMOTE_Y = 0.0;
+                        }
                         let pt = CGEventGetLocation(event);
                         let dx = pt.x - LAST_PT.x;
                         let dy = pt.y - LAST_PT.y;
@@ -4744,12 +4887,16 @@ pub mod hook_engine {
                         if returned {
                             log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, VIRTUAL_REMOTE_X);
                             state.set_where_input("home");
+                            // Home by hand: give up the mesh handover here too, so the page stops
+                            // saying this device is driving and the other side is told below.
+                            state.mesh_local_takeover();
                             NativeInputInjector::release_all_keys();
                             let new_snap = state.snapshot();
                             let _ = app.emit("state-change", &new_snap);
 
                             let home_msg = WireMessage {
                                 t: "kvm.home".to_string(),
+                                route: Some(state.mesh_end_route()),
                                 v: Some(1),
                                 ..Default::default()
                             };
@@ -4898,6 +5045,7 @@ pub mod hook_engine {
 
                                 let home_msg = WireMessage {
                                     t: "kvm.home".to_string(),
+                                    route: Some(state.mesh_end_route()),
                                     v: Some(1),
                                     ..Default::default()
                                 };
@@ -4962,6 +5110,7 @@ pub mod hook_engine {
 
                             let home_msg = WireMessage {
                                 t: "kvm.home".to_string(),
+                                route: Some(state.mesh_end_route()),
                                 v: Some(1),
                                 ..Default::default()
                             };
@@ -5264,17 +5413,36 @@ fn run_linux_x11_capture_loop(
                     vh,
                 );
                 note_edge_entry_fraction(entry);
-                state.set_where_input("driving");
+                // The device on this side, or nothing to cross to (`FR-014`).
+                let side = snap.layout.side.clone();
+                let target = match state.crossing_target(&side) {
+                    crate::mesh::CrossingTarget::Device(id) => id,
+                    crate::mesh::CrossingTarget::Nobody => {
+                        reset_edge_dwell();
+                        edge_held_since = None;
+                        continue;
+                    }
+                    crate::mesh::CrossingTarget::Missing(id) => {
+                        if state.note_crossing_refusal(&id, "not_connected") {
+                            let s = state.snapshot();
+                            let _ = app.emit("state-change", &s);
+                        }
+                        reset_edge_dwell();
+                        edge_held_since = None;
+                        continue;
+                    }
+                };
+                if request_pointer(state, network, app, &target, &side, entry, true).is_none() {
+                    if state.note_crossing_refusal(&target, "not_connected") {
+                        let s = state.snapshot();
+                        let _ = app.emit("state-change", &s);
+                    }
+                    reset_edge_dwell();
+                    edge_held_since = None;
+                    continue;
+                }
                 let new_snap = state.snapshot();
                 let _ = app.emit("state-change", &new_snap);
-
-                let take = WireMessage {
-                    t: "kvm.take".to_string(),
-                    v: Some(1),
-                    edge_at: Some(entry),
-                    ..Default::default()
-                };
-                network.send_packet_sync(take);
 
                 let (park_x, park_y) = drive_park_point(vx, vy, vw, vh);
                 let _ = conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, park_x as i16, park_y as i16);
@@ -5291,7 +5459,13 @@ fn run_linux_x11_capture_loop(
             // time the other computer drove, with no way to take it back by hand.
             if local_pointer_input {
                 log::info!("[KVM] Local mouse took control back from the other computer");
+                // Read the handover route before giving it up: it is the answer the device that
+                // was driving compares against, and clearing the role would lose it.
+                let route = state.mesh_end_route();
                 state.set_where_input("home");
+                // Give up the mesh handover as well: the page stops saying "driven", and a
+                // late packet from the device that was driving is no longer the person's input.
+                state.mesh_local_takeover();
                 crate::kvm::reset_pending_motion();
                 crate::fileclip::reset();
                 NativeInputInjector::release_all_keys();
@@ -5304,6 +5478,7 @@ fn run_linux_x11_capture_loop(
 
                 let home_msg = WireMessage {
                     t: "kvm.home".to_string(),
+                    route: Some(route),
                     v: Some(1),
                     ..Default::default()
                 };
@@ -5316,6 +5491,12 @@ fn run_linux_x11_capture_loop(
                 continue;
             }
         } else if is_driving {
+            if take_handover_restart() {
+                // A chain began: the device being driven changed without a local crossing, so the
+                // travel home is counted from the new handover's entry point.
+                virtual_remote_x = 0.0;
+                virtual_remote_y = 0.0;
+            }
             if !has_peer {
                 log::info!("[KVM] Peer disconnected while driving; restoring home cursor");
                 state.set_where_input("home");
@@ -5334,12 +5515,16 @@ fn run_linux_x11_capture_loop(
             if returned {
                 log::info!("[KVM] Cursor returned back to home screen: side={}, virtual_x={:.1}", snap.layout.side, virtual_remote_x);
                 state.set_where_input("home");
+                // Home by hand: give up the mesh handover here too, so the page stops saying this
+                // device is driving and the other side is told by the `kvm.home` below.
+                state.mesh_local_takeover();
                 NativeInputInjector::release_all_keys();
                 let new_snap = state.snapshot();
                 let _ = app.emit("state-change", &new_snap);
 
                 let home_msg = WireMessage {
                     t: "kvm.home".to_string(),
+                    route: Some(state.mesh_end_route()),
                     v: Some(1),
                     ..Default::default()
                 };

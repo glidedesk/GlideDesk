@@ -133,6 +133,34 @@ pub struct MeshState {
     /// that is not linked to them directly can still be listed. Advisory: trust is `pairs.json`.
     #[serde(default)]
     pub known_links: Vec<String>,
+    /// The route the device driving this one is using. A take that does not advance it is a
+    /// duplicate and is ignored (reference: `peerRoute`).
+    #[serde(skip)]
+    pub peer_route: u64,
+    /// A take this device sent that has not been answered yet. Not serialised: it lasts one second.
+    #[serde(skip)]
+    pub pending: Option<PendingTake>,
+}
+
+/// A `kvm.take` this device sent and is waiting on (`KVM_TAKE_TIMEOUT_MS`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTake {
+    pub target: String,
+    pub route: u64,
+    /// Milliseconds since the epoch, for the timeout.
+    pub since: u64,
+}
+
+/// What to answer a `kvm.take` that arrived here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakeDecision {
+    /// A duplicate of the handover that is already in progress: answer nothing.
+    Ignore,
+    /// Refuse with this reason (`kvm.refuse {route, why}`).
+    Refuse(&'static str),
+    /// Take the pointer. `first` says whether this device was idle until now, which is when held
+    /// keys and buttons must be released before it starts receiving input.
+    Accept { first: bool },
 }
 
 fn home_mode() -> String {
@@ -150,6 +178,8 @@ impl Default for MeshState {
             sessions: Vec::new(),
             reckon: 0,
             known_links: Vec::new(),
+            peer_route: 0,
+            pending: None,
         }
     }
 }
@@ -162,6 +192,24 @@ impl MeshState {
 
     pub fn session_mut(&mut self, id: &str) -> Option<&mut MeshSession> {
         self.sessions.iter_mut().find(|s| s.id == id)
+    }
+
+    /// The session that a socket address belongs to.
+    ///
+    /// A packet says where it came from, not who. The `hello` that established the link is what
+    /// gave the device its id, and it is the id every role in here uses, so a handover arriving
+    /// from a socket has to be resolved back to it. Matches the full `ip:port` and the bare IP, the
+    /// two spellings the connection registry and older state use.
+    pub fn session_by_address(&self, address: &str) -> Option<&MeshSession> {
+        if address.is_empty() {
+            return None;
+        }
+        self.sessions.iter().find(|s| {
+            s.address.as_deref().map(|a| a == address
+                || a.split(':').next().map(|host| host == address).unwrap_or(false)
+                || address.split(':').next().map(|host| host == a).unwrap_or(false))
+                .unwrap_or(false)
+        })
     }
 
     /// Recompute `active` from the registry. Call after any change to `sessions`.
@@ -287,6 +335,164 @@ impl MeshState {
         self.sessions
             .iter()
             .any(|s| s.id == id && s.role == Role::Driven)
+    }
+
+    // ---- The handover, from the driver's side ------------------------------------------------
+
+    /// Record that this device is taking `target`, and wait for it to answer.
+    ///
+    /// The pointer is with the target from this moment, exactly as the single-peer app has always
+    /// done: the person's hand has already left the edge, and holding the input here until the
+    /// answer arrives would make the first movement land on the wrong screen. The answer only
+    /// decides whether the handover stays or goes home.
+    ///
+    /// Returns false when the target is not connected: a take towards a device this machine has no
+    /// session with can never be answered.
+    pub fn begin_take(&mut self, target: &str, route: u64, now: u64) -> bool {
+        if !self.set_partner(target, Role::Driving) {
+            return false;
+        }
+        self.route = self.route.max(route);
+        self.pending = Some(PendingTake {
+            target: target.to_string(),
+            route,
+            since: now,
+        });
+        true
+    }
+
+    /// The take still waiting for an answer, if any.
+    pub fn pending_take(&self) -> Option<&PendingTake> {
+        self.pending.as_ref()
+    }
+
+    /// `kvm.accept` from the device we took. Only the current take can be confirmed, so a late
+    /// answer to an older route cannot keep a handover alive that has already come home.
+    pub fn confirm_take(&mut self, from: &str, route: u64) -> bool {
+        match &self.pending {
+            Some(p) if p.target == from && p.route <= route => {
+                self.pending = None;
+                self.route = self.route.max(route);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `kvm.refuse` from the device we took: nobody is driving anything any more.
+    ///
+    /// Returns false for an answer to a take that is already settled, which is what stops a refusal
+    /// that arrives after the person went home by hand from taking the pointer away a second time.
+    pub fn refuse_take(&mut self, from: &str, route: u64) -> bool {
+        match &self.pending {
+            Some(p) if p.target == from && p.route <= route => {
+                self.pending = None;
+                self.clear_partner();
+                true
+            }
+            None => false,
+            Some(_) => false,
+        }
+    }
+
+    /// True when the take that is waiting has been waiting longer than `timeout_ms`.
+    ///
+    /// This is the reference's `KVM_TAKE_TIMEOUT_MS`: a device that does not answer (asleep, gone,
+    /// wedged) must not leave the pointer on a screen that does not move.
+    pub fn take_expired(&self, now: u64, timeout_ms: u64) -> bool {
+        match &self.pending {
+            Some(p) => now.saturating_sub(p.since) >= timeout_ms,
+            None => false,
+        }
+    }
+
+    /// The answer to give a `kvm.take` that arrived from `from` with `route`.
+    ///
+    /// The rules are the reference's, in its order, because the order is the reason no device is
+    /// ever left believing it has control it does not have:
+    ///
+    /// 1. A device that is already driving someone must answer "busy": its own pointer is not here.
+    /// 2. A device that is already driven refuses a second driver.
+    /// 3. A device the person has not allowed to drive it refuses.
+    /// 4. A take that does not advance the route already in use is a duplicate and is ignored.
+    ///
+    /// `allowed` is the person's "let the other computer drive this one", already combined with
+    /// whether input sharing is on. A refusal is always sent, never silence, so the other side goes
+    /// home at once instead of waiting for the timeout.
+    pub fn decide_take(&self, from: &str, route: u64, allowed: bool) -> TakeDecision {
+        match self.role.as_str() {
+            "driving" => return TakeDecision::Refuse("busy"),
+            "driven" => {
+                if self.partner.as_deref() != Some(from) {
+                    return TakeDecision::Refuse("busy");
+                }
+            }
+            _ => {}
+        }
+        if !allowed {
+            return TakeDecision::Refuse("not_allowed");
+        }
+        if self.role == "driven" && route <= self.peer_route {
+            return TakeDecision::Ignore;
+        }
+        TakeDecision::Accept {
+            first: self.role != "driven",
+        }
+    }
+
+    /// Take the pointer because `from` asked for it (`decide_take` said `Accept`).
+    pub fn accept_take(&mut self, from: &str, route: u64) -> bool {
+        if !self.set_partner(from, Role::Driven) {
+            return false;
+        }
+        self.peer_route = self.peer_route.max(route);
+        true
+    }
+
+    /// `kvm.release`: the device driving this one is done, so this device goes home.
+    pub fn release(&mut self, from: &str, route: u64) -> bool {
+        if self.role != "driven" || self.partner.as_deref() != Some(from) {
+            return false;
+        }
+        if route < self.peer_route {
+            return false;
+        }
+        self.clear_partner();
+        true
+    }
+
+    /// `kvm.home` from the device being driven: the person there took control back, so the device
+    /// that was driving is not driving any more either.
+    ///
+    /// Only the device we took can do this, and only for the handover in progress: a late message
+    /// from a device that was driven a while ago must not take the pointer away from the device
+    /// driving now.
+    pub fn home_from_driven(&mut self, from: &str, route: u64) -> bool {
+        if self.role != "driving" || self.partner.as_deref() != Some(from) {
+            return false;
+        }
+        if route < self.route {
+            return false;
+        }
+        self.pending = None;
+        self.clear_partner();
+        true
+    }
+
+    /// The person at this device took control back by hand (`FR-011`).
+    ///
+    /// The device that was driving is told separately (`kvm.home`, which it answers by going home
+    /// too); this is the local half: the role, the partner and any take still waiting go, so the
+    /// page stops saying "driven" and nothing arriving late is accepted as input the person no
+    /// longer wants. The route counter is not reset: it only ever grows, and a stale message must
+    /// still be recognisable as stale.
+    pub fn local_takeover(&mut self) -> bool {
+        if self.role == "home" && self.partner.is_none() && self.pending.is_none() {
+            return false;
+        }
+        self.pending = None;
+        self.clear_partner();
+        true
     }
 }
 
@@ -441,4 +647,149 @@ mod tests {
         assert!(m.remove("192.168.4.11"));
         assert!(m.sessions.is_empty());
     }
+    fn mesh_with(ids: &[&str]) -> MeshState {
+        let mut m = MeshState::default();
+        for id in ids {
+            m.upsert(session(id), "me");
+        }
+        m
+    }
+
+    /// US2: a take that does not advance the route is a duplicate, and a take that is not answered
+    /// goes home after 1000 ms.
+    #[test]
+    fn a_take_that_does_not_advance_the_route_is_ignored() {
+        let mut m = mesh_with(&["a", "b"]);
+        // The first take is accepted whatever its route: there is no handover to compare with.
+        assert_eq!(
+            m.decide_take("a", 3, true),
+            TakeDecision::Accept { first: true }
+        );
+        assert!(m.accept_take("a", 3));
+
+        // From then on, only a route that moves forward is a new handover. The same one, or an
+        // older one arriving late, is a duplicate and gets no answer at all.
+        assert_eq!(m.decide_take("a", 3, true), TakeDecision::Ignore);
+        assert_eq!(m.decide_take("a", 2, true), TakeDecision::Ignore);
+        assert_eq!(
+            m.decide_take("a", 4, true),
+            TakeDecision::Accept { first: false }
+        );
+    }
+
+    #[test]
+    fn a_take_with_no_answer_returns_home() {
+        let mut m = mesh_with(&["a", "b"]);
+        assert!(m.begin_take("a", 1, 10_000));
+        assert_eq!(m.partner.as_deref(), Some("a"));
+        assert_eq!(m.role, "driving");
+        assert!(!m.take_expired(10_999, super::super::TAKE_TIMEOUT_MS));
+        assert!(m.take_expired(11_000, super::super::TAKE_TIMEOUT_MS));
+
+        // The answered take is not expired, whatever the clock says.
+        assert!(m.confirm_take("a", 1));
+        assert!(m.pending_take().is_none());
+        assert!(!m.take_expired(99_999, super::super::TAKE_TIMEOUT_MS));
+        assert_eq!(m.role, "driving", "an accepted take keeps the pointer there");
+    }
+
+    #[test]
+    fn a_refusal_after_going_home_changes_nothing() {
+        let mut m = mesh_with(&["a", "b"]);
+        assert!(m.begin_take("a", 1, 0));
+        assert!(m.refuse_take("a", 1));
+        assert_eq!(m.role, "home");
+
+        // A second refusal, or one for a take that never existed, is not a second handover.
+        assert!(!m.refuse_take("a", 1));
+        assert!(!m.refuse_take("b", 9));
+        assert_eq!(m.role, "home");
+    }
+
+    #[test]
+    fn two_devices_cannot_take_at_once() {
+        let mut m = mesh_with(&["a", "b", "c"]);
+
+        // This device is driving a: another take is refused, because its pointer is not here.
+        assert!(m.begin_take("a", 1, 0));
+        assert_eq!(m.decide_take("b", 1, true), TakeDecision::Refuse("busy"));
+
+        // Driven by b: a second driver is refused, and b's own duplicate is ignored.
+        m.clear_partner();
+        assert!(m.accept_take("b", 5));
+        assert_eq!(m.role, "driven");
+        assert_eq!(m.decide_take("c", 1, true), TakeDecision::Refuse("busy"));
+        assert_eq!(m.decide_take("b", 5, true), TakeDecision::Ignore);
+        // A refresh from the same driver on a newer route is accepted.
+        assert_eq!(
+            m.decide_take("b", 6, true),
+            TakeDecision::Accept { first: false }
+        );
+    }
+
+    #[test]
+    fn a_device_that_does_not_allow_it_refuses() {
+        let mut m = mesh_with(&["a", "b"]);
+        assert_eq!(
+            m.decide_take("a", 1, false),
+            TakeDecision::Refuse("not_allowed")
+        );
+        assert!(m.accept_take("a", 1));
+        // The refusal codes are the ones the wire carries (`contracts/wire.md`, `why`).
+        assert_eq!(
+            m.decide_take("b", 1, true),
+            TakeDecision::Refuse("busy"),
+            "a device that is already driven cannot be driven by a second one"
+        );
+    }
+
+    #[test]
+    fn release_returns_home_only_for_the_device_driving_this_one() {
+        let mut m = mesh_with(&["a", "b"]);
+        assert!(m.accept_take("a", 7));
+        assert!(!m.release("b", 7), "only the driver ends its own handover");
+        assert_eq!(m.role, "driven");
+        assert!(!m.release("a", 6), "an older route cannot end a newer handover");
+        assert!(m.release("a", 7));
+        assert_eq!(m.role, "home");
+        assert!(m.partner.is_none());
+    }
+
+    /// `FR-011`: the person at a driven device takes control back by hand. The device that was
+    /// driving is told, and here nothing is left believing this device is still driven.
+    #[test]
+    fn taking_control_back_by_hand_gives_up_the_handover() {
+        let mut m = mesh_with(&["a", "b"]);
+        assert!(m.accept_take("a", 4));
+        assert_eq!(m.role, "driven");
+        assert!(m.is_driven_by("a"));
+
+        assert!(m.local_takeover());
+        assert_eq!(m.role, "home");
+        assert!(m.partner.is_none());
+        assert!(!m.is_driven_by("a"));
+        // The route counter keeps its place, so a late take from the old handover is still
+        // recognisable as the one that already ended.
+        assert_eq!(m.peer_route, 4);
+
+        // Nothing to give up is not a change.
+        assert!(!m.local_takeover());
+
+        // A take still waiting is given up too: a crossing the person cancelled by hand must not
+        // be answered a second later and pull the pointer away.
+        assert!(m.begin_take("b", 9, 0));
+        assert!(m.pending_take().is_some());
+        assert!(m.local_takeover());
+        assert!(m.pending_take().is_none());
+        assert_eq!(m.role, "home");
+    }
+
+    #[test]
+    fn a_take_towards_a_device_that_is_not_connected_cannot_start() {
+        let mut m = mesh_with(&["a"]);
+        assert!(!m.begin_take("gone", 1, 0));
+        assert_eq!(m.role, "home");
+        assert!(m.pending_take().is_none());
+    }
+
 }

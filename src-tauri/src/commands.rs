@@ -122,7 +122,8 @@ pub fn set_layout(side: String, along: Option<f64>, state: State<'_, AppState>, 
         s.layout.along = along_val;
         s.kvm.pc_side = Some(opp.to_string());
     }
-    crate::pairstore::save_layout(&side, along_val);
+    let edges = state.inner.read().layout.edges.clone();
+    crate::pairstore::save_layout(&side, along_val, &edges);
     push_state(&app, &state);
 
     // The other computer flips this to work out where we sit on its screen, so send the
@@ -1117,6 +1118,18 @@ pub async fn disconnect_device(
     Ok(())
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub fn assign_edge(
+    side: String,
+    device_id: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<crate::mesh::Edges, String> {
+    let edges = state.assign_edge(&side, device_id.as_deref())?;
+    push_state(&app, &state);
+    Ok(edges)
+}
+
 #[tauri::command]
 pub async fn pair_respond(allowed: bool, network: State<'_, NetworkManager>) -> Result<(), String> {
     log::info!("Pair response: allowed = {}", allowed);
@@ -1288,12 +1301,27 @@ pub async fn cancel_pair(network: State<'_, NetworkManager>) -> Result<(), Strin
     network.cancel_pair().await
 }
 
+/// Forget the paired computer: the pairing, and every screen edge that pointed at it.
+///
+/// An edge that leads to a device this app no longer trusts would send the pointer to a screen that
+/// cannot be driven, so it goes with the pairing. Forgetting wins over anything a peer suggests
+/// (`contracts/state-and-ui.md`): the roster can add a route, never a trust.
 #[tauri::command]
-pub fn forget(_id: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    {
+pub fn forget(id: String, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    let edges = {
         let mut s = state.inner.write();
         s.paired = None;
-    }
+        let edges = s.layout.edges.clear_peer(&id);
+        s.layout.edges = edges.clone();
+        s.mesh.remove(&id);
+        s.clients.retain(|p| p.id != id && p.address.as_deref() != Some(id.as_str()));
+        edges
+    };
+    let (seam, along) = {
+        let s = state.inner.read();
+        (s.layout.side.clone(), s.layout.along)
+    };
+    crate::pairstore::save_layout(&seam, along, &edges);
     state.persist_pairs();
     push_state(&app, &state);
     Ok(())

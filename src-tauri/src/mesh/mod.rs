@@ -16,13 +16,15 @@
 //! * **Clipboard** — the pooled clipboard: newest copy wins (`clip.rs`).
 //! * **Roster** — who is connected to whom, so a crossing can chain (`roster.rs`).
 
+pub mod chain;
 pub mod clip;
 pub mod edges;
 pub mod pool;
 pub mod roster;
 pub mod session;
 
-pub use session::{MeshSession, MeshState, Role};
+pub use edges::Edges;
+pub use session::{MeshSession, MeshState, Role, TakeDecision};
 
 /// Most devices that can be connected at once, this one included in the count of the others.
 /// The reference promises ten (`protocol.js`: `MAX_DEVICES`), and `docs/mesh.md` documents it.
@@ -64,6 +66,68 @@ pub fn opposite(side: &str) -> Option<&'static str> {
         "top" => Some("bottom"),
         "bottom" => Some("top"),
         _ => None,
+    }
+}
+
+/// Who the pointer should cross to when it leaves this screen on a side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrossingTarget {
+    /// This device, by the id the mesh knows it by.
+    Device(String),
+    /// This side leads nowhere. With one device connected that is the quiet answer; with several
+    /// it means the side was never assigned, and the pointer simply stays.
+    Nobody,
+    /// This side is assigned to a device that is not connected any more. The person is told once,
+    /// by name, instead of the edge doing nothing at all (`FR-014`).
+    Missing(String),
+}
+
+/// Whether a `kvm.next` may hand the pointer on from one device to another.
+///
+/// A phone ends a chain rather than extending it (it has no edges of its own), a device cannot hand
+/// the pointer back to itself or to the machine holding it, and the side it says it left on has to
+/// be a side of a screen. Violations end the chain where it stands: nothing is released, nothing is
+/// retried, so a malformed or malicious hop cannot move the pointer onto a screen the person did
+/// not reach (`FR-014`).
+pub fn chain_allowed(
+    from: &str,
+    to: &str,
+    local_id: &str,
+    side: Option<&str>,
+    from_is_phone: bool,
+    target_connected: bool,
+) -> bool {
+    !from_is_phone
+        && !to.is_empty()
+        && to != from
+        && !to.eq_ignore_ascii_case(local_id)
+        && side.map(is_side).unwrap_or(false)
+        && target_connected
+}
+
+/// The `kvm.take` this device sends when the pointer crosses a side.
+///
+/// One place builds it, so the three platforms ask for the same handover in the same words.
+/// `mouse: false` is a keyboard-only handover: the receiver accepts it with its keyboard sharing
+/// on, places no pointer, and the pointer here never left.
+pub fn take_packet(
+    route: u64,
+    side: &str,
+    edge_at: f64,
+    mouse: bool,
+    keyboard: bool,
+) -> crate::network::WireMessage {
+    crate::network::WireMessage {
+        t: "kvm.take".to_string(),
+        v: Some(1),
+        route: Some(route),
+        // The side this pointer left on. The device entered sees it on the opposite side, and
+        // places its pointer there, at the same fraction along it.
+        side: Some(side.to_string()),
+        edge_at: Some(edge_at),
+        mouse: Some(mouse),
+        keyboard: Some(keyboard),
+        ..Default::default()
     }
 }
 
@@ -160,6 +224,63 @@ mod tests {
         }
         assert_eq!(opposite("middle"), None);
         assert!(!is_side(""));
+    }
+
+    /// The crossing a build with one device sends must stay the packet it always was, even though
+    /// the same helper now builds the mesh handover too (`contracts/wire.md`, rule 2).
+    #[test]
+    fn a_crossing_with_one_device_is_the_packet_it_always_was() {
+        let mut pkt = take_packet(4, "right", 0.4213, true, true);
+        // Active: the handover names its route, the side it left on, and what travels with it.
+        let live = serde_json::to_value(&pkt).expect("serialize take");
+        assert_eq!(live["route"], 4);
+        assert_eq!(live["side"], "right");
+        assert_eq!(live["edgeAt"], 0.4213);
+        assert_eq!(live["mouse"], true);
+        assert_eq!(live["keyboard"], true);
+
+        // Dormant: byte for byte the packet the previous release sent.
+        strip_if_dormant(&mut pkt, mesh_active(1));
+        let legacy = crate::network::WireMessage {
+            t: "kvm.take".to_string(),
+            v: Some(1),
+            side: Some("right".to_string()),
+            edge_at: Some(0.4213),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&pkt).expect("serialize take"),
+            serde_json::to_string(&legacy).expect("serialize legacy take"),
+            "one device must not see a single new field"
+        );
+    }
+
+    #[test]
+    fn a_handover_names_the_side_it_left_on_so_the_other_side_can_place_the_pointer() {
+        let pkt = take_packet(1, "bottom", 0.25, true, false);
+        assert_eq!(pkt.mouse, Some(true));
+        assert_eq!(pkt.keyboard, Some(false), "the person's keyboard setting travels with it");
+        // The receiver places at the opposite of the side this pointer left on.
+        assert_eq!(opposite(pkt.side.as_deref().unwrap()), Some("top"));
+    }
+
+    /// `FR-014` and the phone rule: a chain ends at a phone, cannot point at itself or at the
+    /// machine holding the pointer, and cannot name a device that is not connected.
+    #[test]
+    fn a_chain_only_goes_to_a_real_device_that_is_not_a_phone() {
+        assert!(chain_allowed("laptop", "phone", "me", Some("right"), false, true));
+        assert!(!chain_allowed("phone", "laptop", "me", Some("right"), true, true),
+            "a phone has no edges of its own, so it ends a chain");
+        assert!(!chain_allowed("laptop", "laptop", "me", Some("right"), false, true),
+            "a device cannot hand the pointer to itself");
+        assert!(!chain_allowed("laptop", "ME", "me", Some("right"), false, true),
+            "the machine holding the pointer is not a hop");
+        assert!(!chain_allowed("laptop", "tablet", "me", None, false, true),
+            "a hop has to say which side it left on");
+        assert!(!chain_allowed("laptop", "tablet", "me", Some("diagonal"), false, true));
+        assert!(!chain_allowed("laptop", "tablet", "me", Some("right"), false, false),
+            "a device that is not connected is not somewhere the pointer can go");
+        assert!(!chain_allowed("laptop", "", "me", Some("right"), false, true));
     }
 
     #[test]

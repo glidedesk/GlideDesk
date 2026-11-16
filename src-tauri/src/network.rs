@@ -1024,6 +1024,39 @@ pub fn addressed_to_local(pkt: &WireMessage, local_id: &str, local_addrs: &[Stri
     })
 }
 
+/// Types that carry live input, and therefore belong to whichever device is holding the pointer.
+///
+/// While a handover is in progress these go to the partner and nowhere else. The distinction is
+/// invisible with two devices — the partner is the only session — and is what stops a keystroke
+/// from typing on three desks at once once there are more.
+///
+/// `kvm.take` and `kvm.next` are deliberately absent: they name the device they are for, and that
+/// device is not the partner yet.
+pub fn is_input_packet(t: &str) -> bool {
+    matches!(
+        t,
+        "k.mm" | "remote.mm"
+            | "k.md"
+            | "remote.md"
+            | "k.mu"
+            | "remote.mu"
+            | "k.wh"
+            | "remote.wh"
+            | "k.kd"
+            | "remote.kd"
+            | "k.ku"
+            | "remote.ku"
+            | "k.gesture"
+            | "k.caps"
+            | "kvm.caps"
+            | "kvm.lock"
+            | "kvm.home"
+            | "kvm.release"
+            | "kvm.accept"
+            | "kvm.refuse"
+    )
+}
+
 /// Types that carry input or a handover for exactly one device: this one, or nobody.
 ///
 /// With two devices the distinction is invisible, because the only session is also the target. With
@@ -1927,7 +1960,11 @@ impl MeshServer {
                                 s.layout.side = new_side.to_string();
                                 s.kvm.pc_side = Some(peer_side.clone());
                             }
-                            crate::pairstore::save_layout(new_side, state.inner.read().layout.along);
+                            let (along, edges) = {
+                                let s = state.inner.read();
+                                (s.layout.along, s.layout.edges.clone())
+                            };
+                            crate::pairstore::save_layout(new_side, along, &edges);
                             // Tell the other computer where we ended up, so both agree.
                             let (sw, sh) = crate::kvm::virtual_desktop_size();
                             let sync = WireMessage {
@@ -2455,6 +2492,51 @@ impl MeshServer {
                     if ix != 0 || iy != 0 {
                         crate::kvm::NativeInputInjector::move_cursor_relative(ix, iy);
                     }
+                    // A chain: the pointer this device was handed walks off its own screen, and
+                    // another device is on that side. The device driving this one is asked to
+                    // take that device instead; this one does not drive anything itself.
+                    if let Some((side, frac)) =
+                        crate::mesh::chain::apply(crate::kvm::virtual_desktop_size(), dx, dy)
+                    {
+                        let from = {
+                            let pid = peer_id_holder.read().clone();
+                            state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                        };
+                        let driven_by_them = {
+                            let s = state.inner.read();
+                            s.mesh.is_driven_by(&from)
+                        };
+                        if driven_by_them {
+                            if let crate::mesh::CrossingTarget::Device(to) =
+                                state.crossing_target(side)
+                            {
+                                // The device driving us is the one we came from: leaving towards
+                                // it is a return, which it notices from its own movement.
+                                if to != from {
+                                    let route = state.inner.read().mesh.peer_route;
+                                    log::info!(
+                                        "[Mesh] The pointer left on our {} towards {}; asking {} to take it",
+                                        side,
+                                        to,
+                                        from
+                                    );
+                                    let _ = out_tx
+                                        .send(WireMessage {
+                                            t: "kvm.next".to_string(),
+                                            v: Some(1),
+                                            route: Some(route),
+                                            to: Some(to),
+                                            side: Some(side.to_string()),
+                                            edge_at: Some(frac),
+                                            d: Some(vec![from.clone()]),
+                                            ..Default::default()
+                                        })
+                                        .await;
+                                    crate::mesh::chain::reset();
+                                }
+                            }
+                        }
+                    }
                 }
             }
             "k.md" | "remote.md" => {
@@ -2714,50 +2796,357 @@ impl MeshServer {
                 // direction, and the overall link must all be on. Otherwise say so, so
                 // the other computer hands control straight back instead of hiding its
                 // pointer on a screen nobody is driving.
-                let (accepted, driving_now) = {
+                // A take with no `route` comes from a build without the mesh: it gets the
+                // exact answer it has always had.
+                let from = {
+                    let pid = peer_id_holder.read().clone();
+                    state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                };
+                let keyboard_only = pkt.mouse == Some(false);
+                let (accepted, driving_now, linked, be_driven, keyboard) = {
                     let s = state.inner.read();
                     (
                         s.kvm.mouse && s.kvm.linked && s.kvm.be_driven,
                         s.input == "driving",
+                        s.kvm.linked,
+                        s.kvm.be_driven,
+                        s.kvm.keyboard,
                     )
                 };
-                if driving_now {
-                    // Both computers reached across at the same moment. The one already
-                    // driving keeps control and the other goes home, so the pair cannot
-                    // end up each waiting for the other with neither taking input.
-                    log::info!("[KVM] Ignored the other computer's pointer: this computer is already driving it");
-                    let home = WireMessage {
-                        t: "kvm.home".to_string(),
-                        v: Some(1),
-                        ..Default::default()
-                    };
-                    let _ = out_tx.send(home).await;
-                } else if !accepted {
-                    log::info!("[KVM] Refused the other computer's pointer: cursor sharing is off here");
-                    let home = WireMessage {
-                        t: "kvm.home".to_string(),
-                        v: Some(1),
-                        ..Default::default()
-                    };
-                    let _ = out_tx.send(home).await;
+                if pkt.route.is_none() {
+                    if driving_now {
+                        // Both computers reached across at the same moment. The one already
+                        // driving keeps control and the other goes home, so the pair cannot
+                        // end up each waiting for the other with neither taking input.
+                        log::info!("[KVM] Ignored the other computer's pointer: this computer is already driving it");
+                        let home = WireMessage {
+                            t: "kvm.home".to_string(),
+                            v: Some(1),
+                            ..Default::default()
+                        };
+                        let _ = out_tx.send(home).await;
+                    } else if !accepted {
+                        log::info!("[KVM] Refused the other computer's pointer: cursor sharing is off here");
+                        let home = WireMessage {
+                            t: "kvm.home".to_string(),
+                            v: Some(1),
+                            ..Default::default()
+                        };
+                        let _ = out_tx.send(home).await;
+                    } else {
+                        state.set_where_input("driven");
+                        // The other computer counts movement from the edge it crossed and
+                        // gives control back when the movement returns to that point, so
+                        // this pointer has to start there too. Any fraction left over from
+                        // an earlier move must not nudge it off that point.
+                        crate::kvm::reset_pending_motion();
+                        let snap = state.snapshot();
+                        crate::kvm::NativeInputInjector::place_cursor_at_entry_edge(
+                            &snap.layout.side,
+                            pkt.edge_at.unwrap_or(0.5),
+                        );
+                        let _ = app.emit("state-change", &snap);
+                    }
                 } else {
-                    state.set_where_input("driven");
-                    // The other computer counts movement from the edge it crossed and
-                    // gives control back when the movement returns to that point, so
-                    // this pointer has to start there too. Any fraction left over from
-                    // an earlier move must not nudge it off that point.
-                    crate::kvm::reset_pending_motion();
-                    let snap = state.snapshot();
-                    crate::kvm::NativeInputInjector::place_cursor_at_entry_edge(
-                        &snap.layout.side,
-                        pkt.edge_at.unwrap_or(0.5),
+                    let route = pkt.route.unwrap_or(0);
+                    // A keyboard-only handover needs keyboard sharing, not cursor sharing: the
+                    // person asked to carry the keyboard, and refused only when that is off.
+                    let allowed = linked && be_driven && if keyboard_only { keyboard } else { accepted };
+                    match state.decide_mesh_take(&from, route, allowed) {
+                        crate::mesh::TakeDecision::Ignore => {
+                            log::debug!(
+                                "[Mesh] Ignoring a duplicate take from {} (route {})",
+                                from,
+                                route
+                            );
+                        }
+                        crate::mesh::TakeDecision::Refuse(why) => {
+                            let name = {
+                                let s = state.inner.read();
+                                s.mesh
+                                    .session(&from)
+                                    .map(|m| m.name.clone())
+                                    .unwrap_or_else(|| from.clone())
+                            };
+                            log::info!(
+                                "[Mesh] Refusing the pointer from {}: {} (route {})",
+                                name,
+                                why,
+                                route
+                            );
+                            // Say why here as well, so the person at this desk can see what was
+                            // turned away instead of the pointer silently staying put.
+                            {
+                                let mut s = state.inner.write();
+                                s.mesh.refusal(&from, why);
+                                s.link.message = Some(crate::mesh::refusal_text(why, &name));
+                            }
+                            let _ = out_tx
+                                .send(WireMessage {
+                                    t: "kvm.refuse".to_string(),
+                                    v: Some(1),
+                                    route: Some(route),
+                                    why: Some(why.to_string()),
+                                    message: Some(crate::mesh::refusal_text(why, &name)),
+                                    d: Some(vec![from.clone()]),
+                                    ..Default::default()
+                                })
+                                .await;
+                            let snap = state.snapshot();
+                            let _ = app.emit("state-change", &snap);
+                        }
+                        crate::mesh::TakeDecision::Accept { first } => {
+                            state.accept_mesh_take(&from, route);
+                            if first {
+                                // Nothing held on the old screen may be held here: a Shift left
+                                // down over there would turn the next click into a selection.
+                                crate::fileclip::reset();
+                                crate::kvm::NativeInputInjector::release_all_keys();
+                            }
+                            // Movement counts from the edge the other computer crossed, so the
+                            // pointer starts on the facing edge, at the same point along it.
+                            crate::kvm::reset_pending_motion();
+                            let snap = state.snapshot();
+                            let place_side = pkt
+                                .side
+                                .as_deref()
+                                .and_then(crate::mesh::opposite)
+                                .unwrap_or(snap.layout.side.as_str());
+                            if !keyboard_only {
+                                crate::kvm::NativeInputInjector::place_cursor_at_entry_edge(
+                                    place_side,
+                                    pkt.edge_at.unwrap_or(0.5),
+                                );
+                                // Track the pointer from this point on, so a hand that keeps going
+                                // can carry on into a device beyond this one (`mesh::chain`).
+                                crate::mesh::chain::place(
+                                    crate::kvm::virtual_desktop_size(),
+                                    place_side,
+                                    pkt.edge_at.unwrap_or(0.5),
+                                );
+                            } else {
+                                // A keyboard-only handover placed no pointer: nothing to track.
+                                crate::mesh::chain::reset();
+                            }
+                            log::info!(
+                                "[Mesh] Taking the pointer from {} on our {} (route {})",
+                                from,
+                                place_side,
+                                route
+                            );
+                            let _ = out_tx
+                                .send(WireMessage {
+                                    t: "kvm.accept".to_string(),
+                                    v: Some(1),
+                                    route: Some(route),
+                                    d: Some(vec![from.clone()]),
+                                    ..Default::default()
+                                })
+                                .await;
+                            let _ = app.emit("state-change", &snap);
+                        }
+                    }
+                }
+            }
+            "kvm.next" => {
+                // A device this one drives reached its own edge and found another device there.
+                // It does not drive that one itself: it hands the input back, and the device
+                // holding the pointer (this one) takes the next device in the chain.
+                //
+                // Everything is checked before anything moves. A `to` that is not connected, is
+                // the sender, is this machine, or is not a device this app is allowed to drive
+                // ends the chain where it stands: nothing is released, nothing is retried.
+                let from = {
+                    let pid = peer_id_holder.read().clone();
+                    state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                };
+                let route = pkt.route.unwrap_or(0);
+                let to = pkt.to.clone().unwrap_or_default();
+                let side = pkt.side.clone().filter(|s| crate::mesh::is_side(s));
+                let (ours, from_is_phone, locked, keyboard, mouse) = {
+                    let s = state.inner.read();
+                    (
+                        s.mesh.role == "driving"
+                            && s.mesh.partner.as_deref() == Some(from.as_str())
+                            && s.mesh.route <= route,
+                        s.mesh.session(&from).map(|m| m.is_phone()).unwrap_or(false),
+                        s.kvm.locked,
+                        s.kvm.keyboard,
+                        s.kvm.mouse,
+                    )
+                };
+                let target_connected = {
+                    let s = state.inner.read();
+                    s.mesh.session(&to).is_some()
+                };
+                if !ours {
+                    log::debug!(
+                        "[Mesh] Ignoring kvm.next from {}: this machine is not driving it",
+                        from
                     );
+                } else if !crate::mesh::chain_allowed(
+                    &from,
+                    &to,
+                    local_id,
+                    side.as_deref(),
+                    from_is_phone,
+                    target_connected,
+                ) {
+                    log::debug!(
+                        "[Mesh] Ignoring kvm.next from {}: '{}' is not a device it can chain to",
+                        from,
+                        to
+                    );
+                } else if locked || !mouse || !keyboard {
+                    // The person has sharing switched off here; a chain is still sharing.
+                    log::debug!("[Mesh] Not chaining past {}: sharing is off here", from);
+                } else {
+                    let side = side.unwrap_or_else(|| "right".to_string());
+                    if !target_connected {
+                        // Say why once, and do not retry: the edge leads nowhere until the person
+                        // connects that device (`FR-014`).
+                        let name = {
+                            let s = state.inner.read();
+                            s.clients
+                                .iter()
+                                .find(|c| c.id == to)
+                                .map(|c| c.name.clone())
+                                .unwrap_or_else(|| to.clone())
+                        };
+                        let text = crate::mesh::refusal_text("not_connected", &name);
+                        log::info!("[Mesh] Cannot chain past {} to {}: {}", from, name, text);
+                        {
+                            let mut s = state.inner.write();
+                            s.mesh.refusal(&to, "not_connected");
+                            s.link.message = Some(text);
+                        }
+                        let snap = state.snapshot();
+                        let _ = app.emit("state-change", &snap);
+                    } else {
+                        // One route for both halves of the move: the device being left and the
+                        // device being entered answer to the same handover.
+                        let route = state.next_mesh_route();
+                        if let Some(net) = app.try_state::<NetworkManager>() {
+                            net.send_packet_to(
+                                &from,
+                                WireMessage {
+                                    t: "kvm.release".to_string(),
+                                    v: Some(1),
+                                    route: Some(route),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        if state.begin_mesh_take_at(&to, route).is_some() {
+                            // The pointer now belongs to another device without crossing this
+                            // screen: count the travel home from where it entered there.
+                            crate::kvm::begin_remote_handover(pkt.edge_at.unwrap_or(0.5));
+                            log::info!(
+                                "[Mesh] Chaining the pointer from {} to {} on our {} (route {})",
+                                from,
+                                to,
+                                crate::mesh::opposite(&side).unwrap_or(&side),
+                                route
+                            );
+                            if let Some(net) = app.try_state::<NetworkManager>() {
+                                net.send_packet_to(
+                                    &to,
+                                    WireMessage {
+                                        t: "kvm.take".to_string(),
+                                        v: Some(1),
+                                        route: Some(route),
+                                        // `side` is the side the sender's pointer left on; the
+                                        // device being entered sees it on the opposite side.
+                                        side: Some(
+                                            crate::mesh::opposite(&side)
+                                                .unwrap_or("left")
+                                                .to_string(),
+                                        ),
+                                        edge_at: pkt.edge_at,
+                                        mouse: Some(true),
+                                        keyboard: Some(true),
+                                        ..Default::default()
+                                    },
+                                );
+                            }
+                            let snap = state.snapshot();
+                            let _ = app.emit("state-change", &snap);
+                        }
+                    }
+                }
+            }
+            "kvm.accept" => {
+                // The device we took has answered: the handover stands, and stops waiting.
+                let from = {
+                    let pid = peer_id_holder.read().clone();
+                    state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                };
+                let route = pkt.route.unwrap_or(0);
+                if state.confirm_mesh_take(&from, route) {
+                    log::debug!("[Mesh] {} accepted the pointer (route {})", from, route);
+                    let snap = state.snapshot();
+                    let _ = app.emit("state-change", &snap);
+                }
+            }
+            "kvm.refuse" => {
+                // The device we took said no. The pointer comes home at once rather than waiting
+                // for the timeout, and the reason is shown instead of the edge doing nothing.
+                let from = {
+                    let pid = peer_id_holder.read().clone();
+                    state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                };
+                let route = pkt.route.unwrap_or(0);
+                let why = pkt.why.as_deref().unwrap_or("refused");
+                if state.refuse_mesh_take(&from, route, why) {
+                    let name = {
+                        let s = state.inner.read();
+                        s.mesh
+                            .session(&from)
+                            .map(|m| m.name.clone())
+                            .unwrap_or_else(|| from.clone())
+                    };
+                    let text = pkt
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| crate::mesh::refusal_text(why, &name));
+                    log::info!("[Mesh] {} refused the pointer: {}", name, text);
+                    state.inner.write().link.message = Some(text);
+                    crate::kvm::reset_pending_motion();
+                    crate::kvm::reset_edge_dwell();
+                    crate::kvm::NativeInputInjector::keep_cursor_visible();
+                    let snap = state.snapshot();
                     let _ = app.emit("state-change", &snap);
                 }
             }
             "kvm.home" | "kvm.release" => {
+                // A mesh peer names the handover it is ending. Only that answer takes the input
+                // away: a late message from a device that drove this one a while ago must not.
+                // A build without the mesh names nothing and keeps the unconditional reset.
+                let ours = match pkt.route {
+                    Some(route) => {
+                        let from = {
+                            let pid = peer_id_holder.read().clone();
+                            state.device_id_for(pid.as_deref(), &peer_addr.to_string())
+                        };
+                        if state.release_mesh_take(&from, route) {
+                            true
+                        } else {
+                            state.mesh_home_from_driven(&from, route)
+                        }
+                    }
+                    None => true,
+                };
+                if !ours {
+                    log::debug!(
+                        "[Mesh] Ignoring '{}' from {}: it is not the handover in progress",
+                        pkt.t,
+                        peer_addr
+                    );
+                    return;
+                }
                 state.set_where_input("home");
                 crate::kvm::reset_pending_motion();
+                crate::mesh::chain::reset();
                 // A shortcut held over the link must not survive the pointer leaving,
                 // or a later V here would turn into a file paste.
                 crate::fileclip::reset();
@@ -4371,6 +4760,9 @@ impl NetworkManager {
     pub fn send_packet_sync(&self, mut pkt: WireMessage) -> usize {
         self.flush_motion();
         let target_dests = pkt.d.clone();
+        // Whether the caller named a recipient. A packet that already names one keeps it: a take
+        // chained to a third device names that device, which is not the partner yet.
+        let unaddressed = pkt.d.is_none();
         if pkt.o.is_none() {
             pkt.o = Some(self.local_id.clone());
             let mut s = self.seq.lock();
@@ -4382,7 +4774,16 @@ impl NetworkManager {
             pkt.h = Some(0);
         }
         // With one device connected, a packet must be exactly what the previous release sent.
-        crate::mesh::strip_if_dormant(&mut pkt, self.state.mesh_active());
+        let active = self.state.mesh_active();
+        crate::mesh::strip_if_dormant(&mut pkt, active);
+        // Live input belongs to the device holding the pointer; nobody else should act on it.
+        if active && unaddressed {
+            if let Some(partner) = self.state.mesh_partner() {
+                if is_input_packet(&pkt.t) {
+                    pkt.d = Some(vec![partner]);
+                }
+            }
+        }
 
         let is_sensitive = matches!(
             pkt.t.as_str(),
@@ -4446,6 +4847,9 @@ impl NetworkManager {
     pub async fn send_packet(&self, mut pkt: WireMessage) {
         self.flush_motion();
         let target_dests = pkt.d.clone();
+        // Whether the caller named a recipient. A packet that already names one keeps it: a take
+        // chained to a third device names that device, which is not the partner yet.
+        let unaddressed = pkt.d.is_none();
         if pkt.o.is_none() {
             pkt.o = Some(self.local_id.clone());
             let mut s = self.seq.lock();
@@ -4457,7 +4861,16 @@ impl NetworkManager {
             pkt.h = Some(0);
         }
         // With one device connected, a packet must be exactly what the previous release sent.
-        crate::mesh::strip_if_dormant(&mut pkt, self.state.mesh_active());
+        let active = self.state.mesh_active();
+        crate::mesh::strip_if_dormant(&mut pkt, active);
+        // Live input belongs to the device holding the pointer; nobody else should act on it.
+        if active && unaddressed {
+            if let Some(partner) = self.state.mesh_partner() {
+                if is_input_packet(&pkt.t) {
+                    pkt.d = Some(vec![partner]);
+                }
+            }
+        }
 
         let is_sensitive = matches!(
             pkt.t.as_str(),

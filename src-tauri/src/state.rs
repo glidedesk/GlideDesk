@@ -49,6 +49,14 @@ pub struct LayoutState {
     pub side: String, // "right" | "left" | "top" | "bottom"
     #[serde(default)]
     pub along: f64,   // offset along the side (points), 0 = starts aligned
+    /// Which device is behind each side of this screen (`mesh/edges.rs`).
+    ///
+    /// `side`/`along` above stay as the two-device app's single seam and keep working exactly as
+    /// before; `edges` is what several devices use, and is empty until one is assigned or learned
+    /// from a peer's `kvm.layout`. Both live in `layout.json`, so an older build still reads the
+    /// file it expects.
+    #[serde(default)]
+    pub edges: crate::mesh::Edges,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +88,7 @@ impl Default for LayoutState {
             "left"
         };
         Self {
+            edges: crate::mesh::Edges::default(),
             side: side.to_string(),
             along: 0.0,
         }
@@ -1853,9 +1862,26 @@ impl AppState {
         // The screen arrangement the user last chose, so a restart does not come back
         // on the wrong edge.
         #[cfg(not(test))]
-        if let Some((side, along)) = crate::pairstore::load_layout() {
+        if let Some((side, along, edges)) = crate::pairstore::load_layout() {
             initial_state.layout.side = side;
             initial_state.layout.along = along;
+            initial_state.layout.edges = edges;
+        }
+        // A setup from before edges existed: one paired device and one seam. Its device keeps the
+        // edge it had, so nothing about the pair changes on the first launch after the update.
+        #[cfg(not(test))]
+        {
+            let known: Vec<String> = initial_state
+                .paired
+                .as_ref()
+                .map(|p| vec![p.mac_id.clone()])
+                .unwrap_or_default();
+            if initial_state.layout.edges.is_empty() {
+                initial_state.layout.edges = initial_state
+                    .layout
+                    .edges
+                    .migrate(initial_state.kvm.pc_side.as_deref(), &known);
+            }
         }
 
         // Pointer speed and the other Cursor preferences, so a slider that was moved
@@ -2180,6 +2206,53 @@ impl AppState {
         ok
     }
 
+    /// Put a device on a side of this screen, or clear the side with `None`.
+    ///
+    /// Refused with a sentence, never silently: the side already leads to another device, the side
+    /// is not a side, or the id is not one. The answer is what the page shows, so it names the
+    /// device that is in the way — a person should never have to guess why a click did nothing.
+    pub fn assign_edge(&self, side: &str, device_id: Option<&str>) -> Result<crate::mesh::Edges, String> {
+        if !crate::mesh::is_side(side) {
+            return Err(format!("'{}' is not a side of the screen", side));
+        }
+        let name_of = |id: &str| -> String {
+            let s = self.inner.read();
+            s.mesh
+                .session(id)
+                .map(|m| m.name.clone())
+                .or_else(|| s.clients.iter().find(|p| p.id == id).map(|p| p.name.clone()))
+                .unwrap_or_else(|| id.to_string())
+        };
+        let (next, side_now) = {
+            let s = self.inner.read();
+            (s.layout.edges.assign(side, device_id), s.layout.edges.get(side).map(|d| d.to_string()))
+        };
+        let next = match next {
+            Some(next) => next,
+            None => {
+                return Err(match (device_id, side_now) {
+                    (Some(id), Some(holder)) if !id.trim().is_empty() => format!(
+                        "The {} edge already leads to {}. Clear it first, or move {} there.",
+                        side,
+                        name_of(&holder),
+                        name_of(id)
+                    ),
+                    _ => format!("'{}' cannot go on the {} edge", device_id.unwrap_or(""), side),
+                });
+            }
+        };
+        {
+            let mut s = self.inner.write();
+            s.layout.edges = next.clone();
+        }
+        let (seam, along) = {
+            let s = self.inner.read();
+            (s.layout.side.clone(), s.layout.along)
+        };
+        crate::pairstore::save_layout(&seam, along, &next);
+        Ok(next)
+    }
+
     /// The next handover route, monotonic on this machine.
     pub fn next_mesh_route(&self) -> u64 {
         let mut s = self.inner.write();
@@ -2187,10 +2260,219 @@ impl AppState {
         s.mesh.route
     }
 
+    /// The handover in progress, as the wire spells it.
     pub fn mesh_route(&self) -> u64 {
         self.inner.read().mesh.route
     }
 
+    /// The route to name when this device ends the handover itself.
+    ///
+    /// Driving: the route it took the pointer with, which is what the other side compares against.
+    /// Driven: the route the driver used, because that is the answer its check expects. Either
+    /// way the message names the handover being ended, so a late one from an older handover is
+    /// ignored instead of taking the pointer away from a newer one.
+    pub fn mesh_end_route(&self) -> u64 {
+        let s = self.inner.read();
+        if s.mesh.role == "driven" {
+            s.mesh.peer_route
+        } else {
+            s.mesh.route
+        }
+    }
+
+    /// Who a crossing on `side` belongs to.
+    ///
+    /// With two or more devices the answer comes from the edges the person assigned (or that a peer
+    /// taught us), never from a guess: an unassigned side leads nowhere on a busy desk. With one
+    /// device the mesh is dormant and the side is the two-device seam the app has always had, so a
+    /// crossing is exactly the crossing it was before this feature existed.
+    pub fn crossing_target(&self, side: &str) -> crate::mesh::CrossingTarget {
+        let s = self.inner.read();
+        if !s.mesh.active {
+            if side != s.layout.side {
+                return crate::mesh::CrossingTarget::Nobody;
+            }
+            return match s.mesh.sessions.first() {
+                Some(only) => crate::mesh::CrossingTarget::Device(only.id.clone()),
+                None => crate::mesh::CrossingTarget::Nobody,
+            };
+        }
+        match s.layout.edges.get(side) {
+            Some(id) => {
+                if s.mesh.session(id).is_some() {
+                    crate::mesh::CrossingTarget::Device(id.to_string())
+                } else {
+                    crate::mesh::CrossingTarget::Missing(id.to_string())
+                }
+            }
+            // No edge assigned for this side. The seam the two-device app used still leads
+            // somewhere: the device holding the pointer, or the first device that connected, so
+            // the desk behaves as it did before the person arranges it.
+            None if side == s.layout.side => match s.mesh.partner_id() {
+                Some(id) => crate::mesh::CrossingTarget::Device(id.to_string()),
+                None => match s.mesh.sessions.first() {
+                    Some(first) => crate::mesh::CrossingTarget::Device(first.id.clone()),
+                    None => crate::mesh::CrossingTarget::Nobody,
+                },
+            },
+            None => crate::mesh::CrossingTarget::Nobody,
+        }
+    }
+
+    /// Say why a crossing did not happen, once.
+    ///
+    /// The pointer can sit in an edge for seconds, and every event would otherwise write the same
+    /// sentence again. A repeat of the refusal already showing changes nothing and returns false,
+    /// which is what "shows the reason once" means in practice (`FR-014`, `FR-023`).
+    pub fn note_crossing_refusal(&self, device: &str, why: &str) -> bool {
+        let mut s = self.inner.write();
+        if let Some(last) = &s.mesh.last_refusal {
+            if last.device == device && last.why == why {
+                return false;
+            }
+        }
+        let name = s
+            .mesh
+            .session(device)
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| device.to_string());
+        s.mesh.refusal(device, why);
+        s.link.message = Some(crate::mesh::refusal_text(why, &name));
+        true
+    }
+
+    /// True when the pointer was asked for and never answered, and has now been brought home.
+    ///
+    /// Only the take still waiting can time out, so an answer that arrived first wins the race:
+    /// the pointer stays where the person put it.
+    pub fn mesh_take_timeout(&self) -> bool {
+        let now = crate::mesh::session::now_ms();
+        let mut s = self.inner.write();
+        if !s.mesh.take_expired(now, crate::mesh::TAKE_TIMEOUT_MS) {
+            return false;
+        }
+        let target = s.mesh.pending_take().map(|p| p.target.clone());
+        s.mesh.pending = None;
+        s.mesh.clear_partner();
+        if let Some(target) = target {
+            s.mesh.refusal(&target, "not_ready");
+        }
+        s.input = "home".to_string();
+        s.kvm_state.mode = "home".to_string();
+        true
+    }
+
+    // ---- Handover plumbing the native input paths call --------------------------------------
+
+    /// Take the pointer towards `target` and wait for its answer. Returns this handover's route,
+    /// or `None` when the device is not connected (nothing was asked, so nothing is waited on).
+    pub fn begin_mesh_take(&self, target: &str) -> Option<u64> {
+        let route = self.next_mesh_route();
+        self.begin_mesh_take_at(target, route)
+    }
+
+    /// The same, on a route the caller has already taken (a chain hands one route to two devices).
+    pub fn begin_mesh_take_at(&self, target: &str, route: u64) -> Option<u64> {
+        let now = crate::mesh::session::now_ms();
+        let mut s = self.inner.write();
+        if !s.mesh.begin_take(target, route, now) {
+            return None;
+        }
+        let role = s.mesh.role.clone();
+        s.input = role.clone();
+        s.kvm_state.mode = role;
+        Some(route)
+    }
+
+    /// The device we took has answered: the handover stands.
+    pub fn confirm_mesh_take(&self, from: &str, route: u64) -> bool {
+        let mut s = self.inner.write();
+        s.mesh.confirm_take(from, route)
+    }
+
+    /// The device we took has refused: nobody is driving anything, and the person is told why.
+    pub fn refuse_mesh_take(&self, from: &str, route: u64, why: &str) -> bool {
+        let mut s = self.inner.write();
+        if !s.mesh.refuse_take(from, route) {
+            return false;
+        }
+        s.mesh.refusal(from, why);
+        s.input = "home".to_string();
+        s.kvm_state.mode = "home".to_string();
+        true
+    }
+
+    /// What to answer a `kvm.take` that arrived from `from`.
+    pub fn decide_mesh_take(&self, from: &str, route: u64, allowed: bool) -> crate::mesh::TakeDecision {
+        self.inner.read().mesh.decide_take(from, route, allowed)
+    }
+
+    /// Take the pointer because a device asked for it.
+    pub fn accept_mesh_take(&self, from: &str, route: u64) -> bool {
+        let mut s = self.inner.write();
+        if !s.mesh.accept_take(from, route) {
+            return false;
+        }
+        s.input = "driven".to_string();
+        s.kvm_state.mode = "driven".to_string();
+        true
+    }
+
+    /// `kvm.release` from the device driving this one.
+    pub fn release_mesh_take(&self, from: &str, route: u64) -> bool {
+        let mut s = self.inner.write();
+        if !s.mesh.release(from, route) {
+            return false;
+        }
+        s.input = "home".to_string();
+        s.kvm_state.mode = "home".to_string();
+        true
+    }
+
+    /// `kvm.home` from the device this one is driving: it took control back.
+    pub fn mesh_home_from_driven(&self, from: &str, route: u64) -> bool {
+        let mut s = self.inner.write();
+        if !s.mesh.home_from_driven(from, route) {
+            return false;
+        }
+        s.input = "home".to_string();
+        s.kvm_state.mode = "home".to_string();
+        true
+    }
+
+    /// The person at this device took control back by hand while another device was driving it.
+    ///
+    /// Returns true when there was a handover to give up, so the caller knows to tell the device
+    /// that was driving: `kvm.home` with the route it used. Always safe to call: with nothing to
+    /// give up it changes nothing.
+    pub fn mesh_local_takeover(&self) -> bool {
+        self.inner.write().mesh.local_takeover()
+    }
+
+    /// The device a packet came from, as the id the mesh registry knows it by.
+    ///
+    /// Connections are known by address and devices by id; a handover has to name the device, or
+    /// the partner bookkeeping would hold a spelling no session answers to (and the next take would
+    /// be refused as coming from a stranger).
+    pub fn device_id_for(&self, peer_id: Option<&str>, address: &str) -> String {
+        let known = {
+            let s = self.inner.read();
+            s.mesh
+                .session_by_address(address)
+                .map(|m| m.id.clone())
+                .or_else(|| s.clients.iter().find(|c| {
+                    c.address.as_deref() == Some(address)
+                }).map(|c| c.id.clone()))
+        };
+        known
+            .or_else(|| peer_id.filter(|p| !p.is_empty()).map(|p| p.to_string()))
+            .unwrap_or_else(|| address.to_string())
+    }
+
+    /// The id of the device holding the pointer right now, if a handover is in progress.
+    pub fn mesh_partner(&self) -> Option<String> {
+        self.inner.read().mesh.partner.clone()
+    }
 
     pub fn get_peer_fingerprint(&self, peer_id: &str) -> Option<String> {
         let s = self.inner.read();
@@ -2705,6 +2987,261 @@ mod tests {
         );
     }
 
+    /// The whole handover across three devices, in one process: A drives B, B's edge leads to C,
+    /// so the pointer walks A → B → C without ever being broadcast to everyone (`FR-011`, `SC-006`).
+    #[test]
+    fn three_devices_hand_the_pointer_along_a_chain() {
+        let a = AppState::new();
+        let b = AppState::new();
+        let c = AppState::new();
+        // Each machine sees the other two.
+        for (me, others) in [
+            (&a, [("b", "10.0.0.2"), ("c", "10.0.0.3")]),
+            (&b, [("a", "10.0.0.1"), ("c", "10.0.0.3")]),
+            (&c, [("a", "10.0.0.1"), ("b", "10.0.0.2")]),
+        ] {
+            for (id, addr) in others {
+                me.add_client(peer(id, addr));
+            }
+        }
+        // B sits between A and C: C is on B's right.
+        b.assign_edge("right", Some("c")).expect("B's edge to C");
+
+        // A crosses into B.
+        let route1 = a.begin_mesh_take("b").expect("A takes B");
+        assert_eq!(route1, 1);
+        assert_eq!(b.decide_mesh_take("a", route1, true), crate::mesh::TakeDecision::Accept { first: true });
+        assert!(b.accept_mesh_take("a", route1));
+        assert!(a.confirm_mesh_take("b", route1));
+        assert_eq!(a.snapshot().input, "driving");
+        assert_eq!(b.snapshot().input, "driven");
+
+        // On B the pointer leaves on the right, where C is.
+        assert_eq!(
+            b.crossing_target("right"),
+            crate::mesh::CrossingTarget::Device("c".to_string())
+        );
+
+        // B tells A, and A takes C instead of B on one new route.
+        let route2 = a.next_mesh_route();
+        assert_eq!(route2, 2);
+        assert!(a.begin_mesh_take_at("c", route2).is_some());
+        assert!(b.release_mesh_take("a", route2), "B is released before A takes C");
+        assert_eq!(b.snapshot().input, "home");
+        assert_eq!(
+            c.decide_mesh_take("a", route2, true),
+            crate::mesh::TakeDecision::Accept { first: true }
+        );
+        assert!(c.accept_mesh_take("a", route2));
+        assert!(a.confirm_mesh_take("c", route2));
+
+        // Exactly one device holds the pointer, and it is the last one in the chain.
+        let snap = a.snapshot();
+        assert_eq!(snap.input, "driving");
+        assert_eq!(snap.mesh.partner.as_deref(), Some("c"));
+        assert_eq!(b.snapshot().input, "home");
+        assert_eq!(c.snapshot().input, "driven");
+        assert!(c.mesh_partner().is_some());
+    }
+
+    #[test]
+    fn one_device_crosses_on_the_seam_and_nowhere_else() {
+        // The two-device app: the side facing the other computer crosses to it, every other side
+        // stays put. This is the crossing that existed before the mesh, and it must not change.
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        let seam = app_state.inner.read().layout.side.clone();
+        let other = crate::commands::opposite_direction(&seam);
+        assert_eq!(
+            app_state.crossing_target(&seam),
+            crate::mesh::CrossingTarget::Device("desktop".to_string())
+        );
+        assert_eq!(
+            app_state.crossing_target(other),
+            crate::mesh::CrossingTarget::Nobody
+        );
+
+        // A single device that has not labelled itself yet is not a crossing target either.
+        let empty = AppState::new();
+        assert_eq!(
+            empty.crossing_target(&empty.inner.read().layout.side.clone()),
+            crate::mesh::CrossingTarget::Nobody
+        );
+    }
+
+    #[test]
+    fn a_side_that_leads_to_a_device_which_left_crosses_nowhere_and_says_why_once() {
+        // `FR-014`: an edge mapped to a device that is not connected crosses nothing, the person is
+        // told once, and nothing is retried.
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        app_state.add_client(peer("laptop", "192.168.4.12"));
+        app_state.add_client(peer("tablet", "192.168.4.14"));
+        app_state.assign_edge("right", Some("laptop")).expect("assign");
+
+        // The laptop goes: the edge still names it, so the answer says so by name.
+        app_state.remove_client("laptop");
+        assert_eq!(
+            app_state.crossing_target("right"),
+            crate::mesh::CrossingTarget::Missing("laptop".to_string())
+        );
+
+        assert!(app_state.note_crossing_refusal("laptop", "not_connected"));
+        let snap = app_state.snapshot();
+        assert_eq!(
+            snap.mesh.last_refusal.as_ref().map(|r| r.why.as_str()),
+            Some("not_connected")
+        );
+        assert!(
+            snap.link
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("laptop"),
+            "the reason names the device: {:?}",
+            snap.link.message
+        );
+
+        // The pointer can sit in the edge: the same refusal is not written again.
+        assert!(!app_state.note_crossing_refusal("laptop", "not_connected"));
+        // A different reason is news.
+        assert!(app_state.note_crossing_refusal("laptop", "not_allowed"));
+    }
+
+    #[test]
+    fn a_busy_desk_crosses_on_the_seam_until_edges_are_assigned() {
+        // Three devices and no arrangement yet: the seam still leads somewhere, and it is the
+        // device holding the pointer (or the first one that connected), never a broadcast.
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        app_state.add_client(peer("phone", "192.168.4.13"));
+        let seam = app_state.inner.read().layout.side.clone();
+        assert_eq!(
+            app_state.crossing_target(&seam),
+            crate::mesh::CrossingTarget::Device("desktop".to_string())
+        );
+        // A side nobody assigned leads nowhere on a busy desk.
+        assert_eq!(
+            app_state.crossing_target(crate::commands::opposite_direction(&seam)),
+            crate::mesh::CrossingTarget::Nobody
+        );
+    }
+
+    #[test]
+    fn a_take_that_is_never_answered_brings_the_pointer_home() {
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        assert!(app_state.begin_mesh_take("desktop").is_some());
+        assert_eq!(app_state.snapshot().input, "driving");
+        assert_eq!(app_state.mesh_partner().as_deref(), Some("desktop"));
+
+        // The timeout is the reference's one second; nothing has waited that long yet.
+        assert!(!app_state.mesh_take_timeout());
+        assert_eq!(app_state.snapshot().input, "driving");
+
+        // Pretend the router took a second and a half to answer nothing.
+        {
+            let mut s = app_state.inner.write();
+            let pending = s.mesh.pending.as_mut().expect("a take is waiting");
+            pending.since -= crate::mesh::TAKE_TIMEOUT_MS + 500;
+        }
+        assert!(app_state.mesh_take_timeout());
+        let snap = app_state.snapshot();
+        assert_eq!(snap.input, "home");
+        assert!(snap.mesh.partner.is_none());
+        assert_eq!(
+            snap.mesh.last_refusal.as_ref().map(|r| r.why.as_str()),
+            Some("not_ready")
+        );
+        // Only once: an answered or settled take cannot time out a second time.
+        assert!(!app_state.mesh_take_timeout());
+    }
+
+    #[test]
+    fn a_packet_from_a_socket_is_named_by_the_device_id_the_mesh_uses() {
+        // Roles are stored with device ids, so an incoming handover has to be resolved back from
+        // the address it arrived on, not left as a socket string.
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        assert_eq!(
+            app_state.device_id_for(None, "192.168.4.11:47800"),
+            "desktop"
+        );
+        assert_eq!(app_state.device_id_for(None, "192.168.4.11"), "desktop");
+        // A device the registry has never seen still gets an answer its own socket names.
+        assert_eq!(
+            app_state.device_id_for(Some("laptop"), "192.168.4.99:47800"),
+            "laptop"
+        );
+        assert_eq!(app_state.device_id_for(None, "192.168.4.99:47800"), "192.168.4.99:47800");
+    }
+
+    #[test]
+    fn an_edge_names_one_device_and_refuses_to_overwrite_another() {
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        app_state.add_client(peer("laptop", "192.168.4.12"));
+
+        let edges = app_state.assign_edge("right", Some("desktop")).expect("assign right");
+        assert_eq!(edges.right.as_deref(), Some("desktop"));
+        assert_eq!(app_state.snapshot().layout.edges.right.as_deref(), Some("desktop"));
+
+        // A different device on the same side is refused, and the reason names the device in the
+        // way: a click that does nothing must say why.
+        let refused = app_state
+            .assign_edge("right", Some("laptop"))
+            .expect_err("the side is taken");
+        assert!(refused.contains("DESKTOP"), "the reason names the holder: {}", refused);
+        assert_eq!(
+            app_state.snapshot().layout.edges.right.as_deref(),
+            Some("desktop"),
+            "a refused assignment changes nothing"
+        );
+
+        // Moving the device that is already there is how the person rearranges the desk.
+        let moved = app_state.assign_edge("bottom", Some("desktop")).expect("move to bottom");
+        assert_eq!(moved.right, None, "the old side is left empty");
+        assert_eq!(moved.bottom.as_deref(), Some("desktop"));
+
+        // Clearing, and an unknown side.
+        let cleared = app_state.assign_edge("bottom", None).expect("clear");
+        assert!(cleared.is_empty());
+        assert!(app_state.assign_edge("diagonal", Some("desktop")).is_err());
+    }
+
+    #[test]
+    fn a_device_already_connected_can_be_placed_and_learned_edges_are_kept() {
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+
+        // A peer says its left edge leads here, so it is on our right.
+        {
+            let mut s = app_state.inner.write();
+            s.layout.edges = s
+                .layout
+                .edges
+                .set_remote("left", "desktop")
+                .expect("learn the edge");
+        }
+        assert_eq!(app_state.snapshot().layout.edges.right.as_deref(), Some("desktop"));
+
+        // The person's own choice is not undone by another device's claim on the same side.
+        app_state.assign_edge("top", Some("desktop")).expect("assign top");
+        let refused = app_state
+            .inner
+            .write()
+            .layout
+            .edges
+            .set_remote("bottom", "another-device");
+        assert!(refused.is_none(), "a claim that would overwrite the side is refused");
+        assert_eq!(
+            app_state.snapshot().layout.edges.top.as_deref(),
+            Some("desktop"),
+            "the person's arrangement stands"
+        );
+    }
+
     #[test]
     fn three_devices_stay_connected_and_none_is_pushed_away() {
         // FR-001: connecting a device must not disconnect one that is already there.
@@ -2814,7 +3351,15 @@ mod tests {
         // Verify key structural elements expected by JS frontend
         let side = if cfg!(target_os = "windows") { "right" } else { "left" };
         let other = if side == "right" { "left" } else { "right" };
-        assert!(json.contains(&format!("\"layout\":{{\"side\":\"{side}\",\"along\":0.0}}")));
+        let layout = serde_json::to_value(&snap.layout).expect("layout to value");
+        assert_eq!(layout["side"].as_str(), Some(side));
+        assert_eq!(layout["along"].as_f64(), Some(0.0));
+        // The per-device edges travel with it and start empty: a state from before the mesh and a
+        // state from after it are the same shape.
+        assert_eq!(
+            layout["edges"],
+            serde_json::json!({"left": null, "right": null, "top": null, "bottom": null})
+        );
         assert!(json.contains(&format!("\"pcSide\":\"{other}\"")));
         assert!(json.contains("\"beDriven\":true"));
         assert!(json.contains("\"driveOther\":true"));

@@ -315,6 +315,11 @@ struct LayoutFile {
     side: String,
     #[serde(default)]
     along: f64,
+    /// Which device is behind each side (`mesh/edges.rs`). Absent in files written before the
+    /// mesh, which is why it defaults: an older file must still load, and an older build must
+    /// still find the `side`/`along` it expects.
+    #[serde(default)]
+    edges: crate::mesh::Edges,
 }
 
 fn default_layout_side() -> String {
@@ -327,11 +332,12 @@ fn default_layout_side() -> String {
     }
 }
 
-/// The last arrangement chosen, if one was ever chosen.
-pub fn load_layout() -> Option<(String, f64)> {
+/// The last arrangement chosen, if one was ever chosen: the two-device seam and the per-device
+/// edges, which share the file so a restart comes back on the same screen.
+pub fn load_layout() -> Option<(String, f64, crate::mesh::Edges)> {
     let text = std::fs::read_to_string(layout_path()).ok()?;
     match serde_json::from_str::<LayoutFile>(&text) {
-        Ok(f) => Some((f.side, f.along)),
+        Ok(f) => Some((f.side, f.along, f.edges.normalize())),
         Err(e) => {
             log::warn!("[Layout] Ignoring unreadable layout file: {}", e);
             None
@@ -340,7 +346,10 @@ pub fn load_layout() -> Option<(String, f64)> {
 }
 
 /// Remember the arrangement, so a restart comes back on the same edge.
-pub fn save_layout(side: &str, along: f64) {
+///
+/// Both halves are written every time: writing the seam without the edges would silently drop
+/// every device the person placed, the next time anything touched the seam.
+pub fn save_layout(side: &str, along: f64, edges: &crate::mesh::Edges) {
     if cfg!(test) {
         return; // tests never touch the developer's real files
     }
@@ -348,7 +357,7 @@ pub fn save_layout(side: &str, along: f64) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let file = LayoutFile { side: side.to_string(), along };
+    let file = LayoutFile { side: side.to_string(), along, edges: edges.clone() };
     if let Ok(text) = serde_json::to_string_pretty(&file) {
         if let Err(e) = std::fs::write(&path, text) {
             log::warn!("[Layout] Could not write {}: {}", path.display(), e);

@@ -266,6 +266,12 @@
     disconnect: () => invoke('disconnect'),
     // Close one device's session and leave the others: the Multi-device page's per-row action.
     disconnectDevice: (deviceId) => invoke('disconnect_device', { device_id: String(deviceId) }),
+    // Put a device on a side of this screen, or clear the side with null. Resolves to the new edges;
+    // rejects with the sentence to show when the side already leads to another device.
+    assignEdge: (side, deviceId) => invoke('assign_edge', {
+      side: String(side),
+      device_id: deviceId == null ? null : String(deviceId),
+    }),
     connectAgain: () => invoke('connect_again'),
     connectAddress: (addr) => invoke('connect_address', { addr }),
     refreshFound: () => invoke('refresh_found'),

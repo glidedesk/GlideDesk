@@ -124,13 +124,29 @@ ok('the page loads its model before itself', () => {
 ok('every control on the page reaches a command', () => {
   const page = read('ui/ui-multi.js');
   assert.ok(page.includes('disconnectDevice'), 'the per-device button must call a command');
+  assert.ok(page.includes('assignEdge'), 'the edge picker must call a command');
   const bridge = read('ui/shared/tauri-bridge.js');
   assert.ok(/disconnectDevice:\s*\(.*\)\s*=>\s*invoke\('disconnect_device'/.test(bridge),
     'the bridge must expose disconnect_device');
+  assert.ok(/assignEdge:\s*\(.*\)\s*=>\s*invoke\('assign_edge'/.test(bridge),
+    'the bridge must expose assign_edge');
   const main = read('src-tauri/src/main.rs');
   assert.ok(main.includes('commands::disconnect_device'), 'the command must be registered');
+  assert.ok(main.includes('commands::assign_edge'), 'the edge command must be registered');
   const commands = read('src-tauri/src/commands.rs');
   assert.ok(commands.includes('pub async fn disconnect_device'), 'the command must exist');
+  assert.ok(commands.includes('pub fn assign_edge'), 'the edge command must exist');
+});
+
+ok('the edge picker uses the tested model, not a second set of rules', () => {
+  const page = read('ui/ui-multi.js');
+  assert.ok(page.includes('EdgesUI.options('), 'the choices come from the tested model');
+  assert.ok(page.includes('EdgesUI.change('), 'so does the command to send');
+  assert.ok(!page.includes('edges[sid]'), 'no side logic of its own');
+  const html = read('ui/index.html');
+  const model = html.indexOf('shared/edges-ui.js');
+  const self = html.indexOf('src="ui-multi.js"');
+  assert.ok(model > 0 && model < self, 'edges-ui.js must load before the page');
 });
 
 console.log('ui-multi: ' + checks + ' checks passed');

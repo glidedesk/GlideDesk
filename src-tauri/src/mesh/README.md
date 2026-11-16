@@ -28,6 +28,7 @@ deliberate divergence with a reason.
 | `pool.rs` | `shared/mesh.js` — `Pool` (`publish`, `receive`, seen set, relay) | `mesh-pool.js` |
 | `roster.rs` | `shared/mesh.js` — `Roster`, `Mesh.rosterMessage`, `Mesh.known` | `mesh-roster.js` |
 | `clip.rs` | `shared/clipsync.js` — `Clock`, `compare`, `Latest` | `clipsync.js`, `clipimage.js` |
+| `chain.rs` | `mac/mesh/kvm.js` — `_armReturn`/`_onReturn` (the driven device noticing its pointer left the screen) | `mesh-chain.js` |
 
 `ui/shared/layout.js` (the shared super-grid) is not ported in this slice. Edge assignment uses
 `edges.rs` only; the monitor-level map is a later slice, and `edges` is stored separately from any
@@ -42,6 +43,8 @@ Recorded because a reader comparing the two will find them, and they are choices
 | `kvm.take`/`kvm.next` carry the along-edge position as `offset` (a fraction) | `edge_at` | `WireMessage.offset` is already the file-transfer byte offset. Reusing it would corrupt file transfer. `edge_at` already exists for the same purpose in `kvm.take` today. |
 | Roster message is `mesh.roster {peers, members}` | Same names kept | No conflict; the message type is new to this app. |
 | `MultiState.enabled` switch in `multi.json` | Removed: dormancy by session count | Clarified with the person: no switch, no restart, activates on the second connection. `set_multi` wrote a flag nothing read. |
+| The driven device learns its pointer left an edge from the native helper's edge watch (`_armReturn`) | `chain.rs` tracks the pointer from the motion it injects | `cursor_position()` returns `None` on Linux, so there is no portable way to ask where the pointer is. Arithmetic on the deltas also makes the rule testable without a desktop session. |
+| A chain restarts the driven side's travel from the new entry point by the helper's own bookkeeping | `kvm::begin_remote_handover` sets a restart flag each capture loop consumes on its own thread | The Windows and macOS hooks own statics, the Linux loop its locals; writing another thread's travel counters mid-event is the race this avoids. |
 
 ## Where the code goes
 
