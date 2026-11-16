@@ -388,6 +388,31 @@ pub struct WireMessage {
     #[serde(default)]
     pub target: Option<String>,    // Targeted device ID (e.g. phone remote)
 
+    // Multi-device mesh fields (docs/mesh.md, specs/001-multi-device-mesh/contracts/wire.md).
+    // All optional, and only emitted while two or more devices are connected: with one device the
+    // wire must be exactly what it was before the mesh (`mesh::strip_if_dormant` enforces it).
+    /// This handover's number, monotonic per machine. Absent means the oldest possible route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<u64>,
+    /// The device a `kvm.next` or a roster entry is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// A `kvm.take` wants the pointer, not only the keyboard. Absent means wanted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouse: Option<bool>,
+    /// A `kvm.take` wants keys too. Absent means wanted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyboard: Option<bool>,
+    /// The taker asks the receiver to drive a third device on its behalf (not used for phones).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// The peer's roster revision, so a stale update is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reckon: Option<u64>,
+    /// Why a `kvm.refuse` was sent: `not_allowed`, `busy`, `not_connected`, `not_ready`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+
     // Input / KVM fields
     #[serde(default)]
     pub dx: Option<f64>,
@@ -611,6 +636,13 @@ impl Default for WireMessage {
             d: None,
             h: None,
             target: None,
+            route: None,
+            to: None,
+            mouse: None,
+            keyboard: None,
+            via: None,
+            reckon: None,
+            why: None,
             dx: None,
             dy: None,
             b: None,
@@ -963,6 +995,61 @@ pub fn is_addressed_to_local(dests: &Option<Vec<String>>, local_id: &str) -> boo
         None => true,
         Some(list) => list.iter().any(|d| d == local_id),
     }
+}
+
+/// True when this packet names no destination (legacy broadcast) or names this device.
+///
+/// Two spellings are accepted for this device:
+///
+/// * its device id — what a mesh-capable sender writes, and what the reference writes
+///   (`d: peers.map(p => p.id)`);
+/// * one of its own socket addresses — what senders before the mesh wrote, because the `d` stamp was
+///   filled from session ids (`<ip>:<port>`). The reference files that form as a bug; it is still
+///   accepted here so a device running an older build keeps working (`SC-008`).
+pub fn addressed_to_local(pkt: &WireMessage, local_id: &str, local_addrs: &[String]) -> bool {
+    let dests = match &pkt.d {
+        None => return true,
+        Some(list) if list.is_empty() => return true,
+        Some(list) => list,
+    };
+    if dests.iter().any(|d| d.eq_ignore_ascii_case(local_id)) {
+        return true;
+    }
+    dests.iter().any(|d| {
+        let host = match d.rsplit_once(':') {
+            Some((h, _port)) => h,
+            None => d.as_str(),
+        };
+        local_addrs.iter().any(|a| a.eq_ignore_ascii_case(host))
+    })
+}
+
+/// Types that carry input or a handover for exactly one device: this one, or nobody.
+///
+/// With two devices the distinction is invisible, because the only session is also the target. With
+/// three it is the difference between "the laptop takes the pointer" and "every device tries to".
+fn is_single_target(t: &str) -> bool {
+    matches!(
+        t,
+        "kvm.take"
+            | "kvm.accept"
+            | "kvm.refuse"
+            | "kvm.release"
+            | "kvm.next"
+            | "kvm.home"
+            | "k.mm"
+            | "remote.mm"
+            | "k.md"
+            | "remote.md"
+            | "k.mu"
+            | "remote.mu"
+            | "k.wh"
+            | "remote.wh"
+            | "k.kd"
+            | "remote.kd"
+            | "k.ku"
+            | "remote.ku"
+    )
 }
 
 /// Receiver-side guard for `files.*` packets.
@@ -2257,6 +2344,20 @@ impl MeshServer {
                     "[Auth] Dropping unauthenticated packet '{}' from {}",
                     pkt.t,
                     peer_addr
+                );
+            }
+            // Input and handovers name exactly one device. With three or more connected, a packet
+            // meant for another device must not make this one take the pointer, type, or accept a
+            // handover nobody asked it to accept. Pooled messages are excluded on purpose: their
+            // `d` is the origin's link list for dedupe and relay, not an address.
+            _ if is_single_target(&pkt.t)
+                && !addressed_to_local(pkt, local_id, &state.inner.read().addresses) =>
+            {
+                log::debug!(
+                    "[Mesh] Ignoring '{}' from {}: addressed to {:?}, not to this device",
+                    pkt.t,
+                    peer_addr,
+                    pkt.d
                 );
             }
             "k.mm" | "remote.mm" => {
@@ -4151,6 +4252,31 @@ impl NetworkManager {
         self.send_packet_sync(msg);
     }
 
+    /// The device ids of every session this machine may send on, for the `d` stamp.
+    ///
+    /// These are the stable paired device ids, not socket addresses: the receiver compares them with
+    /// its own id to decide whether an addressed packet is for it (`addressed_to_local`). A session
+    /// whose peer has not yet said who it is falls back to its session id, which still matches on
+    /// the sending side.
+    fn peer_id_list(&self) -> Vec<String> {
+        let guard = self.active_clients.read();
+        let preferred = preferred_session_ids(&self.local_id, &guard);
+        guard
+            .values()
+            .filter(|c| preferred.contains(&c.id))
+            .map(|c| c.peer_id.read().clone().unwrap_or_else(|| c.id.clone()))
+            .collect()
+    }
+
+    /// Send one packet to one connected device, and nowhere else.
+    ///
+    /// The destination may be a device id or a session id; the send path accepts either. Returns how
+    /// many sessions took the packet, so a caller holding a keystroke knows whether it left.
+    pub fn send_packet_to(&self, device_id: &str, mut pkt: WireMessage) -> usize {
+        pkt.d = Some(vec![device_id.to_string()]);
+        self.send_packet_sync(pkt)
+    }
+
     /// Broadcast event to all connected mesh peers.
     /// Send without waiting, returning how many sessions took the packet.
     ///
@@ -4166,11 +4292,12 @@ impl NetworkManager {
             *s += 1;
             pkt.s = Some(*s);
             if pkt.d.is_none() {
-                let client_ids: Vec<String> = self.active_clients.read().keys().cloned().collect();
-                pkt.d = Some(client_ids);
+                pkt.d = Some(self.peer_id_list());
             }
             pkt.h = Some(0);
         }
+        // With one device connected, a packet must be exactly what the previous release sent.
+        crate::mesh::strip_if_dormant(&mut pkt, self.state.mesh_active());
 
         let is_sensitive = matches!(
             pkt.t.as_str(),
@@ -4240,11 +4367,12 @@ impl NetworkManager {
             *s += 1;
             pkt.s = Some(*s);
             if pkt.d.is_none() {
-                let client_ids: Vec<String> = self.active_clients.read().keys().cloned().collect();
-                pkt.d = Some(client_ids);
+                pkt.d = Some(self.peer_id_list());
             }
             pkt.h = Some(0);
         }
+        // With one device connected, a packet must be exactly what the previous release sent.
+        crate::mesh::strip_if_dormant(&mut pkt, self.state.mesh_active());
 
         let is_sensitive = matches!(
             pkt.t.as_str(),
@@ -4542,6 +4670,189 @@ mod tests {
         let s_home = serde_json::to_string(&home_pkt).expect("serialize home");
         let parsed_home: WireMessage = serde_json::from_str(&s_home).expect("deserialize home");
         assert_eq!(parsed_home.t, "kvm.home");
+    }
+
+    /// The packet a crossing sends today, byte for byte, captured from the build before the mesh
+    /// existed. With one device connected the mesh must not change the wire (`contracts/wire.md`,
+    /// rule 2), so this is the fixture the dormancy gate is checked against.
+    const GOLDEN_TAKE: &str = concat!(
+        r#"{"t":"kvm.take","v":1,"id":null,"name":null,"os":null,"port":null,"role":null,"#,
+        r#""fx":null,"o":null,"s":null,"d":null,"h":null,"target":null,"dx":null,"dy":null,"#,
+        r#""b":null,"k":null,"code":null,"vk":null,"ch":null,"tx":null,"im":null,"mods":null,"#,
+        r#""edgeAt":0.4213,"sw":null,"sh":null,"smooth":null,"text":null,"message":null,"#,
+        r#""ts":null,"png":null,"w":null,"height":null,"bytes":null,"parts":null,"shot":null,"#,
+        r#""on":null,"app":null,"key":null,"appName":null,"group":null,"reply":null,"#,
+        r#""items":null,"title":null,"subtitle":null,"body":null,"at":null,"accept":null,"#,
+        r#""macs":null,"address":null,"user":null,"ssh":null,"action":null,"pos":null,"#,
+        r#""rezume_item":null,"fingerprint":null,"files":null,"batchId":null,"fileId":null,"#,
+        r#""batchFiles":null,"sharedFolder":null,"totalBytes":null,"offset":null,"len":null,"#,
+        r#""data":null,"sha256Chunk":null,"sha256Total":null,"audio_bytes":null,"audioB64":null,"#,
+        r#""audioRate":null,"audioChs":null,"frame_png":null,"frameB64":null,"fps":null,"#,
+        r#""mode":null,"remote":null,"modes":null,"commit":null,"nonce":null,"token":null,"#,
+        r#""macId":null,"macName":null,"side":null,"apps":null,"pcSide":null}"#
+    );
+
+    #[test]
+    fn test_one_session_wire_is_unchanged_by_the_mesh() {
+        // What a crossing sends: the fields the previous release set, and nothing else.
+        let mut take = WireMessage {
+            t: "kvm.take".to_string(),
+            v: Some(1),
+            edge_at: Some(0.4213),
+            ..Default::default()
+        };
+        // A producer that forgot to gate its fields must still not change the wire while one
+        // device is connected: the send path strips them.
+        take.route = Some(7);
+        take.to = Some("laptop".to_string());
+        take.mouse = Some(true);
+        take.keyboard = Some(true);
+        take.via = Some("phone".to_string());
+        take.reckon = Some(3);
+        take.why = Some("busy".to_string());
+
+        crate::mesh::strip_if_dormant(&mut take, crate::mesh::mesh_active(1));
+        let json = serde_json::to_string(&take).expect("serialize take");
+        assert_eq!(
+            json, GOLDEN_TAKE,
+            "with one device connected the wire must be exactly what it was before the mesh"
+        );
+    }
+
+    #[test]
+    fn test_mesh_fields_are_optional_and_absent_when_unset() {
+        let take = WireMessage {
+            t: "kvm.take".to_string(),
+            v: Some(1),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&take).expect("serialize take");
+        for key in ["route", "to", "mouse", "keyboard", "via", "reckon", "why"] {
+            assert!(
+                !json.contains(&format!("\"{}\":", key)),
+                "{} must not be on the wire when it is unset",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_mesh_fields_round_trip_when_active() {
+        let take = WireMessage {
+            t: "kvm.take".to_string(),
+            v: Some(1),
+            route: Some(7),
+            side: Some("right".to_string()),
+            edge_at: Some(0.42),
+            mouse: Some(true),
+            keyboard: Some(false),
+            via: Some("phone-1".to_string()),
+            reckon: Some(12),
+            why: Some("busy".to_string()),
+            to: Some("laptop".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&take).expect("serialize take");
+        let back: WireMessage = serde_json::from_str(&json).expect("deserialize take");
+        assert_eq!(back.route, Some(7));
+        assert_eq!(back.side.as_deref(), Some("right"));
+        assert_eq!(back.edge_at, Some(0.42));
+        assert_eq!(back.mouse, Some(true));
+        assert_eq!(back.keyboard, Some(false));
+        assert_eq!(back.via.as_deref(), Some("phone-1"));
+        assert_eq!(back.reckon, Some(12));
+        assert_eq!(back.why.as_deref(), Some("busy"));
+        assert_eq!(back.to.as_deref(), Some("laptop"));
+    }
+
+    #[test]
+    fn test_unknown_keys_are_ignored() {
+        // A newer app may add fields this build does not know. They must be ignored, never
+        // rejected, or one device with a newer version breaks the whole mesh.
+        let json = r#"{"t":"kvm.take","v":1,"route":7,"edgeAt":0.5,
+            "somethingFromTheFuture":{"nested":[1,2,3]},"anotherOne":"x"}"#;
+        let pkt: WireMessage = serde_json::from_str(json).expect("unknown keys are ignored");
+        assert_eq!(pkt.t, "kvm.take");
+        assert_eq!(pkt.route, Some(7));
+        assert_eq!(pkt.edge_at, Some(0.5));
+    }
+
+    #[test]
+    fn test_a_handover_addressed_to_another_device_is_ignored() {
+        // The defect this closes: with three devices, `kvm.take` used to be accepted by every peer
+        // with "be driven" on, because the receiver never looked at `d`.
+        let take = WireMessage {
+            t: "kvm.take".to_string(),
+            v: Some(1),
+            route: Some(7),
+            d: Some(vec!["laptop".to_string()]),
+            ..Default::default()
+        };
+        assert!(is_single_target(&take.t), "a handover is single-target");
+        assert!(
+            !addressed_to_local(&take, "desktop", &["192.168.4.10".to_string()]),
+            "a device the handover is not for must ignore it"
+        );
+        assert!(
+            addressed_to_local(&take, "laptop", &[]),
+            "the device it names must act on it"
+        );
+
+        // Input moves are single-target too, for the same reason.
+        for t in ["k.mm", "k.md", "k.mu", "k.wh", "k.kd", "k.ku", "kvm.accept", "kvm.next"] {
+            assert!(is_single_target(t), "{} must be single-target", t);
+        }
+        // Pooled messages are not: their `d` is the origin's link list for dedupe and relay.
+        for t in ["clip", "clip.image", "mesh.roster", "hello", "welcome"] {
+            assert!(!is_single_target(t), "{} must not be address-filtered", t);
+        }
+    }
+
+    #[test]
+    fn test_addressing_accepts_the_legacy_socket_spelling() {
+        let addrs = vec!["192.168.4.10".to_string()];
+        // A sender before the mesh filled `d` with session ids: "<ip>:<port>".
+        let legacy = WireMessage {
+            t: "k.mm".to_string(),
+            d: Some(vec!["192.168.4.10:47800".to_string()]),
+            ..Default::default()
+        };
+        assert!(addressed_to_local(&legacy, "desktop", &addrs));
+        assert!(!addressed_to_local(&legacy, "desktop", &["10.0.0.1".to_string()]));
+
+        // No destination at all is still "everyone", as before.
+        let broadcast = WireMessage {
+            t: "k.mm".to_string(),
+            ..Default::default()
+        };
+        assert!(addressed_to_local(&broadcast, "desktop", &addrs));
+        let empty = WireMessage {
+            t: "k.mm".to_string(),
+            d: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(addressed_to_local(&empty, "desktop", &addrs));
+
+        // The id is compared without case, because device ids are host names.
+        let by_id = WireMessage {
+            t: "k.mm".to_string(),
+            d: Some(vec!["Bensons-Mac".to_string()]),
+            ..Default::default()
+        };
+        assert!(addressed_to_local(&by_id, "bensons-mac", &[]));
+    }
+
+    #[test]
+    fn test_mesh_take_without_new_fields_is_a_plain_crossing() {
+        // An older sender knows none of the mesh fields: the defaults must mean today's behaviour.
+        let json = r#"{"t":"kvm.take","v":1,"edgeAt":0.25}"#;
+        let pkt: WireMessage = serde_json::from_str(json).expect("deserialize legacy take");
+        assert_eq!(pkt.route, None, "a route-less take behaves as the oldest route");
+        assert_eq!(pkt.mouse, None, "mouse defaults to wanted");
+        assert_eq!(pkt.keyboard, None, "keyboard defaults to wanted");
+        assert_eq!(pkt.to, None);
+        assert_eq!(pkt.via, None);
+        assert_eq!(pkt.edge_at, Some(0.25));
     }
 
     #[test]

@@ -1,5 +1,12 @@
 # Multi-device
 
+> **GlideDesk status (2026-11).** The mesh is always loaded and stays *dormant* until a second device
+> connects: with one device nothing changes on the wire, in the navigation or in behaviour, and there
+> is no switch and no restart. It activates on the second connection. The "off by default, restart to
+> switch" model described below is the reference's, not this app's; the rest of this page still
+> describes the rules the mesh must keep. Implementation: `src-tauri/src/mesh/`, specification:
+> `specs/001-multi-device-mesh/`.
+
 GlideDesk is designed with full multi-device mesh continuity: many computers
 and phones connected at once, one clipboard and one notification pool for all of them, each screen edge
 leading to a different device, a phone and a computer connected at the same time.

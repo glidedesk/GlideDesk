@@ -18,6 +18,7 @@ mod pairsync;
 mod fastfile;
 mod fileclip;
 mod media;
+mod mesh;
 mod network;
 mod notifications;
 mod pairlimit;
@@ -209,7 +210,6 @@ fn main() {
             commands::set_monitor,
             commands::copy_history,
             commands::clear_history,
-            commands::set_multi,
             commands::skip_setup,
             commands::confirm_code,
             commands::cancel_pair,

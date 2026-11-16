@@ -1,8 +1,10 @@
 // GlideDesk — Copyright (C) 2026 GlideDesk Contributors. GPL-3.0, see LICENSE.
-// Multi-device (Mesh mode, beta) in the one-to-one app: the picture of a mesh on its tab, and the popup
-// before it's turned on, which says it's in beta (docs/multi-device.md).
+// Multi-device (Mesh mode, beta) in the one-to-one app: the picture of a mesh on its tab
+// (docs/multi-device.md).
 //   MeshIntro.art()                 -> an element: devices, each one linked to every other
-//   MeshIntro.confirm(onTurnOn)     -> the popup (styled as pairpop.js's .pair-pop); Turn on calls onTurnOn
+//
+// There is no "turn it on" popup any more: the mesh is always loaded and stays dormant until a
+// second device connects, so there is nothing to confirm and nothing to restart.
 (function () {
   // Each device: [kind, x, y]. Lines join every pair, as the mesh does.
   const NODES = [['monitor', 110, 78], ['laptop', 320, 46], ['monitor', 530, 84], ['phone', 214, 196], ['laptop', 430, 200]];
@@ -32,49 +34,5 @@
     return wrap;
   }
 
-  // Said before it's turned on: it's in beta, and with two devices the one-to-one app is the one to use.
-  function confirm(onTurnOn) {
-    const el = (tag, cls, text) => {
-      const e = document.createElement(tag);
-      if (cls) e.className = cls;
-      if (text) e.textContent = text;
-      return e;
-    };
-
-    const pop = el('div', 'pair-pop mesh-pop');
-    pop.setAttribute('role', 'dialog');
-    pop.setAttribute('aria-modal', 'true');
-    const body = el('div', 'pop-body');
-    const title = el('strong', '', 'Turn on Multi-device? ');
-    title.append(el('span', 'pill beta', 'Mesh · Beta'));
-    body.append(
-      title,
-      el('p', '', 'Mesh mode is still in beta, and you may run into some issues with it.'),
-      el('p', '', 'If you connect only two devices, keep it off.'),
-      el('div', 'hint', 'GlideDesk restarts when you turn it on or off.'),
-    );
-    const cancel = el('button', 'btn', 'Cancel');
-    const ok = el('button', 'btn primary', 'Turn on');
-    const actions = el('div', 'banner-actions');
-    actions.append(cancel, ok);
-    pop.append(body, actions);
-
-    const close = () => {
-      document.removeEventListener('keydown', onKey, true);
-      pop.remove();
-    };
-    function onKey(e) {
-      if (e.key === 'Escape') close();
-    }
-    cancel.onclick = close;
-    ok.onclick = () => {
-      close();
-      onTurnOn();
-    };
-    document.addEventListener('keydown', onKey, true);
-    document.body.append(pop);
-    ok.focus();
-  }
-
-  window.MeshIntro = { art, confirm };
+  window.MeshIntro = { art };
 })();

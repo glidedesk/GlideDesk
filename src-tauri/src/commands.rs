@@ -1236,17 +1236,6 @@ pub fn clear_history(state: State<'_, AppState>, app: AppHandle) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn set_multi(on: bool, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    log::info!("Setting multi-device mesh mode: enabled={}", on);
-    {
-        let mut s = state.inner.write();
-        s.multi.enabled = on;
-    }
-    push_state(&app, &state);
-    Ok(())
-}
-
-#[tauri::command]
 pub fn skip_setup(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     log::info!("Skipping setup onboarding dialog");
     {

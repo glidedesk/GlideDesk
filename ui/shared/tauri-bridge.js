@@ -173,7 +173,6 @@
     copyHistory: (index) => invoke('copy_history', { index }),
     clearHistory: () => invoke('clear_history'),
     setTab: (tab) => invoke('set_tab', { tab }),
-    setMulti: (on) => invoke('set_multi', { on }),
     setAudio: (partial) => invoke('set_app', { partial: { audio: partial || {} } }).catch(() => {}),
     setFiles: (partial) => invoke('set_app', { partial: { files: partial || {} } }).catch(() => {}),
     setNotifs: (partial) => invoke('set_app', { partial: { notifs: partial || {} } }).catch(() => {}),

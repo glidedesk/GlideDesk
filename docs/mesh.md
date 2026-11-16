@@ -3,9 +3,12 @@
 Status: design for the mesh work (see the pull request that adds it). Written to be implemented in
 slices, each with tests, without changing what a two-device setup does today.
 
-In GlideDesk the mesh runs only with Multi-device switched on, beside the one-to-one code and not in
-place of it: see [multi-device.md](multi-device.md). The Windows files named below (`hub.js`,
-`server.js`, `kvm.js`, …) are the ones in `windows/mesh/`.
+In GlideDesk the mesh is always loaded and stays **dormant** until a second device connects: with one
+device nothing changes on the wire, in the navigation or in behaviour, and there is no switch and no
+restart. It activates on the second connection. The implementation is Rust
+(`src-tauri/src/mesh/`); the JavaScript files named below are the reference this was ported from and
+stay the executable specification. See [multi-device.md](multi-device.md) for the person-facing
+description.
 
 ## Goals
 

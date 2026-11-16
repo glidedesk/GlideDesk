@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::net::UdpSocket;
 use std::sync::Arc;
 
+use crate::mesh::{MeshSession, MeshState, Role};
+
 fn default_true() -> bool {
     true
 }
@@ -1137,22 +1139,6 @@ impl Default for SetupState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultiState {
-    pub enabled: bool,
-    #[serde(default)]
-    pub mode: String,
-}
-
-impl Default for MultiState {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            mode: "mesh".to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateDownload {
     pub name: String,
     pub url: String,
@@ -1716,8 +1702,10 @@ pub struct FullState {
     pub mount: MountState,
     #[serde(default)]
     pub setup: SetupState,
+    /// Multi-device mesh: which devices are connected, and who is driving whom.
+    /// Dormant (and invisible) until two devices are connected (docs/mesh.md).
     #[serde(default)]
-    pub multi: MultiState,
+    pub mesh: MeshState,
     #[serde(default)]
     pub camera: CameraState,
     #[serde(default)]
@@ -1742,6 +1730,23 @@ pub struct FullState {
     pub peer_fingerprints: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub startup: bool,
+}
+
+/// Record a device that has just connected in the mesh registry.
+///
+/// The mesh is dormant until two devices are connected, so this runs for the single peer too:
+/// the registry is what decides dormancy. Nothing on the wire changes while it holds one entry.
+fn note_session_connected(s: &mut FullState, c: &PeerInfo) {
+    let now = crate::mesh::session::now_ms();
+    let mut sess = MeshSession::connected(&c.id, &c.name, &c.os, c.address.clone(), now);
+    // A reconnect keeps what the previous session learned about the peer's capabilities: it is
+    // the same device, and re-learning them costs a round trip nothing here needs.
+    if let Some((mesh, pool)) = s.mesh.session(&c.id).map(|o| (o.mesh, o.pool)) {
+        sess.mesh = mesh;
+        sess.pool = pool;
+    }
+    let self_id = s.about.pc.host.to_lowercase();
+    s.mesh.upsert(sess, &self_id);
 }
 
 #[derive(Clone)]
@@ -1819,7 +1824,7 @@ impl AppState {
             mac_apps: MacAppsState::default(),
             mount: MountState::default(),
             setup: SetupState::default(),
-            multi: MultiState::default(),
+            mesh: MeshState::default(),
             camera: CameraState::default(),
             vcam: VcamState::default(),
             remote: RemoteState::default(),
@@ -2016,33 +2021,43 @@ impl AppState {
     pub fn set_client(&self, client: Option<PeerInfo>) {
         let mut s = self.inner.write();
         s.pairing = None;
-        s.client = client.clone();
-        if let Some(c) = client {
-            s.peer = Some(c.clone());
-            let fp = s.peer_fingerprints.get(&c.id).cloned();
-            // A live client only fills in who is here; it must never overwrite a pairing
-            // (that would throw away its token and leave the pair unable to reconnect).
-            if s.paired.is_none() {
-                s.paired = Some(PairedPeer {
-                    mac_id: c.id.clone(),
-                    mac_name: c.name.clone(),
-                    os: c.os.clone(),
-                    address: c.address.clone(),
-                    token: None,
-                    tls_fingerprint: fp,
-                });
+        match client {
+            Some(c) => {
+                s.client = Some(c.clone());
+                s.peer = Some(c.clone());
+                let fp = s.peer_fingerprints.get(&c.id).cloned();
+                // A live client only fills in who is here; it must never overwrite a pairing
+                // (that would throw away its token and leave the pair unable to reconnect).
+                if s.paired.is_none() {
+                    s.paired = Some(PairedPeer {
+                        mac_id: c.id.clone(),
+                        mac_name: c.name.clone(),
+                        os: c.os.clone(),
+                        address: c.address.clone(),
+                        token: None,
+                        tls_fingerprint: fp,
+                    });
+                }
+                s.link.state = "connected".to_string();
+                s.link.mac_name = Some(c.name.clone());
+                s.link.peer_name = Some(c.name.clone());
+                if !s.clients.iter().any(|p| p.id == c.id) {
+                    s.clients.push(c.clone());
+                }
+                note_session_connected(&mut s, &c);
             }
-            s.link.state = "connected".to_string();
-            s.link.mac_name = Some(c.name.clone());
-            s.link.peer_name = Some(c.name.clone());
-            if !s.clients.iter().any(|p| p.id == c.id) {
-                s.clients.push(c);
+            None => {
+                s.peer = None;
+                s.client = None;
+                // The pairing stays: a disconnect is not a "forget".
+                s.link = LinkState::default();
+                s.clients.clear();
+                s.mesh.clear_partner();
+                s.mesh.sessions.clear();
+                s.mesh.refresh_active();
+                s.input = "home".to_string();
+                s.kvm_state.mode = "home".to_string();
             }
-        } else {
-            s.peer = None;
-            // The pairing stays: a disconnect is not a "forget".
-            s.link = LinkState::default();
-            s.clients.clear();
         }
     }
 
@@ -2054,27 +2069,45 @@ impl AppState {
     pub fn add_client(&self, client: PeerInfo) {
         let mut s = self.inner.write();
         s.pairing = None;
-        s.client = Some(client.clone());
-        s.peer = Some(client.clone());
         if let Some(ref mut p) = s.paired {
             if p.mac_id.eq_ignore_ascii_case(&client.id) {
                 p.address = client.address.clone();
             }
         }
-        s.link.state = "connected".to_string();
-        s.link.mac_name = Some(client.name.clone());
-        s.link.peer_name = Some(client.name.clone());
-
         if let Some(pos) = s.clients.iter().position(|p| p.id == client.id) {
-            s.clients[pos] = client;
+            s.clients[pos] = client.clone();
         } else {
-            s.clients.push(client);
+            s.clients.push(client.clone());
+        }
+        note_session_connected(&mut s, &client);
+        // The device this one is driving (or driven by) stays in front, so every existing page
+        // that reads `client`/`peer` keeps pointing at the device the person is actually using.
+        if let Some(pid) = s.mesh.partner.clone() {
+            if let Some(p) = s.clients.iter().find(|p| p.id == pid).cloned() {
+                s.client = Some(p.clone());
+                s.peer = Some(p);
+            }
+        } else {
+            s.client = Some(client.clone());
+            s.peer = Some(client);
+        }
+        s.link.state = "connected".to_string();
+        let shown = s.client.as_ref().map(|p| p.name.clone());
+        if let Some(name) = shown {
+            s.link.mac_name = Some(name.clone());
+            s.link.peer_name = Some(name);
         }
     }
 
     pub fn remove_client(&self, client_id: &str) {
         let mut s = self.inner.write();
         s.clients.retain(|p| p.id != client_id && p.address.as_deref() != Some(client_id));
+        s.mesh.remove(client_id);
+        // Nobody drives or is driven once the device holding the role has gone.
+        if s.mesh.partner.is_none() && s.input != "home" {
+            s.input = "home".to_string();
+            s.kvm_state.mode = "home".to_string();
+        }
         let match_target = |p: &PeerInfo| -> bool {
             p.id == client_id || p.address.as_deref() == Some(client_id)
         };
@@ -2094,6 +2127,62 @@ impl AppState {
             }
         }
     }
+
+    /// True once two or more devices are connected: the mesh is no longer dormant.
+    pub fn mesh_active(&self) -> bool {
+        self.inner.read().mesh.active
+    }
+
+    /// This device's id, as it appears on the wire (the host name, lowercased).
+    pub fn local_id(&self) -> String {
+        self.inner.read().about.pc.host.to_lowercase()
+    }
+
+    /// The device the pointer is with, as the peer the existing pages expect.
+    ///
+    /// This is the mesh-aware replacement for "the other computer": the partner if a handover is
+    /// in progress, else the single connected device, else the first one connected. With one
+    /// device it is exactly what `client` was before the mesh existed.
+    pub fn partner(&self) -> Option<PeerInfo> {
+        let s = self.inner.read();
+        s.mesh
+            .partner_id()
+            .and_then(|id| s.clients.iter().find(|p| p.id == id).cloned())
+            .or_else(|| s.clients.first().cloned())
+    }
+
+    /// Record why a crossing or a copy did not happen, for the page to show (`FR-023`).
+    pub fn note_refusal(&self, device: &str, why: &str) {
+        self.inner.write().mesh.refusal(device, why);
+    }
+
+    /// Hand the pointer (and keyboard) to `id`, or take it back with `None`.
+    pub fn set_mesh_partner(&self, id: Option<&str>, role: Role) -> bool {
+        let mut s = self.inner.write();
+        let ok = match id {
+            Some(id) => s.mesh.set_partner(id, role),
+            None => {
+                s.mesh.clear_partner();
+                true
+            }
+        };
+        let mode = s.mesh.role.clone();
+        s.input = mode.clone();
+        s.kvm_state.mode = mode;
+        ok
+    }
+
+    /// The next handover route, monotonic on this machine.
+    pub fn next_mesh_route(&self) -> u64 {
+        let mut s = self.inner.write();
+        s.mesh.route += 1;
+        s.mesh.route
+    }
+
+    pub fn mesh_route(&self) -> u64 {
+        self.inner.read().mesh.route
+    }
+
 
     pub fn get_peer_fingerprint(&self, peer_id: &str) -> Option<String> {
         let s = self.inner.read();
@@ -2464,6 +2553,148 @@ mod tests {
         assert_eq!(snap3.clients.len(), 0);
         assert_eq!(snap3.link.state, "disconnected");
         assert!(snap3.peer.is_none());
+    }
+
+    fn peer(id: &str, address: &str) -> PeerInfo {
+        PeerInfo {
+            id: id.to_string(),
+            name: id.to_uppercase(),
+            os: "win".to_string(),
+            address: Some(address.to_string()),
+            port: Some(47800),
+            last_seen: None,
+            invited: None,
+        }
+    }
+
+    #[test]
+    fn mesh_is_dormant_with_one_device_and_activates_on_the_second() {
+        let app_state = AppState::new();
+        assert!(!app_state.mesh_active(), "no device: dormant");
+        assert!(app_state.snapshot().mesh.sessions.is_empty());
+
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        let one = app_state.snapshot();
+        assert!(!app_state.mesh_active(), "one device is the two-device app");
+        assert_eq!(one.mesh.sessions.len(), 1);
+        assert_eq!(one.mesh.sessions[0].id, "desktop");
+        assert_eq!(one.mesh.role, "home");
+        assert_eq!(one.client.as_ref().map(|p| p.id.as_str()), Some("desktop"));
+
+        app_state.add_client(peer("laptop", "192.168.4.12"));
+        let two = app_state.snapshot();
+        assert!(app_state.mesh_active(), "two devices activate the mesh");
+        assert_eq!(two.mesh.active, true);
+        assert_eq!(two.mesh.sessions.len(), 2);
+        assert_eq!(two.clients.len(), 2, "the previous view still lists every device");
+
+        // Losing one goes back to the dormant state, with the other still connected.
+        app_state.remove_client("laptop");
+        let back = app_state.snapshot();
+        assert!(!app_state.mesh_active());
+        assert_eq!(back.mesh.sessions.len(), 1);
+        assert_eq!(back.link.state, "connected");
+    }
+
+    #[test]
+    fn activating_the_mesh_changes_no_setting() {
+        // FR-004: turning the mesh on (a second device appearing) must not touch anything the
+        // person chose. Compare the whole settings surface before and after.
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        let before = app_state.snapshot();
+        app_state.add_client(peer("laptop", "192.168.4.12"));
+        let after = app_state.snapshot();
+
+        // Compare what the pages actually see, so a change anywhere in these settings fails.
+        let settings = |s: &FullState| {
+            let v = serde_json::to_value(s).expect("serialize state");
+            (
+                v["kvm"].clone(),
+                v["clipboard"].clone(),
+                v["net"].clone(),
+                v["layout"].clone(),
+                v["input"].clone(),
+                v["paired"].clone(),
+                v["activeTab"].clone(),
+            )
+        };
+        assert_eq!(settings(&before), settings(&after));
+
+        app_state.remove_client("laptop");
+        let back = app_state.snapshot();
+        assert_eq!(settings(&before), settings(&back));
+    }
+
+    #[test]
+    fn the_mesh_payload_has_every_field_the_page_reads() {
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        let json = serde_json::to_value(app_state.snapshot()).expect("serialize state");
+        let mesh = json.get("mesh").expect("the state carries a mesh payload");
+        for key in ["active", "partner", "role", "route", "lastRefusal", "sessions"] {
+            assert!(mesh.get(key).is_some(), "mesh.{} must be present", key);
+        }
+        let session = &mesh["sessions"][0];
+        for key in ["id", "name", "os", "address", "mesh", "pool", "role", "route", "connectedAt", "lastSeen"] {
+            assert!(session.get(key).is_some(), "mesh.sessions[].{} must be present", key);
+        }
+        assert_eq!(session["role"], "idle");
+        assert_eq!(session["pool"], true);
+    }
+
+    #[test]
+    fn a_handover_puts_the_partner_in_front_and_losing_it_returns_home() {
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        app_state.add_client(peer("laptop", "192.168.4.12"));
+
+        assert!(app_state.set_mesh_partner(Some("laptop"), Role::Driving));
+        let snap = app_state.snapshot();
+        assert_eq!(snap.mesh.partner.as_deref(), Some("laptop"));
+        assert_eq!(snap.mesh.role, "driving");
+        assert_eq!(snap.input, "driving", "the machine-level mode follows the handover");
+        assert_eq!(snap.kvm_state.mode, "driving");
+        assert_eq!(snap.client.as_ref().map(|p| p.id.as_str()), Some("laptop"));
+
+        // The device we were driving goes away: nobody drives anything.
+        app_state.remove_client("laptop");
+        let gone = app_state.snapshot();
+        assert!(gone.mesh.partner.is_none());
+        assert_eq!(gone.mesh.role, "home");
+        assert_eq!(gone.input, "home");
+        assert_eq!(gone.kvm_state.mode, "home");
+    }
+
+    #[test]
+    fn an_explicit_disconnect_clears_the_mesh() {
+        let app_state = AppState::new();
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        app_state.add_client(peer("laptop", "192.168.4.12"));
+        app_state.set_mesh_partner(Some("laptop"), Role::Driven);
+        assert_eq!(app_state.snapshot().input, "driven");
+
+        app_state.set_client(None);
+        let snap = app_state.snapshot();
+        assert!(snap.mesh.sessions.is_empty());
+        assert!(snap.mesh.partner.is_none());
+        assert_eq!(snap.input, "home");
+        assert!(!app_state.mesh_active());
+    }
+
+    #[test]
+    fn the_partner_helper_prefers_the_handover_target() {
+        let app_state = AppState::new();
+        assert!(app_state.partner().is_none());
+        app_state.add_client(peer("desktop", "192.168.4.11"));
+        assert_eq!(app_state.partner().map(|p| p.id), Some("desktop".to_string()));
+        app_state.add_client(peer("laptop", "192.168.4.12"));
+        app_state.set_mesh_partner(Some("laptop"), Role::Driving);
+        assert_eq!(
+            app_state.partner().map(|p| p.id),
+            Some("laptop".to_string()),
+            "with two devices the pointer's device wins over whichever connected last"
+        );
     }
 
     #[test]
